@@ -1,0 +1,16 @@
+# Normalise line endings to LF in the repository (Go convention), regardless of
+# the contributor's OS. Prevents CRLF churn on Windows checkouts.
+* text=auto eol=lf
+
+# Treat binary assets as binary (no EOL conversion, no diff).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+*.tiff binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.zip binary

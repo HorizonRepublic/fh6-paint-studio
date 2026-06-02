@@ -1,0 +1,68 @@
+# ── Binaries & build output ─────────────────────────────────────────────────
+/bin/
+/bin-temp/
+/release/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.lib
+*.exp
+*.spv
+
+# ── Go ──────────────────────────────────────────────────────────────────────
+# Test binary built with `go test -c`, plus coverage & profiling output
+*.test
+*.out
+*.prof
+coverage.*
+# Go workspace files (per-machine)
+go.work
+go.work.sum
+# Environment files
+.env
+.env.*
+!.env.example
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+*.log
+
+# ── Project working directories (local only, not published) ─────────────────
+/debug/
+/_reference/
+/docs/
+/checkpoints/
+/out/
+/milestones/
+
+# ── Editor & tooling state (local, not published) ───────────────────────────
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.cursor/
+.cursorrules
+.cursorignore
+.aider*
+.gemini/
+.codeium/
+.windsurf/
+.continue/
+.github/copilot-instructions.md
+
+# ── OS cruft ─────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+desktop.ini

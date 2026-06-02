@@ -1,0 +1,174 @@
+package ui
+
+import (
+	"image"
+	"image/color"
+
+	"gioui.org/io/pointer"
+	"gioui.org/layout"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
+	"gioui.org/unit"
+	"gioui.org/widget"
+	"gioui.org/widget/material"
+)
+
+// Layout renders the whole window: top bar, the 3-column body, and the bottom status bar.
+// The main loop calls this each frame with full-window constraints.
+func (s *AppState) Layout(gtx C) D {
+	th := s.Th
+	paint.Fill(gtx.Ops, th.Bg)
+	dims := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(s.topBar),
+		layout.Flexed(1, func(gtx C) D {
+			if s.View == ViewLibrary {
+				return s.libraryScreen(gtx)
+			}
+			return s.bodyRow(gtx)
+		}),
+		layout.Rigid(s.statusBar),
+	)
+	if s.LightboxOn { // drawn last so the full-image overlay sits on top of everything
+		s.lightboxOverlay(gtx)
+	}
+	return dims
+}
+
+// lightboxOverlay draws a dimmed full-window scrim with the selected library preview centred. The
+// whole surface is a click target (LightboxClose) so a click anywhere dismisses it.
+func (s *AppState) lightboxOverlay(gtx C) D {
+	return s.LightboxClose.Layout(gtx, func(gtx C) D {
+		sz := gtx.Constraints.Max
+		paint.FillShape(gtx.Ops, color.NRGBA{A: 224}, clip.Rect{Max: sz}.Op())
+		pointer.CursorPointer.Add(gtx.Ops) // whole overlay is click-to-dismiss
+		if (s.LightboxOp != paint.ImageOp{}) {
+			gtx.Constraints.Min = sz
+			layout.UniformInset(unit.Dp(32)).Layout(gtx, func(gtx C) D {
+				return widget.Image{Src: s.LightboxOp, Fit: widget.Contain, Position: layout.Center}.Layout(gtx)
+			})
+		}
+		return D{Size: sz}
+	})
+}
+
+func (s *AppState) topBar(gtx C) D {
+	th := s.Th
+	return layout.Background{}.Layout(gtx,
+		func(gtx C) D {
+			sz := gtx.Constraints.Min
+			paint.FillShape(gtx.Ops, th.Surface, clip.Rect{Max: sz}.Op())
+			paint.FillShape(gtx.Ops, th.Border, clip.Rect{Min: image.Pt(0, sz.Y-1), Max: sz}.Op())
+			return D{Size: sz}
+		},
+		func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return layout.UniformInset(12).Layout(gtx, func(gtx C) D {
+				children := []layout.FlexChild{
+					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 18, "◣  FH6 Paint Studio", th.Accent) }),
+					layout.Rigid(GapH(16).Layout),
+					layout.Rigid(s.viewTabs),
+					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Max.X, 0)} }),
+				}
+				if !s.Elevated {
+					children = append(children,
+						layout.Rigid(func(gtx C) D { return s.adminButton(gtx) }),
+						layout.Rigid(GapH(10).Layout),
+					)
+				}
+				children = append(children, layout.Rigid(func(gtx C) D { return th.Dim(gtx, "shape engine · CUDA") }))
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
+			})
+		},
+	)
+}
+
+// viewTabs is the Studio/Library segmented switcher in the top bar.
+func (s *AppState) viewTabs(gtx C) D {
+	th := s.Th
+	tab := func(btn *widget.Clickable, label string, active bool) layout.FlexChild {
+		return layout.Rigid(func(gtx C) D {
+			return material.Clickable(gtx, btn, func(gtx C) D {
+				col, txt := th.Surface, th.TextDim
+				if active {
+					col, txt = th.Accent, th.Bg
+				}
+				return layout.Background{}.Layout(gtx,
+					func(gtx C) D { fillRRect(gtx, col, gtx.Constraints.Min, 8); return D{Size: gtx.Constraints.Min} },
+					func(gtx C) D {
+						return layout.UniformInset(8).Layout(gtx, func(gtx C) D { return th.Lbl(gtx, 13, label, txt) })
+					},
+				)
+			})
+		})
+	}
+	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+		tab(&s.StudioTab, "Studio", s.View == ViewStudio),
+		layout.Rigid(GapH(6).Layout),
+		tab(&s.LibraryTab, "Library", s.View == ViewLibrary),
+	)
+}
+
+// bodyRow lays out the three columns with fixed-width sides and a flexed center, each
+// forced to fill the available height.
+func (s *AppState) bodyRow(gtx C) D {
+	return layout.UniformInset(12).Layout(gtx, func(gtx C) D {
+		fillH := func(w layout.Widget) layout.Widget {
+			return func(gtx C) D {
+				gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
+				return w(gtx)
+			}
+		}
+		fixed := func(dp unit.Dp, w layout.Widget) layout.Widget {
+			return func(gtx C) D {
+				px := gtx.Dp(dp)
+				gtx.Constraints.Min.X, gtx.Constraints.Max.X = px, px
+				gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
+				return w(gtx)
+			}
+		}
+		return layout.Flex{}.Layout(gtx,
+			layout.Rigid(fixed(320, s.sourcePanel)),
+			layout.Rigid(GapH(12).Layout),
+			layout.Flexed(1, fillH(s.centerPanel)),
+			layout.Rigid(GapH(12).Layout),
+			layout.Rigid(fixed(300, s.runPanel)),
+		)
+	})
+}
+
+func (s *AppState) centerPanel(gtx C) D {
+	th := s.Th
+	gtx.Constraints.Min = gtx.Constraints.Max
+	return th.Card(gtx, func(gtx C) D {
+		gtx.Constraints.Min = gtx.Constraints.Max
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Flexed(1, func(gtx C) D {
+				gtx.Constraints.Min = gtx.Constraints.Max
+				return s.previewArea(gtx)
+			}),
+			layout.Rigid(s.cropBar),
+			layout.Rigid(s.wipeBar),
+		)
+	})
+}
+
+// wipeBar is the before/after slider shown under the preview once a reconstruction exists.
+func (s *AppState) wipeBar(gtx C) D {
+	th := s.Th
+	// Hidden without a reconstruction, and while the crop tool is active (it owns the pointer + bottom
+	// bar). After a crop is applied the source IS the crop, so the wipe works on it as a normal image.
+	if s.Preview == nil || s.CropMode {
+		return D{}
+	}
+	return layout.Inset{Top: 10}.Layout(gtx, func(gtx C) D {
+		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx C) D { return th.Dim(gtx, "before") }),
+			layout.Flexed(1, func(gtx C) D {
+				sl := material.Slider(th.M, &s.Wipe)
+				sl.Color = th.Accent
+				return layout.Inset{Left: 10, Right: 10}.Layout(gtx, sl.Layout)
+			}),
+			layout.Rigid(func(gtx C) D { return th.Dim(gtx, "after") }),
+		)
+	})
+}
