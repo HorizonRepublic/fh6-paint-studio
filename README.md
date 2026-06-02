@@ -1,125 +1,70 @@
 # FH6 Paint Studio
 
-Turn any image into a **Forza Horizon 6 vinyl livery**. FH6 Paint Studio reconstructs a photo or
-piece of art as a few thousand simple coloured shapes (ellipses, triangles, rectangles) — exactly
-the kind of "layers" the in-game Vinyl Group Editor stacks — so you can recreate artwork the editor
-could never let you draw by hand.
+Turn any image into a **Forza Horizon vinyl livery**. FH6 Paint Studio rebuilds your photo or artwork
+out of a few thousand simple coloured shapes — exactly the "layers" the in-game Vinyl Group Editor
+stacks — and can inject the finished result straight into the game.
 
-It greedily places the shapes that best match your image, then runs a GPU **joint polish** that
-nudges every shape's position, size, rotation and colour together to sharpen the result. The output
-is a livery you can export or inject straight into a running game.
+**[Download the latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases)**
 
----
+![FH6 Paint Studio reconstructing a photo](assets/cat/app-in-progress.png)
 
-## Quick start
+See it end to end: [source photo](assets/cat/source.jpg) → [generated reconstruction](assets/cat/generated.jpg) → [on the car in-game](assets/cat/car.jpg) · also: [the Library tab](assets/cat/app-in-lib.png)
 
-You need **[Go 1.26+](https://go.dev/dl/)**. The default build is pure Go — nothing else required.
-
-```powershell
-# Windows
-.\build.ps1            # builds bin\fh6-paint-studio.exe (GUI) + bin\fh6paint.exe (CLI)
-```
-```sh
-# Linux / macOS
-./build.sh             # builds bin/fh6-paint-studio (GUI) + bin/fh6paint (CLI)
-```
-
-Then launch the studio:
-
-```
-bin/fh6-paint-studio
-```
-
-> Want maximum speed on an NVIDIA GPU? See **[Building with CUDA](#building-with-cuda)**. The pure-Go
-> build works everywhere and needs no GPU; CUDA just makes generation much faster.
+> **Requirements:** Windows + an **NVIDIA GPU with CUDA cores** — the engine is GPU-accelerated.
+> AMD/Vulkan support may come later.
 
 ---
 
-## Using the Studio
+## How to use it
 
-1. **Open an image** — click the big drop area (or *Open image…*). Optionally drag a **crop box** to
-   reconstruct just one region (e.g. a face) at full detail.
-2. **Pick a preset and budget** — *anime*, *photo* or *flat*, and how many shapes to spend
-   (up to 3000, the editor's per-group cap). Higher budget = more detail.
-3. **Generate** — watch the reconstruction build live, with a before/after wipe over the source.
-   Click **Zoom** to inspect the result full-screen.
-4. **Keep it** — every finished run is auto-saved to your **Library**
-   (`~/FH6PaintStudio/library`), where you can re-open, rename, re-export or re-inject it later
-   without regenerating.
-5. **Export or inject** — save the geometry as JSON, or inject it directly into a running game
-   (see below).
+### 1. Get the app
+Download the [latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases), unzip it
+(you get **two files** — keep them in the same folder), and run **`fh6-paint-studio.exe`**.
 
-## Using the CLI
+### 2. Make a livery
+1. **Open any image** you like — a photo, a logo, some art, whatever caught your eye.
+   - The defaults are tuned to look good, so you can just leave everything as-is. Tweak the **preset**
+     (anime / photo / flat) or the **shape budget** only if you want to.
+   - For the cleanest result, use an image with a **transparent background**. A normal (opaque)
+     background works too — the engine will just spend some shapes filling the background instead of
+     your subject.
+2. *(Optional)* **Crop** — drag a box over a region (e.g. a face) to spend the whole shape budget on
+   the detail you care about.
+3. Click **Generate** and wait for it to finish.
+4. Your result is auto-saved to the **Library** tab.
 
-For batch or scripted use:
+### 3. Put it on your car (in Forza Horizon)
+5. In the game's **Vinyl Group Editor**, create a group containing **N shapes** — where N is **at least
+   as many shapes as your generation has** (more is fine). They can be any shapes; they're just
+   placeholders the app overwrites. *Tip:* build a placeholder template once, save it, then re-import
+   it and hit **Ungroup** whenever you need a fresh canvas.
+6. Back in **FH6 Paint Studio → Library**, set the **FH6 layers** count, then click **Inject into FH6**.
+   - If nothing happens, **run the app as administrator** (memory injection needs it — there's a
+     *Run as admin* button in the app).
+7. **Save the vinyl in-game — this step is required.** Right after injecting it may look rough or
+   incomplete: the editor doesn't redraw every shape until the vinyl is **saved and reloaded**. Save
+   it, reopen it, and it renders correctly — then apply it to your car.
 
-```sh
-fh6paint -input photo.jpg -mode anime -shapes 3000 \
-         -output out/photo.forza.json -preview out/photo.png
-```
+### Shape budgets
+Forza gives you **1000 shapes per bumper** and **3000 for every other panel** (side, roof, hood,
+doors…). Match your budget to the panel you're decorating.
 
-`-mode` picks a content preset (`anime` | `photo` | `flat`) and `-shapes` is the budget (≤3000).
-Run `fh6paint -h` for the full flag set.
-
-## Injecting into Forza Horizon 6
-
-From the Library, set your in-game template's **layer count**, then **Inject into FH6**.
-
-> **How it works:** injection writes shape data into a running Forza Horizon 6 process
-> (**Windows-only**, usually needs **administrator**). First load a placeholder template in the
-> Vinyl Group Editor and ungroup it; inject with the exact template layer count; then **save the
-> vinyl and reload it in-game** so the editor re-derives every layer's mesh.
->
-> Writing to another process's memory may violate the game's terms of service and could be flagged
-> by anti-cheat. It is provided for personal, offline use — **use it at your own risk.** Generation,
-> preview and JSON export never touch the game.
+> Injection writes into a running game process and may violate the game's terms of service / be
+> flagged by anti-cheat. It's for personal, offline use — **use it at your own risk.** Generating and
+> exporting never touch the game.
 
 ---
 
-## Building with CUDA
+## Roadmap
 
-The GPU backend is a self-contained `fh6cuda.dll` (compiled from
-`internal/backend/cuda/shim.cu` with `nvcc` + MSVC) that is loaded at runtime — no cgo.
+- **Bulk processing** — reconstruct a whole folder of images in one run.
+- **Vulkan backend** — GPU acceleration for AMD cards (NVIDIA-only for now).
 
-```powershell
-.\build.ps1 -Cuda          # compiles fh6cuda.dll, then builds both apps with -tags cuda
-```
+## Build from source
 
-For a redistributable build, `build-cuda-fat.ps1` compiles a **multi-arch fat** `fh6cuda.dll` with a
-**portable CUDA 12.8 toolkit** (no admin install — merge the `cuda_nvcc` + `cuda_cudart` + `cuda_cccl`
-redist archives into one directory and pass it via `-Toolkit <dir>` or the `CUDA_TOOLKIT` env var).
-CUDA 12.8 spans `sm_61` (Pascal, GTX 10xx) through `sm_120` (Blackwell, RTX 50xx). For first-time
-Windows toolchain setup (Go + CUDA + MSVC), see `setup-windows.ps1`.
-
-You can also build a single target by hand:
-
-```sh
-go build ./cmd/fh6paint     # CLI
-go build ./cmd/studio       # desktop GUI (CGO-free; Gio renders on the GPU)
-```
-
-## How it works
-
-A **from-scratch Go + CUDA engine** (not a fork of existing tools). The CPU backend is a pure-Go
-reference implementation; the CUDA backend mirrors it kernel-for-kernel and is verified against it.
-
-```
-cmd/fh6paint      CLI
-cmd/studio        desktop GUI (Gio)
-internal/engine   greedy placement loop + differentiable polish
-internal/backend  Backend interface — cpu (reference) + cuda (build-tagged)
-internal/model    shape model + importer-compatible geometry JSON
-internal/raster   per-primitive rasterisation / inside-tests
-internal/metric   edge-weight / saliency maps, content classification
-internal/preset   content presets — the single source of truth for tuned defaults
-internal/imageio  load / downscale / render (incl. the in-game-faithful RenderFH6)
-internal/inject   the Forza Horizon 6 livery-editor injector (Windows)
-internal/library  on-disk library of saved generations
-internal/ui       Studio widgets / theme / panels
-internal/runner   drives the engine off the UI goroutine
-```
-
-Run the tests with `go test ./...`.
+Needs [Go 1.26+](https://go.dev/dl/). For the CPU build, run `.\build.ps1` (Windows) or `./build.sh`
+(Linux/macOS); `.\build.ps1 -Cuda` adds the GPU DLL. First-time Windows toolchain setup (Go + CUDA +
+MSVC) is in `setup-windows.ps1`. Run the tests with `go test ./...`.
 
 ## License
 
