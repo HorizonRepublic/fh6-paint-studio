@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # release-please maintains a "release PR" that accumulates the changelog + version bump from
+  # conventional commits. Merging that PR tags the release and creates the GitHub Release; this job
+  # then reports release_created/tag_name so the artifact job can build + attach the binaries.
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Built only when a release was just created. Produces the 2-file release (GUI exe + fat multi-arch
+  # CUDA DLL), zips it, and attaches it to the GitHub Release. The DLL is compiled here — no manual
+  # step: MSVC is preinstalled on windows-latest and the CUDA 12.8 toolkit is installed on the fly.
+  release-artifacts:
+    name: Build & attach Windows release
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Put cl.exe on PATH so nvcc can find the host compiler (build-cuda-fat.ps1 skips its own
+      # vcvars import when cl is already available).
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+      # CUDA 12.8 is required for the sm_120 (Blackwell) SASS in the fat DLL. shim.cu only needs the
+      # core runtime headers (cuda_runtime.h / cuda_fp16.h), so nvcc + cudart is enough — no CUB/cccl.
+      - name: Install CUDA 12.8 toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        id: cuda
+        with:
+          cuda: "12.8.1"
+          sub-packages: '["nvcc", "cudart"]'
+          method: "network"
+      - name: Build release (fat CUDA DLL + GUI)
+        shell: pwsh
+        run: .\build-release.ps1 -Toolkit "$env:CUDA_PATH"
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.release-please.outputs.tag_name }}"
+          $zip = "fh6-paint-studio-$tag-windows-x64.zip"
+          Compress-Archive -Path bin\fh6-paint-studio.exe, bin\fh6cuda.dll -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Attach to the GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" "$env:ZIP" --clobber

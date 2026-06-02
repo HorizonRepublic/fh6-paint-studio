@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (CPU reference)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  build:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # CPU build — both apps must compile.
+      - name: Build (CPU)
+        run: |
+          go build ./cmd/studio
+          go build ./cmd/fh6paint
+      # CUDA-tagged build needs NO toolkit/DLL: the GPU backend is loaded via syscall at runtime,
+      # so this only verifies the cuda-tagged Go compiles. (The real DLL is built in release.yml.)
+      - name: Build (CUDA-tagged, pure-Go syscall backend)
+        run: |
+          go build -tags cuda ./cmd/studio
+          go build -tags cuda ./cmd/fh6paint
