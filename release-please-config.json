@@ -4,7 +4,8 @@
     ".": {
       "release-type": "simple",
       "package-name": "fh6-paint-studio",
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false
     }
   }
 }
