@@ -27,7 +27,7 @@ jobs:
     # ships VS 18 / MSVC 14.51, on which 12.8's cudafe++ crashes (ACCESS_VIOLATION at compile time).
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }} # build the exact tagged source
       - uses: actions/setup-go@v5
