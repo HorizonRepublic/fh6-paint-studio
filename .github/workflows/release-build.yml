@@ -1,0 +1,60 @@
+name: Release build
+
+# Builds the 2-file Windows release (GUI exe + fat multi-arch CUDA DLL) and attaches the zip to a
+# release. Called automatically by release.yml on a new release, or dispatched by hand to (re)build
+# the assets for an existing tag.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build and attach assets to"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach assets to (e.g. v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build & attach (GUI + fat CUDA DLL)
+    # windows-2022 ships VS 2022 (MSVC 14.4x), which CUDA 12.8's cudafe++ supports. windows-latest now
+    # ships VS 18 / MSVC 14.51, on which 12.8's cudafe++ crashes (ACCESS_VIOLATION at compile time).
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }} # build the exact tagged source
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+      # CUDA 12.8 is required for the sm_120 (Blackwell) SASS. shim.cu only needs the core runtime
+      # headers (cuda_runtime.h / cuda_fp16.h), so nvcc + cudart is enough — no CUB/cccl.
+      - name: Install CUDA 12.8 toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: "12.8.1"
+          sub-packages: '["nvcc", "cudart"]'
+          method: "network"
+      - name: Build release (fat CUDA DLL + GUI)
+        shell: pwsh
+        run: .\build-release.ps1 -Toolkit "$env:CUDA_PATH"
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $zip = "fh6-paint-studio-${{ inputs.tag }}-windows-x64.zip"
+          Compress-Archive -Path bin\fh6-paint-studio.exe, bin\fh6cuda.dll -DestinationPath $zip -Force
+          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Attach to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.tag }}" "$env:ZIP" --clobber
