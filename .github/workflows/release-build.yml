@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag }} # build the exact tagged source
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
