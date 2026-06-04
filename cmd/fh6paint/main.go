@@ -157,6 +157,9 @@ func main() {
 		prep, padPx = imageio.PadTransparent(prep, *padTransparent)
 		applog.Printf("pad-transparent: %.2f → %dx%d surround (spill-penalty bounds shapes inside the image)", *padTransparent, prep.W, prep.H)
 	}
+	// cutout = a real source cutout, not just the keep-inside margin. The spill penalty (TransparentBG)
+	// still fires on the margin either way; the tuning below only switches to cutout mode for a real one.
+	cutout := prep.HasTransparency && !prep.PaddedOpaque
 
 	// Resolve the content MODE FIRST — it drives three things: alpha (flat/line-art ->
 	// OPAQUE crisp edges; photo/anime -> semi-transparent smooth gradient build-up), the
@@ -173,7 +176,7 @@ func main() {
 	// All per-mode constants come from presetpkg.ModeDefaultsFor — the SINGLE source of truth shared
 	// with the studio (preset.Resolve), so the CLI and GUI can never drift. The CLI keeps its
 	// flag/userSet override plumbing; only the constant VALUES are sourced from md.
-	md := presetpkg.ModeDefaultsFor(resolvedMode, cs.Colors, prep.HasTransparency)
+	md := presetpkg.ModeDefaultsFor(resolvedMode, cs.Colors, cutout)
 
 	// Boundary-aware radius default (md.Boundary: on anime/character, off flat/photo). -boundary overrides.
 	if !userSet["boundary"] {
@@ -187,11 +190,11 @@ func main() {
 	if flatMode && !userSet["kind-weights"] && cs.Colors < 80 {
 		kindWeights = md.KindWeights // vector logo: rect-rich (avoids the faint stray triangle)
 	}
-	if prep.HasTransparency {
+	if cutout {
 		allowAlpha = false // cutout object must stay opaque
 	}
 	if userSet["alpha"] { // explicit -alpha overrides the mode's on/off
-		allowAlpha = *alpha && !prep.HasTransparency
+		allowAlpha = *alpha && !cutout
 	}
 	if userSet["alpha-min"] && *alphaMinFlag >= 0 && *alphaMinFlag <= 1 {
 		alphaMin = float32(*alphaMinFlag) // explicit crispness override (GPU SearchRandom honours it as a scalar)
@@ -273,7 +276,7 @@ func main() {
 	// Saliency map: flat/line-art/cutout default to the richer WeightMapV2 (absolute,
 	// 3x3-dilated, ink-aware) for crisp contours; smooth content keeps the Sobel WeightMap.
 	// -weight-v2 forces the choice. Scale-invariant => no backend/CUDA change.
-	useV2 := flatMode || prep.HasTransparency
+	useV2 := flatMode || cutout
 	if userSet["weight-v2"] {
 		useV2 = *weightV2
 	}
@@ -421,7 +424,7 @@ func main() {
 		// Compact-shape bias is SSE-neutral on opaque content but mildly HURTS cutouts (it
 		// early-stops short of the budget — forcing small shapes fights the large flat fills
 		// a cutout's object needs). So apply it only to opaque images.
-		CompactPenalty:    *compact && !prep.HasTransparency,
+		CompactPenalty:    *compact && !cutout,
 		OnDeviceSearch:    *gpuSearch,
 		MomentSeed:        *momentSeed,
 		MomentRefine:      *momentRefine,

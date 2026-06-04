@@ -93,7 +93,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		return resolveGaussian(prep, c, w, h, shapes)
 	}
 	flatMode := resolved == "flat"
-	transparent := prep.HasTransparency
+	transparent := prep.HasTransparency && !prep.PaddedOpaque // padded-opaque keeps content tuning; spill penalty still fires
 
 	// All benchmark-hardwired per-mode constants come from ModeDefaultsFor (the single source of truth
 	// shared with the CLI). The override logic (explicit Choices fields) stays here.
@@ -143,7 +143,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		RecolorVarSkip: 0.03,
 		MaxNoImprove:   maxNI,
 		SampleBudget:   sampleBudget,
-		CompactPenalty: compact && !prep.HasTransparency,
+		CompactPenalty: compact && !transparent,
 		OnDeviceSearch: true, // CUDA build uses it; CPU ignores
 		// Coarse-to-fine search (CUDA-only; CPU ignores): the dominant eval-speed lever at high
 		// candidate volume — score the batch at a cheap 3000-px filter, then re-score the K
