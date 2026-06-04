@@ -26,6 +26,7 @@ type Prepared struct {
 	Pixels          []float32 // len = W*H*4, RGBA
 	Background      model.RGBA
 	HasTransparency bool // true if a meaningful fraction of pixels are near-transparent
+	PaddedOpaque    bool // transparency is only the keep-inside margin (source was opaque): spill-bound without cutout tuning
 }
 
 // Load decodes a PNG/JPEG file and prepares it (downscaling so max side <= maxRes).
@@ -103,7 +104,7 @@ func PadTransparent(prep *Prepared, padFrac float64) (*Prepared, int) {
 		dst := ((y+pad)*nw + pad) * 4
 		copy(px[dst:dst+prep.W*4], prep.Pixels[src:src+prep.W*4])
 	}
-	return &Prepared{W: nw, H: nh, Pixels: px, Background: prep.Background, HasTransparency: true}, pad
+	return &Prepared{W: nw, H: nh, Pixels: px, Background: prep.Background, HasTransparency: true, PaddedOpaque: !prep.HasTransparency}, pad
 }
 
 // TranslateShapes shifts every shape's position by (dx,dy) canvas pixels, in place, returning the
