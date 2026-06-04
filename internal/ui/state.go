@@ -175,19 +175,20 @@ type AppState struct {
 	LibraryTab widget.Clickable
 
 	// update check + About dialog
-	Update        *UpdateInfo // non-nil when a newer release exists
-	LastSeen      string      // release tag acknowledged in About; hides the dot
-	UpdateStatus  string      // transient text for a manual check
-	AboutOn       bool
-	AboutBtn      widget.Clickable
-	AboutClose    widget.Clickable
-	AboutCardSink widget.Clickable // absorbs clicks over the card so they miss the scrim
-	DownloadBtn   widget.Clickable
-	GitHubBtn     widget.Clickable
-	NexusBtn      widget.Clickable
-	CheckNowBtn   widget.Clickable
-	AutoUpdate    widget.Bool
-	AboutList     widget.List
+	UpdateCheckEnabled bool        // compiled in via -tags updatecheck; gates the check controls in About
+	Update             *UpdateInfo // non-nil when a newer release exists
+	LastSeen           string      // release tag acknowledged in About; hides the dot
+	UpdateStatus       string      // transient text for a manual check
+	AboutOn            bool
+	AboutBtn           widget.Clickable
+	AboutClose         widget.Clickable
+	AboutCardSink      widget.Clickable // absorbs clicks over the card so they miss the scrim
+	DownloadBtn        widget.Clickable
+	GitHubBtn          widget.Clickable
+	NexusBtn           widget.Clickable
+	CheckNowBtn        widget.Clickable
+	AutoUpdate         widget.Bool
+	AboutList          widget.List
 
 	// preferences (persisted in studio.json, surfaced in the status bar — not the generator settings)
 	SoundOn widget.Bool // play a chime when a generation finishes

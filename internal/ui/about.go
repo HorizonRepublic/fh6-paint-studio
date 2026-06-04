@@ -93,7 +93,7 @@ func (s *AppState) aboutCard(gtx C) D {
 			layout.Rigid(func(gtx C) D { return th.PrimaryButton(gtx, &s.DownloadBtn, "Download", true) }),
 			gap(12),
 		)
-	} else {
+	} else if s.UpdateCheckEnabled {
 		status := "You're up to date"
 		if s.UpdateStatus != "" {
 			status = s.UpdateStatus
@@ -104,23 +104,32 @@ func (s *AppState) aboutCard(gtx C) D {
 		)
 	}
 
+	links := []layout.FlexChild{
+		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.GitHubBtn, "GitHub", true) }),
+		layout.Rigid(GapH(8).Layout),
+		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.NexusBtn, "NexusMods", true) }),
+	}
+	if s.UpdateCheckEnabled {
+		links = append(links,
+			layout.Rigid(GapH(8).Layout),
+			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CheckNowBtn, "Check now", true) }),
+		)
+	}
 	rows = append(rows,
-		layout.Rigid(func(gtx C) D {
-			return layout.Flex{}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.GitHubBtn, "GitHub", true) }),
-				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.NexusBtn, "NexusMods", true) }),
-				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CheckNowBtn, "Check now", true) }),
-			)
-		}),
+		layout.Rigid(func(gtx C) D { return layout.Flex{}.Layout(gtx, links...) }),
 		gap(12),
-		layout.Rigid(func(gtx C) D {
-			cb := material.CheckBox(th.M, &s.AutoUpdate, "Check for updates automatically")
-			cb.Color, cb.IconColor, cb.TextSize = th.TextDim, th.Accent, 13
-			return cb.Layout(gtx)
-		}),
-		gap(10),
+	)
+	if s.UpdateCheckEnabled {
+		rows = append(rows,
+			layout.Rigid(func(gtx C) D {
+				cb := material.CheckBox(th.M, &s.AutoUpdate, "Check for updates automatically")
+				cb.Color, cb.IconColor, cb.TextSize = th.TextDim, th.Accent, 13
+				return cb.Layout(gtx)
+			}),
+			gap(10),
+		)
+	}
+	rows = append(rows,
 		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 12, "MIT License · © 2026 Horizon Republic", th.TextDim) }),
 	)
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
