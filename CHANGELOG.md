@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.0.0...v1.0.1) (2026-06-04)
+
+
+### Bug Fixes
+
+* exclude the in-app update check from release builds ([#14](https://github.com/HorizonRepublic/fh6-paint-studio/issues/14)) ([fb755cf](https://github.com/HorizonRepublic/fh6-paint-studio/commit/fb755cf17009f15048c9eaeb64134428296bc032))
+* keep-inside no longer over-smooths the reconstruction ([#18](https://github.com/HorizonRepublic/fh6-paint-studio/issues/18)) ([6df818e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/6df818e080158f43db72574c7e388ccac715038e))
+
 ## [1.0.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v0.1.0...v1.0.0) (2026-06-04)
 
 
