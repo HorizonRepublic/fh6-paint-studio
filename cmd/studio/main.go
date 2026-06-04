@@ -8,6 +8,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"io"
@@ -33,6 +34,16 @@ import (
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/runner"
 	"fh6-paint-studio/internal/ui"
+	"fh6-paint-studio/internal/update"
+)
+
+// version is the release version, injected at build time via -ldflags "-X main.version=...". It stays
+// "dev" for a plain `go build`, and matches the version stamped into the Windows resource (see icon.go).
+var version = "dev"
+
+const (
+	githubURL = "https://github.com/HorizonRepublic/fh6-paint-studio"
+	nexusURL  = "https://www.nexusmods.com/forzahorizon6/mods/314"
 )
 
 func main() {
@@ -51,6 +62,7 @@ func main() {
 	}
 	applog.Init("fh6-paint-studio.log")
 	defer applog.Close()
+	applog.Printf("FH6 Paint Studio %s", version)
 
 	go func() {
 		// Restore the last window size (clamped to the minimum); default to 1280×820 on first run.
@@ -72,6 +84,8 @@ func main() {
 func loop(w *app.Window) error {
 	th := ui.NewTheme()
 	st := ui.NewAppState(th)
+	st.Version = version
+	st.BackendLabel = "shape engine · " + backendName
 	st.Elevated = inject.Elevated()
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
@@ -84,15 +98,8 @@ func loop(w *app.Window) error {
 	if prefs.KeepInside != nil { // restore the persisted generator toggles (tri-state: nil = default)
 		st.KeepInside.Value = *prefs.KeepInside
 	}
-	if prefs.Polish != nil {
-		st.Polish.Value = *prefs.Polish
-	}
-	if prefs.Economy != nil {
-		st.Economy.Value = *prefs.Economy
-	}
-	if prefs.Standout != nil {
-		st.Standout.Value = *prefs.Standout
-	}
+	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
+	st.LastSeen = prefs.LastSeenVersion
 
 	// Warm the shell file-dialog infrastructure in the background so the first Open shows the native
 	// dialog without a cold-start delay.
@@ -135,7 +142,7 @@ func loop(w *app.Window) error {
 	// deadlock the frame handshake; picking/saving guard re-entry, the picks deliver the chosen path.
 	var openPick, savePick pathPick
 	var picking, saving bool
-	var injDone injectHolder // inject worker -> UI loop hand-off (drives the per-row spinner + ✓/✗)
+	var injDone injectHolder // inject worker -> UI loop hand-off (drives the per-row spinner + tick/cross)
 
 	// Taskbar progress (the green fill on the app's taskbar button during a run) + a completion flash.
 	// Enabled lazily once the first Win32 view event hands us the native window handle; all calls are
@@ -150,16 +157,19 @@ func loop(w *app.Window) error {
 	demo := len(os.Args) > 1 && os.Args[1] == "--demo"
 	demoStarted := false
 
-	var winW, winH int // latest window size in dp, tracked from FrameEvent and saved on exit
+	var winW, winH int              // latest window size in dp, tracked from FrameEvent and saved on exit
 	lastTitle := "FH6 Paint Studio" // window title, updated with run progress (shown in the taskbar tooltip / Alt-Tab)
+	lastUpdateCheck := prefs.LastUpdateCheck
 
 	// savePrefs persists the UI preferences (window size + sound) to studio.json — called on exit and
 	// whenever a persisted toggle changes, so a preference survives even an unclean shutdown.
 	savePrefs := func() {
 		on := st.SoundOn.Value
-		keep, pol, eco, sto := st.KeepInside.Value, st.Polish.Value, st.Economy.Value, st.Standout.Value
+		keep := st.KeepInside.Value
+		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
-			KeepInside: &keep, Polish: &pol, Economy: &eco, Standout: &sto}
+			KeepInside: &keep, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
+			LastSeenVersion: st.LastSeen}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
 		}
@@ -167,6 +177,22 @@ func loop(w *app.Window) error {
 	}
 
 	post := func(e runner.Event) { q.push(e); w.Invalidate() }
+
+	checker := update.Default()
+	var upd updateHolder
+	checkUpdate := func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			rel, ok, err := checker.Latest(ctx)
+			upd.put(updateResult{rel: rel, ok: ok, err: err})
+			w.Invalidate()
+		}()
+	}
+	// Throttled to once/day; dev builds never match a release, so don't probe.
+	if version != "dev" && st.AutoUpdate.Value && time.Since(lastUpdateCheck) >= 24*time.Hour {
+		checkUpdate()
+	}
 
 	// beginOpen starts an async decode of an image path (from the Open dialog or a file drop) off the
 	// UI thread, so the window never freezes; opening guards re-entry. The result is applied via il.take.
@@ -402,6 +428,32 @@ func loop(w *app.Window) error {
 				openInExplorer(store.Root)
 			}
 
+			if st.AboutBtn.Clicked(gtx) {
+				if seen := st.OpenAbout(); seen != "" {
+					savePrefs() // persist LastSeen
+				}
+			}
+			if st.AboutClose.Clicked(gtx) {
+				st.CloseAbout()
+			}
+			if st.DownloadBtn.Clicked(gtx) && st.Update != nil {
+				openURL(st.Update.URL)
+			}
+			if st.GitHubBtn.Clicked(gtx) {
+				openURL(githubURL)
+			}
+			if st.NexusBtn.Clicked(gtx) {
+				openURL(nexusURL)
+			}
+			if st.CheckNowBtn.Clicked(gtx) {
+				st.UpdateStatus = "Checking…"
+				st.Update = nil
+				checkUpdate()
+			}
+			if st.AutoUpdate.Update(gtx) {
+				savePrefs()
+			}
+
 			// commitRename writes the edited name to disk and reloads (which rebuilds the rows and
 			// exits edit mode). A blank or unchanged name just closes the editor with no write.
 			// needReload defers reloadLibrary until AFTER the row loop: reloadLibrary REPLACES
@@ -535,7 +587,7 @@ func loop(w *app.Window) error {
 				}
 				pendingExportID = ""
 			}
-			// Inject worker finished: flip the row to ✓/✗ (lingering ~6s) + toast. Success surfaces the
+			// Inject worker finished: flip the row to tick/cross (lingering ~6s) + toast. Success surfaces the
 			// save+reload reminder (FH6 re-derives meshes only on vinyl save+reload); failure shows why.
 			if o, ok := injDone.take(); ok {
 				st.FinishInject(o.id, o.err == nil, gtx.Now.Add(6*time.Second))
@@ -543,6 +595,23 @@ func loop(w *app.Window) error {
 					st.Toast = "Inject failed: " + o.err.Error()
 				} else {
 					st.Toast = "Injected — now Save & reload the vinyl in FH6 to apply"
+				}
+			}
+
+			if r, ok := upd.take(); ok {
+				if r.err != nil {
+					st.AppendLog("update check: " + r.err.Error())
+					st.UpdateStatus = "Couldn't check for updates"
+				} else {
+					lastUpdateCheck = time.Now()
+					if r.ok && update.IsNewer(version, r.rel.Version) {
+						st.Update = &ui.UpdateInfo{Version: r.rel.Tag, Notes: r.rel.Notes, URL: r.rel.URL}
+						st.UpdateStatus = ""
+					} else {
+						st.Update = nil
+						st.UpdateStatus = "You're up to date"
+					}
+					savePrefs()
 				}
 			}
 
@@ -555,7 +624,7 @@ func loop(w *app.Window) error {
 				}
 				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(120 * time.Millisecond)})
 			}
-			// Keep the frame ticking while an inject spinner is up; revert a lingering ✓/✗ pill on time.
+			// Keep the frame ticking while an inject spinner is up; revert a lingering tick/cross pill on time.
 			if st.InjectBusy() {
 				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(80 * time.Millisecond)})
 			}
@@ -614,16 +683,8 @@ func applyProgress(st *ui.AppState, ev runner.Progress) {
 	if len(st.Stats.History) > 400 {
 		st.Stats.History = st.Stats.History[len(st.Stats.History)-400:]
 	}
-	if ev.Shapes > 0 && ev.Total > 0 {
-		frac := float64(ev.Shapes) / float64(ev.Total)
-		if frac > 0 {
-			eta := time.Duration(float64(ev.Elapsed)/frac) - ev.Elapsed
-			if eta < 0 {
-				eta = 0
-			}
-			st.Stats.ETA = eta
-		}
-	}
+	// Recent-rate ETA (front-loaded cost makes the old linear elapsed/frac wildly overestimate early).
+	st.Stats.UpdateETA(ev.Shapes, ev.Total, ev.Elapsed)
 }
 
 // loadPreviewImage decodes a stored generation's full preview.png (for the library lightbox). The PNG
@@ -813,7 +874,7 @@ func loadCropRegion(path string, abs image.Rectangle) (*imageio.Prepared, *image
 
 func nrgbaFromPrep(prep *imageio.Prepared) *image.NRGBA {
 	// prep.Pixels are LINEAR in -linear mode; sRGB-encode for display so the source thumbnail/main
-	// view shows true colours (linear-as-bytes looks dark/shifted, e.g. yellow→orange). EncodeForDisplay
+	// view shows true colours (linear-as-bytes looks dark/shifted, e.g. yellow->orange). EncodeForDisplay
 	// is a no-op in sRGB mode and returns a fresh slice in linear mode, so prep.Pixels is never mutated.
 	px := imageio.EncodeForDisplay(prep.Pixels)
 	img := image.NewNRGBA(image.Rect(0, 0, prep.W, prep.H))
@@ -879,6 +940,34 @@ func (p *pathPick) take() (string, bool) {
 type injectOutcome struct {
 	id  string
 	err error
+}
+
+type updateResult struct {
+	rel update.Release
+	ok  bool
+	err error
+}
+
+type updateHolder struct {
+	mu    sync.Mutex
+	ready bool
+	res   updateResult
+}
+
+func (h *updateHolder) put(r updateResult) {
+	h.mu.Lock()
+	h.res, h.ready = r, true
+	h.mu.Unlock()
+}
+
+func (h *updateHolder) take() (updateResult, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.ready {
+		return updateResult{}, false
+	}
+	h.ready = false
+	return h.res, true
 }
 
 // injectHolder is the thread-safe one-slot hand-off for an inject outcome (mirrors pathPick/imageLoad).

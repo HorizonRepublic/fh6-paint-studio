@@ -125,7 +125,7 @@ func (t *Theme) SecondaryButton(gtx C, btn *widget.Clickable, label string, enab
 }
 
 // StatusPill is a non-interactive compact pill (the SecondaryButton height) showing a coloured status
-// label — used in place of a row button for a transient inject result (✓ Injected / ✗ Failed) so the
+// label — used in place of a row button for a transient inject result (tick: Injected / cross: Failed) so the
 // row keeps its layout while the result lingers.
 func (t *Theme) StatusPill(gtx C, label string, fg color.NRGBA) D {
 	return layout.Background{}.Layout(gtx,
@@ -193,7 +193,7 @@ func (t *Theme) Progress(gtx C, frac float64) D {
 }
 
 // ProgressIndeterminate draws a segment sweeping across the track — for the post-greedy phases
-// (polish/standout/economy) that have no shape counter, so the bar shows live activity
+// (polish/standout) that have no shape counter, so the bar shows live activity
 // instead of sitting stuck at 100%. phase in [0,1) positions the segment; the caller animates it
 // (e.g. from elapsed time, with periodic invalidation).
 func (t *Theme) ProgressIndeterminate(gtx C, phase float64) D {

@@ -105,6 +105,33 @@ func (f *FH6) DumpGroups() ([]GroupInfo, error) {
 	return f.dumpGroups()
 }
 
+// CalibLayer is one controlled placement for gradient-falloff calibration. CalibWrite sets ONLY the
+// slot's transform + colour and preserves the existing shape-word and geometry resource, so a
+// gradient already placed via the FH6 UI keeps its mesh and repaints live (no save+reload needed).
+type CalibLayer struct {
+	Slot     int        `json:"slot"`
+	WantWord uint16     `json:"word"`              // expected current word at the slot (safety gate; 0 = skip the check)
+	Pos      [2]float32 `json:"pos"`               // editor units (origin = canvas centre, +X right, +Y up)
+	Scale    [2]float32 `json:"scale"`             // scale multipliers (circle at 1.0 ≈ radius 80 editor units)
+	Rot      float32    `json:"rot"`               // degrees
+	Color    [4]byte    `json:"color"`             // base colour RGBA (the falloff lives in the mesh, not here)
+	SetWord  uint16     `json:"setword,omitempty"` // if non-zero, ALSO write this shape-word (mesh re-derives only on save+reload). NEVER the resource (0xA8).
+}
+
+// CalibWrite sets the transform + colour of the given EXISTING template slots WITHOUT changing their
+// shape-word or geometry resource — the gradient-calibration helper. Each slot must already carry the
+// expected gradient word (WantWord); the write is refused otherwise (which also guards against the
+// locator anchoring on the wrong group). Windows-only.
+func (f *FH6) CalibWrite(layers []CalibLayer) error {
+	if !f.Available() {
+		return ErrNotImplemented
+	}
+	if f.Layers <= 0 {
+		return fmt.Errorf("enter the exact FH6 template layer count first")
+	}
+	return f.calibWrite(layers)
+}
+
 // ProbeHit is one read-only match of a byte pattern in the target's memory (a diagnostic).
 type ProbeHit struct {
 	Addr    uintptr

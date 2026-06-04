@@ -7,7 +7,7 @@ import (
 
 func TestBoundaryDistanceEdgeIsZero(t *testing.T) {
 	w, h := 40, 8
-	// Vertical luma step at x=20 → the two columns straddling it are edge pixels (dist 0).
+	// Vertical luma step at x=20 -> the two columns straddling it are edge pixels (dist 0).
 	px := makeRGBA(w, h, func(x, y int) float32 {
 		if x < 20 {
 			return 0

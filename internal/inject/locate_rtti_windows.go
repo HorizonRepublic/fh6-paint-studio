@@ -19,7 +19,7 @@ const memMapped = 0x40000
 // probeMemory is a read-only diagnostic: it reports committed-region stats per memory type and
 // returns up to maxHits matches of needle within image/mapped regions (where RTTI names live),
 // each with surrounding printable context. If filter is non-empty, only hits whose printable
-// context contains it are kept (e.g. needle ".?AV", filter "Livery" → Livery RTTI descriptors).
+// context contains it are kept (e.g. needle ".?AV", filter "Livery" -> Livery RTTI descriptors).
 // Reads in chunks so regions larger than maxRegionRead are not skipped.
 func probeMemory(p *proc, needle, filter []byte, maxHits int, log func(string)) []ProbeHit {
 	const chunk = 64 * 1024 * 1024
@@ -97,7 +97,7 @@ func probeMemory(p *proc, needle, filter []byte, maxHits int, log func(string)) 
 	return hits
 }
 
-// printableContext renders bytes around a hit as ASCII (non-printable → '.').
+// printableContext renders bytes around a hit as ASCII (non-printable -> '.').
 func printableContext(mem []byte, pos, n int) string {
 	lo := pos - 8
 	if lo < 0 {
@@ -133,7 +133,7 @@ func printableContext(mem []byte, pos, n int) string {
 // vtable so locating stays fast. The other build-specific values (field offsets + shape words) live
 // in profile.go (GameProfile / Word* consts).
 var cliveryGroupRTTINames = [][]byte{
-	[]byte(".?AVCLiveryGroup@@"), // FH5/FH6 (note: stripped in current FH6 shipping builds → count-scan path)
+	[]byte(".?AVCLiveryGroup@@"), // FH5/FH6 (note: stripped in current FH6 shipping builds -> count-scan path)
 }
 
 // locateTable finds the live FH6 layer pointer-table for a group whose layer count == count, trying
@@ -223,9 +223,9 @@ func tableFromGroup(p *proc, prof GameProfile, group, wantVtable uintptr, count 
 // cliveryGroupVtables walks the standard MSVC x64 RTTI chain to recover the vtable address(es) of
 // class CLiveryGroup, for each configured type-descriptor name:
 //
-//	type name ".?AVCLiveryGroup@@"  → TypeDescriptor (name lives at +0x10 in the descriptor)
-//	descriptor's image-relative off → CompleteObjectLocator (pTypeDescriptor field at +0xC, sig==1)
-//	pointer to that locator         → vtable (the locator pointer sits one slot before the vtable)
+//	type name ".?AVCLiveryGroup@@"  -> TypeDescriptor (name lives at +0x10 in the descriptor)
+//	descriptor's image-relative off -> CompleteObjectLocator (pTypeDescriptor field at +0xC, sig==1)
+//	pointer to that locator         -> vtable (the locator pointer sits one slot before the vtable)
 //
 // A live object whose first qword equals one of these vtables is a CLiveryGroup instance.
 func cliveryGroupVtables(p *proc, log func(string)) ([]uintptr, error) {

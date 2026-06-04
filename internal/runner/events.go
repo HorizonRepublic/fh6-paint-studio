@@ -37,7 +37,7 @@ type Failed struct{ Err error }
 // Log is a human-readable line for the execution log.
 type Log struct{ Line string }
 
-// Status names the current post-greedy phase (polish / back-fit / standout / economy)
+// Status names the current post-greedy phase (polish / back-fit / standout)
 // so the UI can show what it's doing once the shape counter has hit 100%. Empty clears it.
 type Status struct{ Stage string }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // studioConfig persists lightweight UI preferences between sessions. It lives next to the generation
@@ -15,16 +16,20 @@ type studioConfig struct {
 	SoundOnDone *bool  `json:"sound_on_done,omitempty"` // play a chime when a generation finishes; nil/absent = on (default)
 	Preset      string `json:"preset,omitempty"`        // last content preset (anime|photo|flat)
 	Budget      int    `json:"budget,omitempty"`        // last shape budget
-	// Generator toggles (pointer = tri-state: absent → the NewAppState default). Persisted so a
+	// Generator toggles (pointer = tri-state: absent -> the NewAppState default). Persisted so a
 	// preferred setup survives a restart.
 	KeepInside *bool `json:"keep_inside,omitempty"` // default ON
-	Polish     *bool `json:"polish,omitempty"`      // default ON
-	Economy    *bool `json:"economy,omitempty"`     // default OFF
-	Standout   *bool `json:"standout,omitempty"`    // default OFF
+
+	CheckUpdates    *bool     `json:"check_updates,omitempty"` // tri-state, nil = on
+	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
+	LastSeenVersion string    `json:"last_seen_version,omitempty"`
 }
 
 // SoundOn reports the saved sound preference, defaulting to ON when unset.
 func (c studioConfig) SoundOn() bool { return c.SoundOnDone == nil || *c.SoundOnDone }
+
+// CheckUpdatesEnabled reports the saved auto-update-check preference, defaulting to ON when unset.
+func (c studioConfig) CheckUpdatesEnabled() bool { return c.CheckUpdates == nil || *c.CheckUpdates }
 
 func configPath() (string, error) {
 	home, err := os.UserHomeDir()

@@ -48,6 +48,14 @@ func selftest() {
 		polishOn = true
 	}
 	c.Polish = &polishOn
+	// Optional content-mode override (anime|photo|flat|gaussian) — lets the smoke test exercise the
+	// niche gaussian path (preset.resolveGaussian -> runner -> engine.GenerateGaussian) end-to-end.
+	for _, a := range os.Args[2:] {
+		switch strings.ToLower(a) {
+		case "anime", "photo", "flat", "gaussian", "gauss", "smooth":
+			c.Mode = strings.ToLower(a)
+		}
+	}
 	r := preset.Resolve(*prep, c)
 
 	done := make(chan runner.Done, 1)
@@ -59,6 +67,10 @@ func selftest() {
 		switch ev := e.(type) {
 		case runner.Log:
 			fmt.Println("  ", ev.Line)
+		case runner.Progress:
+			if ev.Total > 0 && ev.Shapes%250 == 0 {
+				fmt.Printf("   progress: %d/%d (%.0f%%)\n", ev.Shapes, ev.Total, 100*float64(ev.Shapes)/float64(ev.Total))
+			}
 		case runner.Frame:
 			frames++ // safe: the worker emits Done after the last Frame; the channel hand-off publishes it
 			now := time.Now()
@@ -104,4 +116,3 @@ func selftest() {
 		os.Exit(1)
 	}
 }
-

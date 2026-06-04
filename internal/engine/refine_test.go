@@ -50,9 +50,9 @@ func TestPruneToBudgetKeepsUpToBudgetThenCaps(t *testing.T) {
 	if len(out) != 4 {
 		t.Fatalf("under budget should keep all 4 (bg + 3), got %d", len(out))
 	}
-	// Budget cap to 1 → bg + the single highest-contribution shape.
+	// Budget cap to 1 -> bg + the single highest-contribution shape.
 	out = pruneToBudget(shapes, target, weight, w, h, 1, model.RGBA{R: 1, G: 1, B: 1, A: 1}, false)
 	if len(out) != 2 {
-		t.Fatalf("budget 1 → expected 2 shapes (bg + best), got %d", len(out))
+		t.Fatalf("budget 1 -> expected 2 shapes (bg + best), got %d", len(out))
 	}
 }

@@ -33,8 +33,11 @@ func TestPolishGradientFD(t *testing.T) {
 		{kind: model.KindEllipse, P: [6]float64{11, 9, 4, 6, 70}, col: [4]float64{0.2, 0.6, 0.4, 0.6}, optGeo: true},
 		// Fractional vertices on purpose: the triangle bbox edge IS a vertex coord, so an
 		// integer coord would make the FD ±eps straddle the floor/ceil bbox boundary (a render
-		// discontinuity → spurious numeric gradient). Off-integer keeps the bbox stable.
+		// discontinuity -> spurious numeric gradient). Off-integer keeps the bbox stable.
 		{kind: model.KindTriangle, P: [6]float64{5.3, 4.4, 13.6, 6.2, 9.1, 12.7}, col: [4]float64{0.4, 0.35, 0.6, 0.7}, optGeo: true},
+		// Trainable glow (gaussian splat): a large footprint so the interior pixels (smooth coverage)
+		// dominate the FD; geometry params cx,cy,rx,ry,θ (slot 5 = 0) are checked like any optGeo shape.
+		{kind: model.KindGlow, P: [6]float64{9, 8, 10, 9, 15}, col: [4]float64{0.6, 0.3, 0.45, 0.85}, optGeo: true},
 	}
 	render := make([]float32, w*h*4)
 	dC := make([]float64, w*h*4)

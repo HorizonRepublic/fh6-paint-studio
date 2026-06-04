@@ -11,7 +11,7 @@ import (
 )
 
 // sourcePanel is the left column: a scrollable Source + Settings stack with the primary
-// Generate / Stop action PINNED at the bottom (so configure → generate is one column and the
+// Generate / Stop action PINNED at the bottom (so configure -> generate is one column and the
 // action is always visible even when the settings scroll). While a generation is running the
 // scrollable settings are disabled (inert + dimmed) so they can't change mid-run, but the
 // Stop button below stays active.
@@ -110,6 +110,13 @@ func (s *AppState) settingsCard(gtx C) D {
 
 func (s *AppState) advancedSection(gtx C) D {
 	th := s.Th
+	// Gaussian is a NICHE mode that bypasses the greedy entirely (soft glows trained jointly), so none
+	// of the greedy/polish toggles below apply to it — show a short explanation instead of dead controls.
+	if s.Mode.Value() == "gaussian" {
+		l := material.Label(th.M, 12, "Gaussian mode trains soft glow splats jointly — no greedy options apply. Budget = number of glows; more glows + the automatic training give a closer (but always smooth) result. Best for SMOOTH / gradient / painterly images — it can't render crisp fine detail, so use Anime/Photo/Flat for sharp or cel content. Slower than the others (it trains; the bar shows training progress).")
+		l.Color = th.TextDim
+		return l.Layout(gtx)
+	}
 	if s.AdvClick.Clicked(gtx) {
 		s.AdvOpen = !s.AdvOpen
 	}
@@ -137,19 +144,10 @@ func (s *AppState) advancedSection(gtx C) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(head),
 		layout.Rigid(GapV(10).Layout),
-		// Shape mix / transparency / boundary / back-fitting / colour-blend are HARDWIRED to their tuned
-		// defaults — no longer user toggles. Colour blend is always LINEAR (the editor's space; a clear
-		// win on semi-transparent gradients, a no-op for opaque content). KEPT: Joint polish (a SPEED
-		// opt-out — it's 60-85% of a run).
-		tog(&s.Polish, "Joint polish", &s.PolishHint,
-			"A final gradient pass that nudges every shape's position, size, rotation and colour together to better match the image — sharper edges, lower error. GPU-fast and gated so it never makes the result worse. Turn OFF for a faster, rougher preview (polish is most of the run time)."),
-		layout.Rigid(GapV(4).Layout),
-		tog(&s.Economy, "Economy (trim redundant layers)", &s.EconomyHint,
-			"OFF (default) = use the WHOLE shape budget for maximum quality. ON = after polish, drop layers whose removal barely changes the result (a lighter, cleaner import), gated so it never gets meaningfully worse. In practice it reclaims only a handful — the pipeline is already efficient — so leave it off unless you specifically want fewer layers."),
-		layout.Rigid(GapV(4).Layout),
-		tog(&s.Standout, "Smooth standout shapes", &s.StandoutHint,
-			"OFF (default). ON = a final perceptual pass that finds individual shapes whose OUTLINE stands out against a part of the image that should be smooth (a stray circle/square the error metric can't see) and gently blends or fades them — gated so the measured error barely moves. Subtle on an already-clean result; turn it on if you spot the odd shape 'popping' on smooth skin/fur/gradients."),
-		layout.Rigid(GapV(4).Layout),
+		// Shape mix / transparency / boundary / back-fitting / colour-blend / joint polish are all
+		// HARDWIRED to their tuned defaults — no longer user toggles. Colour blend is always LINEAR
+		// (the editor's space; a win on semi-transparent gradients, a no-op for opaque content).
+		// "Keep shapes inside image" is the only remaining toggle.
 		tog(&s.KeepInside, "Keep shapes inside image", &s.KeepInsideHint,
 			"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture — no circles/rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean (no frame). Turn off only if you want the legacy behaviour."),
 		layout.Rigid(GapV(10).Layout),

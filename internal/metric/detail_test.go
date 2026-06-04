@@ -17,7 +17,7 @@ func makeRGBA(w, h int, lum func(x, y int) float32) []float32 {
 
 func TestDetailGridFlatIsZero(t *testing.T) {
 	w, h := 32, 32
-	px := makeRGBA(w, h, func(x, y int) float32 { return 0.5 }) // uniform → no edges
+	px := makeRGBA(w, h, func(x, y int) float32 { return 0.5 }) // uniform -> no edges
 	g := DetailGrid(px, w, h, 4, 4)
 	if g == nil {
 		t.Fatal("nil grid")

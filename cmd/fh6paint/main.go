@@ -45,7 +45,6 @@ func main() {
 	boundaryStart := flag.Float64("boundary-start", 0.42, "with -boundary: progress at which the radius cap engages (ramps to full by progress 1). Earlier=tighter silhouettes sooner but constrains the coarse base.")
 	canvasPad := flag.Float64("canvas-pad", 0.04, "canvas-edge clamp: shrink any ellipse/rect whose rotated bbox extends past the image rectangle by more than canvas-pad*min(w,h) px on a side. Stops shapes ballooning OUTSIDE the image (visible in-game, clipped in the preview) + saves budget. 0=off (legacy). ~0.04 keeps a small edge bleed; a small value like 0.002 clamps tight (≈no bleed). Helps opaque/busy content most.")
 	padTransparent := flag.Float64("pad-transparent", 0, "keep shapes inside the image: generate against a transparent surround of this fraction of the long side (~0.1) so the overhang/spill penalty bounds every shape to the content rectangle (no shape balloons past the edge). The geometry + preview are mapped back to the original size afterwards (no frame). 0=off. The robust fix for the 'shapes outside the image' artefact on full-bleed content.")
-	economy := flag.Float64("economy", 0, "post-polish economy prune: drop FINAL shapes whose removal keeps the rendered error within this fraction of it (reclaims genuinely-redundant layers -> lighter/cleaner import at ~no quality cost). Runs after polish (contribution is accurate there), gated end-to-end. 0=off. ~0.005 = within the noise band.")
 	standout := flag.Float64("standout", 0, "post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. 0=off. ~0.005 = conservative. The metric will NOT show the win — judge by eye; the gate only bounds the loss.")
 	alphaMinFlag := flag.Float64("alpha-min", -1, "lower bound for candidate alpha when -alpha is on (candidates draw alpha~U(alpha-min,1)). -1 = content-mode default (photo 0.3, anime 0.55). HIGHER = crisper/more-opaque shapes (less soft muddying of detail like eyes/lips), at the cost of needing more shapes for smooth gradients; test 0.7-0.85 on detailed faces.")
 	shapeTol := flag.Float64("shape-tol", 0, "auto-shape-count: stop placing shapes when the relative marginal improvement rate r=ΔErr/(window·currentErr) per shape stays below this (0=off, fill -shapes budget). Adapts the count per image: saturated flat/logo stop early (~175-400), detailed photo/anime/cartoon fill the budget. -shapes is the ceiling. Recommended auto value: 0.0002 (conservative; trims only genuinely-saturated content). 0.0005 = aggressive/draft.")
@@ -57,12 +56,21 @@ func main() {
 	aspect := flag.Float64("aspect", -1, "max aspect ratio for ellipse/rect candidates: minor=major/U(1,aspect) makes thin slivers along the edge orientation (traces sharp contours). -1=auto (flat 8, organic 6). <=1 = round axes.")
 	ssaa := flag.Int("ss", 1, "preview supersampling factor (1=off): render the output shapes at ss× then box-downsample for ANTI-ALIASED edges. Our raster uses hard binary coverage, so contours are 1px steps while the source images have soft ~1-2px ramps — that mismatch is where nearly all residual image-space error sits. ss=3-4 closes it. Affects the preview/comparison render only (the game rasterizes the geometry itself).")
 	gpuSearch := flag.Bool("gpu-search", true, "CUDA build only: run each shape's random-candidate phase on-device (generate+score+argmin in one launch) — the throughput unlock for high candidate volume. Ignored by the CPU backend (host path).")
+	// -moment-seed = PURE fast generation (moment-seeding, no hybrid handoff). Kept as a CLI flag for
+	// experiments / new-preset tuning even though the studio no longer exposes it standalone: the studio's
+	// "Fast generation" toggle now maps to the HYBRID (moment base + random detail, -moment-detail-start
+	// 0.55), which superseded pure-fast for everyday use. Pure fast stays reachable here for A/B.
+	momentSeed := flag.Bool("moment-seed", false, "moment-seeding (PURE fast, no hybrid): replace the blind random candidate batch with a closed-form covariance-ellipse seed fitted from the residual grid + a small localised refine pool (-moment-refine). Far fewer candidates per shape -> large eval speedup. Add -moment-detail-start 0.55 for the HYBRID (the studio's Fast generation). Kept for experiments/preset tuning.")
+	momentRefine := flag.Int("moment-refine", 2048, "with -moment-seed: candidate-pool size per shape (the seeds + localised kind-weighted refinements, scored via the normal eval path + hill-climb mutate). 2048 is the quality-neutral knee (~-33% eval vs the 50k search); ~512 is faster (~-40%) for a small quality cost.")
+	momentCenters := flag.Int("moment-centers", 16, "with -moment-seed: number of error-sampled SEED CENTRES per shape (the -moment-refine budget is split across them). 1 = single fit (anchors to one centre, loses to random); ~16 spreads the budget to restore multi-location exploration at the same candidate cost.")
+	momentDetailStart := flag.Float64("moment-detail-start", 0, "with -moment-seed: HYBRID schedule — past this progress (0..1) hand the per-shape search off from the moment pool to the blind random brute force, which finds the sharp SMALL detail shapes the 2nd-moment blob fit never proposes (the late shapes are cheap, so it buys crispness for little time). 0 = off (moment all the way). ~0.6-0.7 = fast smooth base + sharp random detail.")
 	coarseSearch := flag.Bool("coarse-search", true, "CUDA build only: coarse-to-fine search — score the candidate batch at a CHEAP pixel cap (-coarse-budget) to filter, then re-score only the -coarse-k survivors at the full -sample-budget and pick from those. The winner is full-budget scored (quality-neutral — unlike a uniform -sample-budget cut, which mis-picks on low-res noise), while the bulk pays only the coarse cost. The dominant eval-speed lever at the quality preset (roughly halves eval wall-time). Auto-disabled below ~33k candidates (n>4*-coarse-k). -coarse-search=false for the exhaustive single-pass.")
 	coarseBudget := flag.Int("coarse-budget", 3000, "with -coarse-search: pixel cap for the cheap coarse filter pass (lower = faster bulk; must stay high enough that the true winner is its partition's coarse-min). 3000 is the floor: it selects the same survivors as a larger filter, while going below it starts missing winners.")
 	coarseK := flag.Int("coarse-k", 8192, "with -coarse-search: number of coarse survivors re-scored at the FULL budget (higher = the true winner is more reliably included -> closer to baseline quality, at a small extra re-eval cost; the bulk stays cheap).")
 	coarseFP16 := flag.Bool("coarse-fp16", true, "with -coarse-search: run the coarse FILTER pass in FP16/half2 (halves the ALU-bound per-pixel work; the FP32 re-eval still picks+scores the winner). Quality stays within the coarse-to-fine ranking band. -coarse-fp16=false restores FP32 filtering (exact-but-slower ranking).")
 	warpEval := flag.Bool("warp-eval", false, "CUDA build only: warp-per-candidate eval kernel (opt-in). Slower than the default block-per-candidate kernel — large early shapes dominate runtime and want 128 threads/candidate, not 32. Kept for reference.")
 	polish := flag.Bool("polish", false, "joint differentiable polish pass after greedy (refines all shapes together; slower, gated so it never regresses)")
+	gaussian := flag.Bool("gaussian", false, "NICHE MODE: reconstruct the image as -shapes soft GLOW splats jointly trained by the polish (no greedy, no densify) — engine.GenerateGaussian. For SMOOTH / gradient / painterly content only (8x better than greedy on a gradient; loses on fine detail). -polish-iters sets the training budget (0 = auto-scaled to the glow count). Output glows are native FH6 KindGlow primitives.")
 	polishIters := flag.Int("polish-iters", 200, "polish gradient-descent iterations. Default 200 organic / 300 flat (set below) — the perceptual knee: past it the result is indistinguishable by eye even though the hard-loss metric keeps inching down, so the extra iters are wasted wall-time (polish is 60-85% of a run). Raise for max metric fidelity.")
 	polishTau0 := flag.Float64("polish-tau0", 2.0, "polish initial edge softness (px); higher = coarser early")
 	polishTau1 := flag.Float64("polish-tau1", 0.08, "polish final edge softness (px); lower = sharper, smaller soft->hard snap gap. DEFAULT is content-adaptive (set below unless given): flat/cutout 0.06, organic 0.08. ~0.06-0.08 is the sweet spot across content; the gradient vanishes below ~0.05.")
@@ -190,8 +198,8 @@ func main() {
 	}
 
 	// Weight-strength default: the full edge weight (1.0) over-fits contours and hurts both
-	// image-space SSE and SSIM, so soften it per content — flat/vector → uniform (0), anime →
-	// light (0.15), photo → mild (0.40). Explicit -weight-strength overrides. (The blend is
+	// image-space SSE and SSIM, so soften it per content — flat/vector -> uniform (0), anime ->
+	// light (0.15), photo -> mild (0.40). Explicit -weight-strength overrides. (The blend is
 	// applied to the weight map below.)
 	if !userSet["weight-strength"] {
 		*weightStrength = md.WeightStr // anime 0.15 / photo 0.40 / flat 0 (the only anime≠photo knob)
@@ -356,9 +364,40 @@ func main() {
 		}, *out, *preview, *ssaa)
 		return
 	}
-
 	start := time.Now()
-	res := engine.Run(be, engine.Options{
+	if *gaussian {
+		// NICHE Gaussian mode: bypass the greedy entirely (see engine.GenerateGaussian). -polish-iters
+		// is the from-scratch training budget; 0 auto-scales to the glow count.
+		gIters := *polishIters
+		if gIters <= 0 {
+			if gIters = 1000 + *shapes; gIters > 3000 {
+				gIters = 3000
+			}
+		}
+		res := engine.GenerateGaussian(be, engine.Options{
+			Width: prep.W, Height: prep.H, Background: prep.Background,
+			StopAt: *shapes, Seed: *seed, TransparentBG: prep.HasTransparency,
+			Gaussian:   true,
+			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly),
+		})
+		applog.Printf("gaussian: %d glows, error %.1f -> %.1f in %.1fs",
+			len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
+		gOutW, gOutH := prep.W, prep.H
+		if padPx > 0 {
+			res.Shapes = imageio.TranslateShapes(res.Shapes, -float64(padPx), -float64(padPx))
+			gOutW, gOutH = origW, origH
+		}
+		must(ensureDir(*out))
+		must(imageio.WriteGeometry(*out, model.Geometry{Shapes: res.Shapes}))
+		if *preview != "" {
+			must(ensureDir(*preview))
+			canvas := imageio.RenderFH6(res.Shapes, prep.HasTransparency, gOutW, gOutH, *ssaa)
+			must(imageio.SavePreview(*preview, canvas, gOutW, gOutH))
+		}
+		applog.Printf("wrote %s", *out)
+		return
+	}
+	o := engine.Options{
 		Width: prep.W, Height: prep.H, Background: prep.Background,
 		StopAt: *shapes, RandomSamples: *randomSamples, MutatedSamples: *mutated, Seed: *seed,
 		Kinds:               presetpkg.ParseKinds(*kindsCSV),
@@ -378,28 +417,32 @@ func main() {
 		BoundaryPadding:     float32(*boundaryPad),
 		BoundaryStart:       float32(*boundaryStart),
 		CanvasPad:           float32(*canvasPad),
-		EconomyTol:          *economy,
 		StandoutTol:         *standout,
 		// Compact-shape bias is SSE-neutral on opaque content but mildly HURTS cutouts (it
 		// early-stops short of the budget — forcing small shapes fights the large flat fills
 		// a cutout's object needs). So apply it only to opaque images.
-		CompactPenalty: *compact && !prep.HasTransparency,
-		OnDeviceSearch: *gpuSearch,
-		CoarseSearch:   *coarseSearch,
-		CoarseBudget:   *coarseBudget,
-		CoarseK:        *coarseK,
-		CoarseFP16:     *coarseFP16,
-		Polish:         *polish,
-		PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly),
-		BackFit:        *backfit,
-		BackFitPasses:  *backfitPasses,
-		BackFitFrac:    *backfitFrac,
+		CompactPenalty:    *compact && !prep.HasTransparency,
+		OnDeviceSearch:    *gpuSearch,
+		MomentSeed:        *momentSeed,
+		MomentRefine:      *momentRefine,
+		MomentSeeds:       *momentCenters,
+		MomentDetailStart: float32(*momentDetailStart),
+		CoarseSearch:      *coarseSearch,
+		CoarseBudget:      *coarseBudget,
+		CoarseK:           *coarseK,
+		CoarseFP16:        *coarseFP16,
+		Polish:            *polish,
+		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly),
+		BackFit:           *backfit,
+		BackFitPasses:     *backfitPasses,
+		BackFitFrac:       *backfitFrac,
 		Progress: func(n int, e float64) {
 			if n%25 == 0 {
 				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, *shapes, e, time.Since(start).Seconds())
 			}
 		},
-	})
+	}
+	res := engine.Run(be, o)
 	applog.Printf("done: %d shapes, error %.1f -> %.1f in %.1fs",
 		len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
 	logTimings(res.Timings)

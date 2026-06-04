@@ -31,6 +31,9 @@ func (s *AppState) Layout(gtx C) D {
 	if s.LightboxOn { // drawn last so the full-image overlay sits on top of everything
 		s.lightboxOverlay(gtx)
 	}
+	if s.AboutOn {
+		s.aboutOverlay(gtx)
+	}
 	return dims
 }
 
@@ -75,7 +78,11 @@ func (s *AppState) topBar(gtx C) D {
 						layout.Rigid(GapH(10).Layout),
 					)
 				}
-				children = append(children, layout.Rigid(func(gtx C) D { return th.Dim(gtx, "shape engine · CUDA") }))
+				children = append(children,
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, s.BackendLabel) }),
+					layout.Rigid(GapH(10).Layout),
+					layout.Rigid(s.aboutChip),
+				)
 				return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
 			})
 		},

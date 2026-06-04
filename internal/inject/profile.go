@@ -61,4 +61,6 @@ const (
 	WordTriangle     uint16 = 0x0068           // 0x0068 Triangle (verified against the live build)
 	WordCircleBorder uint16 = 1048688 & 0xFFFF // 0x0070 Circle Border
 	WordEllipse      uint16 = 1048712 & 0xFFFF // 0x0088 Ellipse (NB: renders as a CRESCENT — use Circle+scale)
+	WordGradGlow     uint16 = 0x00E4           // soft radial gradient (gaussian splat) — dumped live 2026-06-03
+	WordGradDisk     uint16 = 0x00E2           // radial gradient, opaque core + soft rim — dumped live 2026-06-03
 )

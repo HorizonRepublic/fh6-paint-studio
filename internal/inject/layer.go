@@ -23,8 +23,11 @@ const (
 	EditorHalfY = 1141.0 // canvas half-height in editor position units
 	ScaleBase   = 64.0   // editor units per scale-1.0 (a scale-1 circle's radius). Calibrated in-game:
 	// an injected shape of known pixel half-extent with markers at ±half showed the edge UNDERSHOOTING
-	// the markers at base 80 (ratio 0.798 → shapes 20% too small → gaps between shapes in-game). base 64
+	// the markers at base 80 (ratio 0.798 -> shapes 20% too small -> gaps between shapes in-game). base 64
 	// makes the edge touch the markers (ratio 0.995), and holds across circle, square, and ellipse.
+	GradScaleBase = 66.0 // editor units per scale-1.0 for the radial gradients: the alpha->0 footprint
+	// radius measured live ≈ 66·scale (linear across scale 3/6/9), slightly larger than the hard circle's
+	// 64. A gradient shape's rx,ry are its alpha->0 radii, so SX = rx·K / GradScaleBase.
 )
 
 // CanvasMap maps our generation-pixel geometry (origin top-left, Y down, w×h) onto the FH6 editor
@@ -90,7 +93,7 @@ func ShapeToLayer(s model.Shape, cm CanvasMap) (LayerWrite, bool) {
 
 	lw.Color = colorBytes(s.Color)
 	switch s.Type {
-	case model.TypeRectangle: // background / corner rect: [x, y, w, h] → centre + half-extent
+	case model.TypeRectangle: // background / corner rect: [x, y, w, h] -> centre + half-extent
 		lw.place(cm, p[0]+p[2]/2, p[1]+p[3]/2, p[2]/2, p[3]/2, 0)
 		lw.Word = WordSquare
 	case model.TypeRotatedRectangle: // [cx, cy, halfW, halfH, deg]
@@ -109,6 +112,12 @@ func ShapeToLayer(s model.Shape, cm CanvasMap) (LayerWrite, bool) {
 		lw.SX, lw.SY = float32(sx), float32(sy)
 		lw.Rotation, lw.Skew = float32(rot), float32(skew)
 		lw.Word = WordTriangle
+	case model.TypeGradGlow: // soft radial gradient: ellipse footprint, gradient scale base
+		lw.placeBase(cm, p[0], p[1], p[2], p[3], p[4], GradScaleBase)
+		lw.Word = WordGradGlow
+	case model.TypeGradDisk: // radial gradient with opaque core + soft rim
+		lw.placeBase(cm, p[0], p[1], p[2], p[3], p[4], GradScaleBase)
+		lw.Word = WordGradDisk
 	default: // TypeLine or unknown — no in-game primitive
 		return lw, false
 	}
@@ -128,6 +137,10 @@ func wordForType(t int, p [6]float32) (uint16, bool) {
 		return WordCircle, true // ellipse = circle + non-uniform scale; 0x88 is a crescent, not an ellipse
 	case model.TypeTriangle:
 		return WordTriangle, true
+	case model.TypeGradGlow:
+		return WordGradGlow, true
+	case model.TypeGradDisk:
+		return WordGradDisk, true
 	}
 	return 0, false
 }
@@ -138,6 +151,15 @@ func wordForType(t int, p [6]float32) (uint16, bool) {
 // the angle is negated.
 func (lw *LayerWrite) place(cm CanvasMap, cx, cy, hx, hy, deg float32) {
 	base := cm.Base
+	if base == 0 {
+		base = ScaleBase
+	}
+	lw.placeBase(cm, cx, cy, hx, hy, deg, base)
+}
+
+// placeBase is place with an explicit scale base, so the radial gradients can use their own
+// calibrated GradScaleBase (≈66) instead of the hard-circle ScaleBase (64).
+func (lw *LayerWrite) placeBase(cm CanvasMap, cx, cy, hx, hy, deg, base float32) {
 	if base == 0 {
 		base = ScaleBase
 	}

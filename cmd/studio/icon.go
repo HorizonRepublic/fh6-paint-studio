@@ -1,14 +1,12 @@
 package main
 
-// The studio executable embeds its icon (used by the window title bar, the taskbar button, and
-// Explorer) together with the application manifest from rsrc_windows_amd64.syso, which the Go
-// toolchain links into the main package automatically on windows/amd64.
+// The studio exe embeds its icon, the application manifest, and the Windows version resource (Properties
+// -> Details: version, company, product) from rsrc_windows_amd64.syso. That file is a build artifact
+// (gitignored): the build scripts generate it from versioninfo.json via goversioninfo, so a plain
+// `go build` makes an exe WITHOUT the icon/manifest/version. Use scripts/build.ps1 (dev, version 0.0.0)
+// or scripts/build-release.ps1 (stamps the release version) to get a complete exe.
 //
-// To regenerate the resource after changing icon.png:
+// Regenerate manually after changing the icon or versioninfo.json:
 //
-//	go install github.com/akavel/rsrc@latest          # once
-//	go run ./debug/cmd/png2ico cmd/studio/icon.png cmd/studio/icon.ico
-//	rsrc -ico cmd/studio/icon.ico -manifest cmd/studio/studio.manifest -o cmd/studio/rsrc_windows_amd64.syso
-//
-// (png2ico packs the 1024px source into a multi-size .ico; any PNG→ICO converter that emits
-// 16..256 px entries works equally well.)
+//	go run ./debug/cmd/png2ico cmd/studio/icon.png cmd/studio/icon.ico   # only if icon.png changed
+//	powershell -File scripts/gen-winres.ps1                              # -Version x.y.z stamps a version

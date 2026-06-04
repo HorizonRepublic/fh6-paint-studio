@@ -29,7 +29,7 @@ func (s *AppState) runCard(gtx C) D {
 		layout.Rigid(func(gtx C) D { return th.Title(gtx, "Run") }),
 		layout.Rigid(GapV(12).Layout),
 		layout.Rigid(func(gtx C) D {
-			// During a post-greedy phase (polish/standout/economy) the shape counter is
+			// During a post-greedy phase (polish/standout) the shape counter is
 			// already at 100%, so show a sweeping indeterminate bar (animated from elapsed time) —
 			// not a bar stuck full. The greedy build still uses the determinate fraction.
 			if running && s.Stats.Stage != "" {
@@ -65,12 +65,20 @@ func (s *AppState) statsLines(gtx C) D {
 	th := s.Th
 	st := s.Stats
 	staging := s.Phase == PhaseRunning && st.Stage != ""
+	// Gaussian mode has no greedy shape-placement: all glows train jointly, so the bar tracks TRAINING
+	// ITERATIONS, not placed shapes. Showing "N / iters shapes" reads as a wrong shape count (the user set
+	// e.g. 2033 glows but the iteration total is ~3000) — so label it as training progress instead.
+	gaussian := s.Mode.Value() == "gaussian"
 	var line1, line2 string
-	if staging {
+	switch {
+	case staging:
 		// Post-greedy: name the active stage + ticking elapsed (no ETA — these phases aren't counted).
 		line1 = st.Stage
 		line2 = fmt.Sprintf("%s elapsed    ·    err %s", fmtDur(st.Elapsed), fmtErr(st.Err))
-	} else {
+	case gaussian:
+		line1 = fmt.Sprintf("training… %d%%", int(s.progressFrac()*100+0.5))
+		line2 = fmt.Sprintf("%s elapsed", fmtDur(st.Elapsed))
+	default:
 		line1 = fmt.Sprintf("%s / %s shapes", group(st.Shapes), group(st.Total))
 		line2 = fmt.Sprintf("%s / %s    ·    err %s", fmtDur(st.Elapsed), etaStr(st), fmtErr(st.Err))
 	}

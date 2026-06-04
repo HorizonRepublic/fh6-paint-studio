@@ -24,7 +24,7 @@ func TestSamplerBiasesToHotCell(t *testing.T) {
 }
 
 func TestSamplerUniformFallback(t *testing.T) {
-	grid := make([]float32, 16) // all-zero grid → total 0 → uniform fallback
+	grid := make([]float32, 16) // all-zero grid -> total 0 -> uniform fallback
 	s := NewErrorSampler(grid, 4, 4, 40, 40)
 	rng := rand.New(rand.NewSource(2))
 	for i := 0; i < 100; i++ {

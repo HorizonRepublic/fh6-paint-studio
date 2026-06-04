@@ -14,7 +14,7 @@ import (
 
 	// Extra input formats — pure-Go decoders (CGO_ENABLED=0 safe; x/image is already a dep).
 	// image.Decode auto-dispatches by registered format. WebP matters most (browsers save webp).
-	// GIF intentionally omitted. AVIF/HEIC need cgo → not supported.
+	// GIF intentionally omitted. AVIF/HEIC need cgo -> not supported.
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"

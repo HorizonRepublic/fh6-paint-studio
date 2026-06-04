@@ -2,5 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Pin the release-build runner: CUDA 12.8's cudafe++ crashes on the windows-2025 MSVC.",
+      "matchManagers": ["github-runners"],
+      "matchDepNames": ["windows"],
+      "enabled": false
+    }
   ]
 }

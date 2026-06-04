@@ -149,7 +149,7 @@ func (s *AppState) libraryRow(gtx C, r *LibraryRow) D {
 }
 
 // injectButton renders the row's Inject control by inject state: a spinner while in flight, then a
-// transient green ✓ / red ✗ pill, otherwise the normal button.
+// transient green tick / red cross pill, otherwise the normal button.
 func (s *AppState) injectButton(gtx C, r *LibraryRow) D {
 	th := s.Th
 	switch {

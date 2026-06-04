@@ -106,8 +106,14 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 	return shapes
 }
 
+// opaqueShape reports whether s composites as a full opaque REPLACE — the assumption behind
+// recolorVisible / shapeContributions / pruneToBudget (a shape "owns" the topmost pixels it covers).
+// A gradient kind (glow/disk) is NEVER an opaque replace even at colour-alpha 255: it carries a
+// per-pixel radial falloff, so it blends. Excluding it keeps those opaque-only passes from
+// mis-owning / mis-recolouring a glow (e.g. the Gaussian all-glow mode, or any future pass that
+// introduces glows). No effect on the hard kinds (IsGradient is false), so behaviour is byte-identical.
 func opaqueShape(s model.Shape) bool {
-	return len(s.Color) >= 4 && s.Color[3] >= 255
+	return len(s.Color) >= 4 && s.Color[3] >= 255 && !raster.IsGradient(model.KindFromType(s.Type))
 }
 
 // pickBest evaluates a candidate batch and returns the lowest-score candidate

@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
 )
@@ -80,7 +81,7 @@ func sobelMagAt(luma []float32, w, h, x, y int) float32 {
 func lumaOf(canvas []float32, w, h int, dst []float32) {
 	for i := 0; i < w*h; i++ {
 		p := i * 4
-		dst[i] = 0.299*canvas[p] + 0.587*canvas[p+1] + 0.114*canvas[p+2]
+		dst[i] = metric.Luma(canvas[p], canvas[p+1], canvas[p+2])
 	}
 }
 

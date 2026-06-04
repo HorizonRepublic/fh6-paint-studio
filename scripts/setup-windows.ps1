@@ -1,6 +1,6 @@
 # setup-windows.ps1 — install all toolchain deps for building FH6 Paint Studio (CPU + CUDA) on Windows.
 # Run in an ELEVATED PowerShell (Run as Administrator):
-#     powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
+#     powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1
 # Prefers winget (built into Win10/11). Falls back to Chocolatey if winget is missing.
 # After it finishes, OPEN A NEW "x64 Native Tools Command Prompt for VS 2022" so nvcc finds cl.exe.
 

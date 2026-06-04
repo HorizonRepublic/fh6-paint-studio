@@ -11,14 +11,14 @@ func TestDetailBiasSchedule(t *testing.T) {
 	if got := detailBias(0.5, 0.6, 0.4); got != 0 {
 		t.Fatalf("before start must give 0, got %v", got)
 	}
-	// at start → 0, ramps to full at progress 1
+	// at start -> 0, ramps to full at progress 1
 	if got := detailBias(0.6, 0.6, 0.4); got != 0 {
 		t.Fatalf("at start must give 0, got %v", got)
 	}
 	if got := detailBias(1.0, 0.6, 0.4); got != 0.4 {
 		t.Fatalf("at progress 1 must give full strength 0.4, got %v", got)
 	}
-	// midway (progress 0.8, start 0.6) → t=0.5 → 0.2
+	// midway (progress 0.8, start 0.6) -> t=0.5 -> 0.2
 	if got := detailBias(0.8, 0.6, 0.4); got < 0.19 || got > 0.21 {
 		t.Fatalf("midway must give ~0.2, got %v", got)
 	}

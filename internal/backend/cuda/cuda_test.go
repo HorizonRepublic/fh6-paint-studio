@@ -121,6 +121,71 @@ func TestGoldenDiffEvaluate(t *testing.T) {
 	}
 }
 
+// gradCands builds random radial-gradient candidates (KindGlow/KindDisk) with the ellipse param layout.
+func gradCands(rng *rand.Rand, w, h, n int) []model.Candidate {
+	kinds := []model.ShapeKind{model.KindGlow, model.KindDisk}
+	out := make([]model.Candidate, n)
+	for i := range out {
+		out[i] = model.Candidate{
+			Kind: kinds[rng.Intn(2)],
+			P: [6]float32{rng.Float32() * float32(w), rng.Float32() * float32(h),
+				3 + rng.Float32()*float32(w)/3, 3 + rng.Float32()*float32(h)/3, rng.Float32() * 180, 0},
+			Color: model.RGBA{R: rng.Float32(), G: rng.Float32(), B: rng.Float32(), A: 0.3 + 0.7*rng.Float32()},
+		}
+	}
+	return out
+}
+
+// The CUDA gradient eval (per-pixel-alpha block-kernel branch) must match the CPU reference within a
+// looser tolerance than the hard kinds — the falloff uses float expf on the device vs float64 on the
+// host, so scores agree to ~1e-2 rel, not bit-exact. Validates KindGlow/KindDisk scoring + colour.
+func TestGradientEvalMatchesCPU(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	w, h := 37, 29
+	target, weight := makeTarget(rng, w, h, false)
+	ref := cpu.New(target, w, h, 8)
+	ref.SetWeight(weight)
+	gpu, err := New(target, weight, w, h, 8)
+	if err != nil {
+		t.Fatalf("cuda.New: %v", err)
+	}
+	defer gpu.Close()
+	if !gpu.SetGradients(true) {
+		t.Skip("DLL predates fp_set_gradients — rebuild fh6cuda.dll")
+	}
+	defer gpu.SetGradients(false)
+
+	canvas := make([]float32, w*h*4)
+	for i := range canvas {
+		canvas[i] = rng.Float32()
+	}
+	_ = ref.Reset(canvas)
+	_ = gpu.Reset(canvas)
+
+	cands := gradCands(rng, w, h, 1500)
+	rc, _ := ref.Evaluate(cands)
+	gc, _ := gpu.Evaluate(cands)
+
+	var mism int
+	for i := range cands {
+		rRej, gRej := rc[i].Score == rejected, gc[i].Score == rejected
+		if rRej || gRej {
+			if rRej != gRej {
+				t.Errorf("cand %d (%v) reject mismatch: cpu=%v cuda=%v", i, cands[i].Kind, rRej, gRej)
+			}
+			continue
+		}
+		if !closeRel(rc[i].Score, gc[i].Score, 6e-3, 3e-2) {
+			if mism++; mism <= 8 {
+				t.Errorf("cand %d (%v) score: cpu=%.5f cuda=%.5f", i, cands[i].Kind, rc[i].Score, gc[i].Score)
+			}
+		}
+		if math.Abs(float64(rc[i].Color.R-gc[i].Color.R)) > 3e-3 {
+			t.Errorf("cand %d (%v) colorR: cpu=%.4f cuda=%.4f", i, cands[i].Kind, rc[i].Color.R, gc[i].Color.R)
+		}
+	}
+}
+
 // TestGoldenDiffApplyAndGrid checks that Apply composites identically and the
 // error grid matches after a sequence of applied shapes.
 func TestGoldenDiffApplyAndGrid(t *testing.T) {
@@ -193,6 +258,10 @@ func TestGoldenDiffPolish(t *testing.T) {
 		mk(model.KindRectangle, [6]float32{10, 12, 6, 8, 10, 0}, 0.1, 0.7, 0.2, 0.6),
 		mk(model.KindTriangle, [6]float32{5, 5, 26, 8, 12, 26}, 0.2, 0.3, 0.9, 0.9),
 		mk(model.KindEllipse, [6]float32{30, 20, 7, 7, 0, 0}, 0.9, 0.9, 0.1, 0.5),
+		// Trainable glow (gaussian splat): a large, rotated, anisotropic footprint so interior pixels
+		// (smooth coverage) exercise all 5 geometry params — the GPU's gaussianCovGradD branch vs the
+		// CPU's raster.GaussianCovGrad. This is the #7 (GaussianImage) device-gradient correctness gate.
+		mk(model.KindGlow, [6]float32{18, 16, 13, 10, 20, 0}, 0.6, 0.3, 0.45, 0.85),
 	}
 	bg := model.RGBA{R: 0.4, G: 0.4, B: 0.4}
 	tau := 1.5

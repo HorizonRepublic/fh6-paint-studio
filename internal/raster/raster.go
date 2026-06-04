@@ -6,7 +6,7 @@ import (
 	"fh6-paint-studio/internal/model"
 )
 
-const deg2rad = math.Pi / 180 // degrees → radians conversion factor
+const deg2rad = math.Pi / 180 // degrees -> radians conversion factor
 
 func clampI(v, lo, hi int) int {
 	if v < lo {
@@ -57,6 +57,8 @@ func Inside(kind model.ShapeKind, p [6]float32, x, y int) bool {
 	case model.KindLine:
 		return LineInside(p, x, y)
 	default:
+		// Ellipse + the radial gradients (KindGlow/KindDisk) share the elliptical footprint; their
+		// per-pixel falloff is in Coverage, but Inside (footprint membership) is the ellipse test.
 		return EllipseInside(p, x, y)
 	}
 }

@@ -3,6 +3,7 @@
 /bin-temp/
 /release/
 /dist/
+cmd/studio/rsrc_windows_amd64.syso
 *.exe
 *.exe~
 *.dll
@@ -50,6 +51,7 @@ CLAUDE.md
 AGENTS.md
 GEMINI.md
 .claude/
+.serena/
 .cursor/
 .cursorrules
 .cursorignore

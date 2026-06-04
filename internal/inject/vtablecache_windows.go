@@ -31,7 +31,7 @@ func locationCachePath() string {
 }
 
 // loadCache returns the cached (vtable, group) iff it was saved for this exact running process (same
-// pid AND same module base). Any mismatch / missing file → no hint.
+// pid AND same module base). Any mismatch / missing file -> no hint.
 func loadCache(p *proc) (vtable, group uintptr, ok bool) {
 	data, err := os.ReadFile(locationCachePath())
 	if err != nil {

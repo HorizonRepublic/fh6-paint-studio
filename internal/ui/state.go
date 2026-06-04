@@ -39,13 +39,56 @@ type RunStats struct {
 	Err, Err0     float64
 	Elapsed, ETA  time.Duration
 	History       []float64 // error per progress tick, for the sparkline
-	Stage         string    // current post-greedy phase (polish/standout/economy); "" during the greedy build — drives the indeterminate "still working" indicator instead of a bar stuck at 100%
+	Stage         string    // current post-greedy phase (polish/standout); "" during the greedy build — drives the indeterminate "still working" indicator instead of a bar stuck at 100%
+
+	// ETA state: an EMA of seconds/shape over RECENT shapes, not the cumulative average. The
+	// per-shape cost is heavily front-loaded (big early shapes), so a linear elapsed/frac ETA
+	// grossly overestimates early; the recent-rate EMA tracks the speed-up onto cheap late shapes.
+	etaPerShape    float64
+	etaLastShapes  int
+	etaLastElapsed time.Duration
+}
+
+// UpdateETA refreshes ETA from a recent-rate EMA of seconds/shape, called once per progress tick.
+// The per-shape cost is heavily front-loaded (big early shapes are far slower than late detail), so
+// a linear elapsed/frac estimate overestimates early; the EMA tracks the speed-up onto cheap late
+// shapes, so the displayed estimate falls realistically instead of staying inflated.
+func (s *RunStats) UpdateETA(shapes, total int, elapsed time.Duration) {
+	if shapes > s.etaLastShapes {
+		dt := (elapsed - s.etaLastElapsed).Seconds()
+		dn := float64(shapes - s.etaLastShapes)
+		if dt >= 0 && dn > 0 {
+			inst := dt / dn
+			if s.etaPerShape == 0 {
+				s.etaPerShape = inst
+			} else {
+				s.etaPerShape = 0.85*s.etaPerShape + 0.15*inst
+			}
+		}
+		s.etaLastShapes = shapes
+		s.etaLastElapsed = elapsed
+	}
+	if remaining := total - shapes; remaining > 0 && s.etaPerShape > 0 {
+		s.ETA = time.Duration(s.etaPerShape * float64(remaining) * float64(time.Second))
+	} else {
+		s.ETA = 0
+	}
+}
+
+type UpdateInfo struct {
+	Version string // display tag, e.g. "v0.3.0"
+	Notes   string
+	URL     string
 }
 
 // AppState holds every widget state plus the loaded image and run telemetry. The panel
 // Layout methods read and mutate it; the main loop feeds runner events into it.
 type AppState struct {
 	Th *Theme
+
+	// app identity (set by main)
+	Version      string
+	BackendLabel string
 
 	// loaded image
 	ImgPath   string
@@ -67,18 +110,12 @@ type AppState struct {
 	lastBudget int
 	Mode       *Dropdown
 	Alpha      widget.Bool
-	Polish     widget.Bool
-	Economy    widget.Bool // opt-in post-polish trim of redundant layers (default off = full budget / max quality)
-	Standout   widget.Bool // opt-in post-polish perceptual standout suppression (default off): blend/fade shapes whose rim stands out against a smooth target
 	Backfit    widget.Bool
 	Boundary   widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
 	KeepInside widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
 	Seed       widget.Editor
 
 	AlphaHint      Hint
-	PolishHint     Hint
-	EconomyHint    Hint
-	StandoutHint   Hint
 	BackfitHint    Hint
 	BoundaryHint   Hint
 	KeepInsideHint Hint
@@ -99,17 +136,17 @@ type AppState struct {
 	SeedFocus bool
 
 	// actions
-	OpenBtn      widget.Clickable
-	PreviewOpen  widget.Clickable // the empty-state preview area doubles as an Open button
-	GenBtn       widget.Clickable
-	CancelBtn    widget.Clickable
+	OpenBtn         widget.Clickable
+	PreviewOpen     widget.Clickable // the empty-state preview area doubles as an Open button
+	GenBtn          widget.Clickable
+	CancelBtn       widget.Clickable
 	InjectLayers    widget.Editor // exact FH6 template layer count for injection (library inject controls)
 	InjectLayersErr bool          // the FH6-layers field was empty/invalid on an Inject click — draw it red until a valid count is entered
 	InjectScale     widget.Editor // uniform scale of the injected art on the decal (1.0 = fit the canvas; <1 shrinks toward centre so it fits a zoomed-in editor view)
-	ElevateBtn   widget.Clickable
-	Elevated     bool        // process is running as administrator (set by main at startup)
-	Shield       image.Image // system UAC shield icon (nil if unavailable)
-	ShieldOp     paint.ImageOp
+	ElevateBtn      widget.Clickable
+	Elevated        bool        // process is running as administrator (set by main at startup)
+	Shield          image.Image // system UAC shield icon (nil if unavailable)
+	ShieldOp        paint.ImageOp
 
 	// preview interaction
 	Wipe        widget.Float
@@ -137,11 +174,26 @@ type AppState struct {
 	StudioTab  widget.Clickable
 	LibraryTab widget.Clickable
 
+	// update check + About dialog
+	Update        *UpdateInfo // non-nil when a newer release exists
+	LastSeen      string      // release tag acknowledged in About; hides the dot
+	UpdateStatus  string      // transient text for a manual check
+	AboutOn       bool
+	AboutBtn      widget.Clickable
+	AboutClose    widget.Clickable
+	AboutCardSink widget.Clickable // absorbs clicks over the card so they miss the scrim
+	DownloadBtn   widget.Clickable
+	GitHubBtn     widget.Clickable
+	NexusBtn      widget.Clickable
+	CheckNowBtn   widget.Clickable
+	AutoUpdate    widget.Bool
+	AboutList     widget.List
+
 	// preferences (persisted in studio.json, surfaced in the status bar — not the generator settings)
 	SoundOn widget.Bool // play a chime when a generation finishes
 
 	// inject status (library): the in-flight inject shows a spinner on its row button + disables the
-	// others; the result lingers as a green ✓ / red ✗ pill until InjectResultUntil, then reverts.
+	// others; the result lingers as a green tick / red cross pill until InjectResultUntil, then reverts.
 	InjectingID       string
 	InjectResultID    string
 	InjectOK          bool
@@ -166,15 +218,16 @@ type AppState struct {
 func NewAppState(th *Theme) *AppState {
 	s := &AppState{
 		Th: th,
-		// 3 manual content presets (chosen explicitly; there is no auto content-classifier).
+		// 3 manual content presets (chosen explicitly; there is no auto content-classifier) + the
+		// niche "gaussian" mode (soft-glow reconstruction for SMOOTH / gradient / painterly content —
+		// 8x better than greedy on a gradient, loses on fine detail; no greedy, trains on the GPU).
 		// Default = anime, the best general-purpose preset.
-		Mode: NewDropdown([]string{"anime", "photo", "flat"}, 0),
+		Mode: NewDropdown([]string{"anime", "photo", "flat", "gaussian"}, 0),
 	}
 	s.Budget.Value = shapesToFrac(1000)
 	s.BudgetEd.SingleLine = true
 	s.BudgetEd.SetText("1000")
 	s.lastBudget = 1000
-	s.Polish.Value = true
 	s.KeepInside.Value = true // bound shapes inside the image by default (no in-game edge bleed)
 	s.SoundOn.Value = true    // chime on finish by default (overridden by the saved preference)
 	s.Seed.SingleLine = true
@@ -190,6 +243,8 @@ func NewAppState(th *Theme) *AppState {
 	s.LibScroll.Axis = layout.Vertical
 	s.LogList.Axis = layout.Vertical
 	s.LogList.ScrollToEnd = true
+	s.AutoUpdate.Value = true // overridden by the saved preference
+	s.AboutList.Axis = layout.Vertical
 	if img := loadShield(); img != nil {
 		s.Shield = img
 		s.ShieldOp = paint.NewImageOp(img)
@@ -254,7 +309,7 @@ func (s *AppState) BeginInject(id string) {
 	s.InjectResultID = ""
 }
 
-// FinishInject records an inject outcome as a transient ✓/✗ pill that reverts at `until`.
+// FinishInject records an inject outcome as a transient tick/cross pill that reverts at `until`.
 func (s *AppState) FinishInject(id string, ok bool, until time.Time) {
 	if s.InjectingID == id {
 		s.InjectingID = ""
@@ -267,7 +322,7 @@ func (s *AppState) FinishInject(id string, ok bool, until time.Time) {
 // InjectBusy reports whether any injection is currently in flight (used to block re-entry).
 func (s *AppState) InjectBusy() bool { return s.InjectingID != "" }
 
-// MaybeClearInjectResult drops the lingering ✓/✗ pill once its display window has elapsed.
+// MaybeClearInjectResult drops the lingering tick/cross pill once its display window has elapsed.
 func (s *AppState) MaybeClearInjectResult(now time.Time) {
 	if s.InjectResultID != "" && !s.InjectResultUntil.IsZero() && now.After(s.InjectResultUntil) {
 		s.InjectResultID = ""
@@ -285,6 +340,22 @@ func (s *AppState) ShowLightbox(img image.Image) {
 
 // HideLightbox dismisses the preview overlay.
 func (s *AppState) HideLightbox() { s.LightboxOn = false }
+
+// OpenAbout acknowledges any pending update and returns the tag to persist as seen ("" if none).
+func (s *AppState) OpenAbout() string {
+	s.AboutOn = true
+	if s.Update != nil {
+		s.LastSeen = s.Update.Version
+		return s.Update.Version
+	}
+	return ""
+}
+
+func (s *AppState) CloseAbout() { s.AboutOn = false }
+
+func (s *AppState) HasUpdateBadge() bool {
+	return s.Update != nil && s.Update.Version != s.LastSeen
+}
 
 // SetPreview replaces the current reconstruction frame (and its paint op).
 func (s *AppState) SetPreview(img *image.NRGBA) {
@@ -357,10 +428,6 @@ func (s *AppState) Choices() preset.Choices {
 	c.Shapes = s.BudgetShapes()
 	c.Mode = s.Mode.Value()
 	c.Quality = "quality" // the high-quality knee (50k candidates); advanced fields override per-knob
-	pol := s.Polish.Value
-	c.Polish = &pol
-	c.Economy = s.Economy.Value
-	c.Standout = s.Standout.Value
 	if s.alphaTouched {
 		a := s.Alpha.Value
 		c.Alpha = &a
