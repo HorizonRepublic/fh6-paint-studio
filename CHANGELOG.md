@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.0.1...v1.1.0) (2026-06-04)
+
+
+### Features
+
+* expert mode ([#20](https://github.com/HorizonRepublic/fh6-paint-studio/issues/20)) ([563fcaf](https://github.com/HorizonRepublic/fh6-paint-studio/commit/563fcaf04717f10b3ca1fd22d0c5d5c6df79fa7f))
+
 ## [1.0.1](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.0.0...v1.0.1) (2026-06-04)
 
 
