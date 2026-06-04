@@ -17,6 +17,7 @@ type Dropdown struct {
 	sel     int
 	open    bool
 	changed bool
+	builtin int // count of leading built-in options; the rest are custom, shown under a divider header
 	btn     widget.Clickable
 	items   []widget.Clickable
 }
@@ -26,7 +27,7 @@ func NewDropdown(options []string, sel int) *Dropdown {
 	if sel < 0 || sel >= len(options) {
 		sel = 0
 	}
-	return &Dropdown{options: options, sel: sel, items: make([]widget.Clickable, len(options))}
+	return &Dropdown{options: options, sel: sel, builtin: len(options), items: make([]widget.Clickable, len(options))}
 }
 
 // Value returns the currently selected option string.
@@ -42,6 +43,30 @@ func (d *Dropdown) Set(value string) {
 		}
 	}
 }
+
+// SetOptions replaces the option list (rebuilding the per-item click state), keeping the current
+// selection by value when it still exists, else falling back to the first option. builtin is the count
+// of leading built-in options (the rest render under a "Custom" header). Does not raise the changed flag.
+func (d *Dropdown) SetOptions(options []string, builtin int) {
+	cur := ""
+	if d.sel >= 0 && d.sel < len(d.options) {
+		cur = d.options[d.sel]
+	}
+	d.options = options
+	d.builtin = builtin
+	d.items = make([]widget.Clickable, len(options))
+	d.sel = 0
+	for i, o := range options {
+		if o == cur {
+			d.sel = i
+			break
+		}
+	}
+	d.open = false
+}
+
+// ForceOpen opens the option popup (used by the headless screenshot harness to capture it).
+func (d *Dropdown) ForceOpen() { d.open = true }
 
 // Changed reports (and clears) whether the selection changed since the last call.
 func (d *Dropdown) Changed() bool {
@@ -97,26 +122,43 @@ func ddBox(gtx C, th *Theme, btn *widget.Clickable, text string) D {
 	})
 }
 
-// popup is the open option list, fixed to the control's width.
+// popup is the open option list, fixed to the control's width. When custom options follow the built-in
+// ones, each group gets a dim header so the user's presets read apart from the built-in modes.
 func (d *Dropdown) popup(gtx C, th *Theme, width int) D {
 	gtx.Constraints.Min.X = width
 	gtx.Constraints.Max.X = width
-	return th.CardBg(gtx, th.SurfaceHi, 4, func(gtx C) D {
-		ch := make([]layout.FlexChild, 0, len(d.options))
-		for i := range d.options {
-			i := i
-			ch = append(ch, layout.Rigid(func(gtx C) D {
-				return material.Clickable(gtx, &d.items[i], func(gtx C) D {
-					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					col := th.Text
-					if i == d.sel {
-						col = th.Accent
-					}
-					return layout.UniformInset(8).Layout(gtx, func(gtx C) D {
-						return th.Lbl(gtx, 14, d.options[i], col)
-					})
+	grouped := d.builtin > 0 && d.builtin < len(d.options)
+	header := func(text string) layout.FlexChild {
+		return layout.Rigid(func(gtx C) D {
+			return layout.Inset{Top: 6, Bottom: 2, Left: 8, Right: 8}.Layout(gtx, func(gtx C) D {
+				return th.Lbl(gtx, 11, text, th.TextDim)
+			})
+		})
+	}
+	item := func(i int) layout.FlexChild {
+		return layout.Rigid(func(gtx C) D {
+			return material.Clickable(gtx, &d.items[i], func(gtx C) D {
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				col := th.Text
+				if i == d.sel {
+					col = th.Accent
+				}
+				return layout.UniformInset(8).Layout(gtx, func(gtx C) D {
+					return th.Lbl(gtx, 14, d.options[i], col)
 				})
-			}))
+			})
+		})
+	}
+	return th.CardBg(gtx, th.SurfaceHi, 4, func(gtx C) D {
+		ch := make([]layout.FlexChild, 0, len(d.options)+2)
+		if grouped {
+			ch = append(ch, header("Built-in"))
+		}
+		for i := range d.options {
+			if grouped && i == d.builtin {
+				ch = append(ch, header("Custom"))
+			}
+			ch = append(ch, item(i))
 		}
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
 	})

@@ -29,10 +29,12 @@ import (
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/inject"
 	"fh6-paint-studio/internal/library"
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/runner"
 	"fh6-paint-studio/internal/ui"
+	"fh6-paint-studio/internal/userpreset"
 )
 
 // version is the release version, injected at build time via -ldflags "-X main.version=...". It stays
@@ -88,15 +90,6 @@ func loop(w *app.Window) error {
 	st.Elevated = inject.Elevated()
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
-	if prefs.Preset != "" {            // restore the last content preset + shape budget
-		st.Mode.Set(prefs.Preset)
-	}
-	if prefs.Budget > 0 {
-		st.RestoreBudget(prefs.Budget)
-	}
-	if prefs.KeepInside != nil { // restore the persisted generator toggles (tri-state: nil = default)
-		st.KeepInside.Value = *prefs.KeepInside
-	}
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
 	st.LastSeen = prefs.LastSeenVersion
 
@@ -115,7 +108,29 @@ func loop(w *app.Window) error {
 	}
 	var pendingExportID string // set when a library Export "Save as…" dialog is in flight
 
-	q := newEventQueue() // model.LinearLight is set true once in main(), before this goroutine starts
+	// Custom presets (saved generation settings, reloadable from the Preset dropdown).
+	var presetStore *userpreset.Store
+	if root, err := userpreset.DefaultRoot(); err != nil {
+		st.AppendLog("presets: " + err.Error())
+	} else {
+		presetStore = userpreset.Open(root)
+		reloadPresets(st, presetStore)
+	}
+
+	// Restore the last selection AFTER presets load, so a custom-preset name resolves in the dropdown.
+	// SelectPreset sets the engine mode and loads the snapshot; the persisted budget and keep-inside then
+	// override it, so the exact last state is restored even where it diverged from the preset.
+	if prefs.Preset != "" {
+		st.SelectPreset(prefs.Preset)
+	}
+	if prefs.Budget > 0 {
+		st.RestoreBudget(prefs.Budget)
+	}
+	if prefs.KeepInside != nil {
+		st.KeepInside.Value = *prefs.KeepInside
+	}
+
+	q := newEventQueue()
 	var ops op.Ops
 
 	var curPrep *imageio.Prepared // engine input for the loaded image (always decoded in linear light)
@@ -210,6 +225,7 @@ func loop(w *app.Window) error {
 				cancelRun()
 			}
 			tb.clear()
+			tb.close()
 			savePrefs()
 			return e.Err
 		case app.FrameEvent:
@@ -226,6 +242,7 @@ func loop(w *app.Window) error {
 				const demoPath = "testdata/super-image.jpg"
 				if prep, img, rect, err := loadImage(demoPath); err == nil {
 					curPrep = prep
+					st.ContentColors, st.ContentCutout = contentDescriptor(curPrep)
 					viewAbs = rect
 					st.SetSource(img, demoPath)
 					st.SetBudgetShapes(500)
@@ -273,7 +290,6 @@ func loop(w *app.Window) error {
 						lastW, lastH = runOrigW, runOrigH
 					}
 					st.SetPreview(canvas)
-					st.Backend = ev.Backend
 					if n := len(shapes); n > 0 {
 						st.Stats.Shapes = n - 1
 					}
@@ -309,6 +325,7 @@ func loop(w *app.Window) error {
 					st.Toast = "Failed to open: " + res.err.Error()
 				} else {
 					curPrep = res.prep
+					st.ContentColors, st.ContentCutout = contentDescriptor(curPrep)
 					viewAbs = res.rect // base for crop selections; SetSource clears Cropped
 					st.SetSource(res.img, res.path)
 					st.Toast = ""
@@ -348,6 +365,7 @@ func loop(w *app.Window) error {
 					abs := imageio.SubAbs(viewAbs, fx, fy, fw, fh)
 					if prep, img, err := loadCropRegion(st.ImgPath, abs); err == nil {
 						curPrep = prep
+						st.ContentColors, st.ContentCutout = contentDescriptor(curPrep)
 						st.SetSource(img, st.ImgPath) // clears crop mode + Cropped
 						viewAbs = abs
 						st.Cropped = true
@@ -361,6 +379,7 @@ func loop(w *app.Window) error {
 			if st.ResetBtn.Clicked(gtx) && st.ImgPath != "" {
 				if prep, img, rect, err := loadImage(st.ImgPath); err == nil {
 					curPrep = prep
+					st.ContentColors, st.ContentCutout = contentDescriptor(curPrep)
 					viewAbs = rect
 					st.SetSource(img, st.ImgPath) // clears Cropped
 					st.AppendLog("reset to the original image")
@@ -373,17 +392,12 @@ func loop(w *app.Window) error {
 				st.Log = nil
 				// The working source IS the (optionally cropped) image, so generate on curPrep directly.
 				genPrep := curPrep
-				// "Keep shapes inside image": wrap the target in a transparent surround so the spill
-				// penalty bounds every shape to the content rectangle. Record the border + pre-pad dims;
-				// the finished geometry/canvas are mapped back to the original size on Done.
 				runPadPx, runOrigW, runOrigH = 0, genPrep.W, genPrep.H
-				// Keep shapes inside the image: ALWAYS wrap the target in a transparent surround so the
-				// spill penalty bounds every shape on ALL FOUR edges. The global "has transparency"
-				// fraction is NOT a safe shortcut — an image can be transparent in the middle yet have
-				// content touching an edge (which still spills), and a cutout's silhouette touches its
-				// bbox edges after auto-crop (no margin there either). Padding is quality-neutral: the
-				// empty margin draws no shapes (the error sampler ignores it, so the budget all goes to
-				// the content) — only the working canvas is a little larger.
+				// Keep shapes inside image: always wrap the target in a transparent surround so the spill
+				// penalty bounds every shape on all four edges, then map the geometry/canvas back to the
+				// original size on Done. Always-pad (not gated on a transparency fraction) because content
+				// can touch an edge even when the middle is transparent, and a cutout silhouette touches its
+				// bbox after auto-crop. Quality-neutral: the empty margin draws no shapes.
 				if st.KeepInside.Value {
 					padded, padPx := imageio.PadTransparent(genPrep, framePadFrac)
 					genPrep, runPadPx = padded, padPx
@@ -438,6 +452,39 @@ func loop(w *app.Window) error {
 			}
 			if st.AutoUpdate.Update(gtx) {
 				savePrefs()
+			}
+
+			// Custom-preset actions (save the current settings, rename/delete the selected preset).
+			if st.SavePresetBtn.Clicked(gtx) && presetStore != nil {
+				name := strings.TrimSpace(st.PresetNameEd.Text())
+				switch {
+				case name == "":
+					st.Toast = "Enter a preset name first"
+				case ui.IsBuiltinMode(name):
+					st.Toast = "That name is reserved for a built-in preset"
+				default:
+					p := userpreset.Preset{Name: name, Created: time.Now(),
+						KeepInside: st.KeepInside.Value, Choices: st.Choices()}
+					if _, err := presetStore.Save(p); err != nil {
+						st.Toast = "Save failed: " + err.Error()
+					} else {
+						reloadPresets(st, presetStore)
+						st.SelectPreset(name)
+						st.PresetNameEd.SetText("")
+						st.Toast = "Preset saved"
+					}
+				}
+			}
+			if st.DeletePresetBtn.Clicked(gtx) && presetStore != nil {
+				if sel := st.SelectedPreset(); sel != nil {
+					if err := presetStore.Delete(sel.ID); err != nil {
+						st.Toast = "Delete failed: " + err.Error()
+					} else {
+						reloadPresets(st, presetStore)
+						st.SelectPreset("anime")
+						st.Toast = "Preset deleted"
+					}
+				}
 			}
 
 			// commitRename writes the edited name to disk and reloads (which rebuilds the rows and
@@ -698,6 +745,19 @@ func reloadLibrary(st *ui.AppState, store *library.Store) {
 	st.SetLibrary(rows)
 }
 
+// reloadPresets refreshes the studio's custom-preset list (and the Preset dropdown) from the store.
+func reloadPresets(st *ui.AppState, store *userpreset.Store) {
+	if store == nil {
+		return
+	}
+	ps, err := store.List()
+	if err != nil {
+		st.AppendLog("presets list: " + err.Error())
+		return
+	}
+	st.SetPresets(ps)
+}
+
 // libMeta builds the library Entry metadata from the current studio state + render dims.
 func libMeta(st *ui.AppState, w, h int) library.Entry {
 	return library.Entry{
@@ -861,6 +921,17 @@ func nrgbaFromPrep(prep *imageio.Prepared) *image.NRGBA {
 	return img
 }
 
+// contentDescriptor reports the palette colour count and cutout flag of a prepared image, used to
+// fill the expert knobs with the selected mode's concrete defaults. The cutout flag mirrors how
+// Resolve derives `transparent` (a genuine cutout, NOT a keep-inside pad margin), so the knob
+// values the panel shows match what the engine actually runs.
+func contentDescriptor(p *imageio.Prepared) (colors int, cutout bool) {
+	if p == nil {
+		return 0, false
+	}
+	return metric.ContentClass(p.Pixels, p.W, p.H).Colors, p.HasTransparency && !p.PaddedOpaque
+}
+
 func u8(f float32) uint8 {
 	if f <= 0 {
 		return 0
@@ -871,11 +942,7 @@ func u8(f float32) uint8 {
 	return uint8(f*255 + 0.5)
 }
 
-// pickFile shows the open-file dialog (native Win32 GetOpenFileNameW on Windows — see
-// filedialog_windows.go; a no-op stub elsewhere). Returns "" on cancel.
-
-// ---- event queue (thread-safe hand-off from the worker goroutine to the UI loop) ----------
-
+// eventQueue is a thread-safe hand-off from the worker goroutine to the UI loop.
 type eventQueue struct {
 	mu    sync.Mutex
 	items []runner.Event

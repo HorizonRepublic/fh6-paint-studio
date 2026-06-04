@@ -50,26 +50,21 @@ func WeightMap(target []float32, w, h int) []float32 {
 	return out
 }
 
-// WeightMapV2 is a richer importance map that fixes the two structural
-// weaknesses of WeightMap for CRISP CONTOURS:
+// WeightMapV2 is a richer importance map that fixes two weaknesses of WeightMap on crisp contours.
+// It uses absolute (not max-normalized) edge gain with a wide [0.55,5.25] clamp, so a black outline
+// keeps its weight even when the image has another high-contrast region (a relative Sobel map dilutes
+// contour weight on busy images and roughens outlines). And a 3x3 max-dilation (decay 0.92) widens
+// each 1-2px ink line's weight into its neighbour ring, so a flat-fill shape crossing the outline
+// pays for it instead of breaking it.
 //
-//   - ABSOLUTE (not max-normalized) edge gain with a wide [0.55,5.25] clamp, so a black
-//     outline keeps its high weight even when the image has another high-contrast region
-//     (the relative Sobel map dilutes contour weight on busy images -> rough outlines).
-//   - 3x3 MAX-DILATION (decay 0.92): widens each 1-2px ink line's high weight into its
-//     neighbour ring, so a flat-fill shape that CROSSES the outline pays for it instead of
-//     smearing/breaking it (the textbook cause of broken contours).
+// The weight feeds the optimal-color solve, the per-shape SSE delta (which shape wins), the error
+// grid and the candidate-center sampler, so this one map makes the engine both pick contour-hugging
+// shapes and place more candidates on them. The backend math is linear in the weight, so the wider
+// range needs no backend change. Best for flat/line-art/cutout content; on smooth content a strong
+// edge term can drift flat-fill colours slightly dark.
 //
-// The weight feeds the optimal-color solve, the per-shape ΔSSE (which shape wins), the
-// error grid AND the candidate-center sampler — so this one map makes the engine select
-// shapes that hug contours AND place more candidates on them. The backend math is linear
-// in the weight (ratios for color, multiply for ΔSSE), so the wider range needs NO backend
-// change — only RELATIVE weights matter. Best for flat/line-art/cutout content; on smooth
-// content a strong edge term can drift flat-fill colors slightly dark.
-//
-// The linework (ink) term is gated on the luma EDGE rather than on saturation, because
-// pure-black outlines have ~zero saturation and a dark×saturated formula would give them no
-// boost — edge-gating makes black contours fire.
+// The ink term gates on the luma edge rather than saturation, because pure-black outlines have ~zero
+// saturation and a dark-times-saturated formula would give them no boost.
 func WeightMapV2(target []float32, w, h int) []float32 {
 	n := w * h
 	if n <= 0 || len(target) < n*4 {

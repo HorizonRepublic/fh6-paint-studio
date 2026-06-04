@@ -10,7 +10,7 @@ import (
 	"gioui.org/widget/material"
 )
 
-// Hint is a small "ⓘ" help icon that shows a wrapped tooltip while hovered.
+// Hint is a small "(?)" help icon that shows a wrapped tooltip while hovered.
 type Hint struct {
 	hovered bool
 }

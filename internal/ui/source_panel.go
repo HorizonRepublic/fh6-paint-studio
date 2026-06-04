@@ -93,8 +93,7 @@ func (s *AppState) thumbnail(gtx C) D {
 
 func (s *AppState) settingsCard(gtx C) D {
 	th := s.Th
-	s.syncAutoToggles(gtx)
-	s.syncBudget()
+	s.syncSettings()
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx C) D { return th.Title(gtx, "Settings") }),
 		layout.Rigid(GapV(12).Layout),
@@ -112,7 +111,7 @@ func (s *AppState) advancedSection(gtx C) D {
 	th := s.Th
 	// Gaussian is a NICHE mode that bypasses the greedy entirely (soft glows trained jointly), so none
 	// of the greedy/polish toggles below apply to it — show a short explanation instead of dead controls.
-	if s.Mode.Value() == "gaussian" {
+	if s.baseMode == "gaussian" || s.Mode.Value() == "gaussian" {
 		l := material.Label(th.M, 12, "Gaussian mode trains soft glow splats jointly — no greedy options apply. Budget = number of glows; more glows + the automatic training give a closer (but always smooth) result. Best for SMOOTH / gradient / painterly images — it can't render crisp fine detail, so use Anime/Photo/Flat for sharp or cel content. Slower than the others (it trains; the bar shows training progress).")
 		l.Color = th.TextDim
 		return l.Layout(gtx)
@@ -133,42 +132,25 @@ func (s *AppState) advancedSection(gtx C) D {
 	if !s.AdvOpen {
 		return head(gtx)
 	}
-	note := func(gtx C) D {
-		l := material.Label(th.M, 11, "Defaults are benchmark-tuned for the best quality + speed. Leave blank for the optimal. Override only to experiment — custom values aren't validated, so the result is on you.")
-		l.Color = th.TextDim
-		return l.Layout(gtx)
-	}
 	tog := func(b *widget.Bool, label string, h *Hint, help string) layout.FlexChild {
 		return layout.Rigid(func(gtx C) D { return s.toggleRow(gtx, b, label, h, help) })
 	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+	children := []layout.FlexChild{
 		layout.Rigid(head),
 		layout.Rigid(GapV(10).Layout),
-		// Shape mix / transparency / boundary / back-fitting / colour-blend / joint polish are all
-		// HARDWIRED to their tuned defaults — no longer user toggles. Colour blend is always LINEAR
-		// (the editor's space; a win on semi-transparent gradients, a no-op for opaque content).
-		// "Keep shapes inside image" is the only remaining toggle.
 		tog(&s.KeepInside, "Keep shapes inside image", &s.KeepInsideHint,
-			"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture — no circles/rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean (no frame). Turn off only if you want the legacy behaviour."),
+			"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture, with no circles or rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean. Turn off only for the legacy behaviour."),
 		layout.Rigid(GapV(10).Layout),
-		layout.Rigid(note),
-		layout.Rigid(GapV(10).Layout),
-		layout.Rigid(func(gtx C) D {
-			return s.fieldHint(gtx, "Seed", &s.SeedHint, "Random seed. The same image + settings + seed always give the exact same result. Change it for a different random variation; leave it for reproducibility.", func(gtx C) D { return th.editorBox(gtx, &s.Seed, "1") })
-		}),
-		layout.Rigid(GapV(8).Layout),
-		layout.Rigid(func(gtx C) D {
-			return s.field(gtx, "Random candidates (blank = auto)", func(gtx C) D { return th.editorBox(gtx, &s.RandomEd, "auto") })
-		}),
-		layout.Rigid(GapV(8).Layout),
-		layout.Rigid(func(gtx C) D {
-			return s.field(gtx, "Mutated candidates (blank = auto)", func(gtx C) D { return th.editorBox(gtx, &s.MutatedEd, "auto") })
-		}),
-		layout.Rigid(GapV(8).Layout),
-		layout.Rigid(func(gtx C) D {
-			return s.field(gtx, "Sample budget px (blank = auto)", func(gtx C) D { return th.editorBox(gtx, &s.SampleEd, "auto") })
-		}),
-	)
+		tog(&s.Expert, "Expert mode", &s.ExpertHint,
+			"Unlocks every generator knob, each shown with its concrete value for the selected preset. The presets above stay the simple path, so leave this off unless you want manual control. Any control here can move both render time and quality, in either direction. The shown defaults are computed for the loaded image; for flat art the polish counts depend on its palette, and the keep-inside frame can marginally shift that classification."),
+	}
+	if s.Expert.Value {
+		children = append(children,
+			layout.Rigid(GapV(12).Layout),
+			layout.Rigid(s.expertBlock),
+		)
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 // budgetRow is the shape-budget control: a label + manual number entry over a full-width slider.
@@ -219,16 +201,6 @@ func (s *AppState) fieldHint(gtx C, label string, h *Hint, help string, w layout
 				layout.Rigid(func(gtx C) D { return h.Layout(gtx, th, help) }),
 			)
 		}),
-		layout.Rigid(GapV(4).Layout),
-		layout.Rigid(w),
-	)
-}
-
-// field stacks a dim label above a control.
-func (s *AppState) field(gtx C, label string, w layout.Widget) D {
-	th := s.Th
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return th.Dim(gtx, label) }),
 		layout.Rigid(GapV(4).Layout),
 		layout.Rigid(w),
 	)

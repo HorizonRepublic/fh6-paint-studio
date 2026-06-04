@@ -99,9 +99,10 @@ func gaussInitGlows(target []float32, w, h, n int) []model.Shape {
 					cnt++
 				}
 			}
-			if cnt > 0 {
-				r, gg, b = r/cnt, gg/cnt, b/cnt
+			if cnt == 0 {
+				continue // degenerate grid cell (w or h < grid): skip rather than emit a black glow
 			}
+			r, gg, b = r/cnt, gg/cnt, b/cnt
 			c := model.Candidate{
 				Kind:  model.KindGlow,
 				P:     [6]float32{float32((float64(gx) + 0.5) * sx), float32((float64(gy) + 0.5) * sy), float32(sx * 0.9), float32(sy * 0.9), 0, 0},

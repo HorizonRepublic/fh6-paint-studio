@@ -159,10 +159,10 @@ func scoreTable(p *proc, prof GameProfile, table uintptr, sampleCount int) int {
 		}
 	}
 	if sampleCount >= 16 {
-		if len(distinct) < maxInt(8, sampleCount*3/4) {
+		if len(distinct) < max(8, sampleCount*3/4) {
 			return 0
 		}
-		if layerLike < maxInt(8, sampleCount/2) {
+		if layerLike < max(8, sampleCount/2) {
 			return 0
 		}
 	}
@@ -239,11 +239,4 @@ func abs32(f float32) float32 {
 func plausibleShapeWord(p *proc, prof GameProfile, ptr uintptr) bool {
 	w, ok := p.readU16(ptr + uintptr(prof.ShapeIDOffset))
 	return ok && w != 0 && w < 0x2000
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

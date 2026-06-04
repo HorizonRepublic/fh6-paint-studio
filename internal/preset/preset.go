@@ -37,17 +37,18 @@ type Choices struct {
 	Boundary *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
 	SS       int   // preview supersample factor (UI-side; carried through Resolved.SS)
 
-	// Advanced (zero = preset/mode default, except Aspect/WeightStrength = -1)
+	// Advanced (zero = preset/mode default, except Aspect/WeightStrength/AlphaMin = -1)
 	Random, Mutated, SampleBudget, MaxNoImprove int
 	Grid                                        int
 	Kinds                                       string // CSV; "" = ellipse,triangle,rectangle
 	KindWeights                                 string // CSV parallel to Kinds; "" = mode default
 	Aspect                                      float64
 	WeightStrength                              float64
+	AlphaMin                                    float64 // semi-transparent alpha floor; -1 = mode default
+	StandoutTol                                 float64 // post-polish standout suppression; 0 = off
 	PolishIters                                 int
 	PolishTau0                                  float64
 	PolishTau1                                  float64
-	PolishSTE                                   bool
 	Weighted                                    *bool // nil = true
 	Compact                                     *bool // nil = true (engine still skips it for cutouts)
 	Overdraw                                    float64
@@ -57,7 +58,7 @@ type Choices struct {
 func DefaultChoices() Choices {
 	return Choices{
 		Shapes: 1000, Mode: "anime", Quality: "balanced", Seed: 1, SS: 1,
-		Grid: 48, Aspect: -1, WeightStrength: -1, Overdraw: 1,
+		Grid: 48, Aspect: -1, WeightStrength: -1, AlphaMin: -1, Overdraw: 1,
 	}
 }
 
@@ -176,6 +177,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
+		StandoutTol:       c.StandoutTol,
 		// Boundary-aware radius: opt-in (caller toggle). A real win on smooth photo/anime character
 		// content but a regression on text/flat, with no clean way to gate automatically — so it is
 		// never auto-enabled, only honoured when the caller explicitly sets it.
@@ -259,7 +261,7 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 		backfit:     md.Backfit,
 		iters:       md.PolishIters,
 		tau1:        md.PolishTau1,
-		ste:         true, // STE is always on; the studio toggle is removed
+		ste:         true,
 	}
 
 	// Alpha: organic (anime/photo) = semi-transparent for smooth gradients; flat = OPAQUE (crisp
@@ -270,6 +272,10 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 	}
 	if c.Alpha != nil {
 		sp.allowAlpha = *c.Alpha && !transparent
+	}
+	// Alpha floor: organic candidates draw alpha ~U(alphaMin,1). -1 keeps the tuned mode floor.
+	if c.AlphaMin >= 0 {
+		sp.alphaMin = float32(c.AlphaMin)
 	}
 
 	// Kind mix: triangle-rich for organic content (triangles co-adapt under polish and improve it),
@@ -322,7 +328,6 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 	// wstr=0) is not rejected by the gate. STE instead optimises the EXACT hard render the editor
 	// ships, so it refines without blurring, and it is gated so it never regresses. It improves every
 	// content type; the soft default is left only as a historical option.
-	_ = c.PolishSTE // STE is always on; the studio toggle is removed
 
 	return sp
 }
@@ -448,6 +453,55 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 	return d
 }
 
+// ModeKnobDefaults returns the CONCRETE knob values a built-in content preset resolves to for the
+// given content (palette colour count + whether the source is a cutout). It mirrors ModeDefaultsFor
+// plus the alpha/kind/polish logic from resolveShapeParams, so the studio's expert controls can show
+// the real numbers a preset uses instead of an opaque sentinel. Shapes/Seed stay caller-owned.
+func ModeKnobDefaults(mode string, colors int, cutout bool) Choices {
+	c := DefaultChoices()
+	c.Mode = mode
+	c.Quality = "quality" // the studio's built-in quality knee
+	resolved := PresetMode(mode)
+	if resolved == "gaussian" {
+		return c
+	}
+
+	md := ModeDefaultsFor(resolved, colors, cutout)
+	allowAlpha := resolved != "flat" && !cutout
+	polish, weighted, compact := true, true, true
+	random, mutated, sampleBudget, maxNI := PresetCounts(c.Quality)
+
+	c.Alpha = &allowAlpha
+	c.Polish = &polish
+	c.Weighted = &weighted
+	c.Compact = &compact
+	c.Boundary = boolPtr(md.Boundary)
+	c.Backfit = boolPtr(md.Backfit)
+	c.Kinds = "ellipse,triangle,rectangle"
+	c.KindWeights = formatKindWeights(md.KindWeights)
+	c.Aspect = float64(md.AspectMax)
+	c.WeightStrength = md.WeightStr
+	c.AlphaMin = float64(md.AlphaMin)
+	c.PolishIters = md.PolishIters
+	c.PolishTau1 = md.PolishTau1
+	c.Random, c.Mutated, c.SampleBudget, c.MaxNoImprove = random, mutated, sampleBudget, maxNI
+	return c
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// formatKindWeights renders per-kind weights as a CSV that ParseKindWeights round-trips.
+func formatKindWeights(w []float32) string {
+	if len(w) == 0 {
+		return ""
+	}
+	parts := make([]string, len(w))
+	for i, v := range w {
+		parts[i] = strconv.FormatFloat(float64(v), 'g', -1, 32)
+	}
+	return strings.Join(parts, ",")
+}
+
 // PresetMode collapses any legacy mode name to one of the THREE manual presets. Empty/auto/unknown
 // -> "anime", the best general-purpose preset (line-art and most gradients reconstruct well under it).
 // Exported so the CLI shares the exact same 3-preset mapping as the studio (no divergence).
@@ -481,7 +535,6 @@ func PresetCounts(name string) (random, mutated, sampleBudget, maxNI int) {
 	}
 }
 
-// polishOpts builds engine.PolishOptions from defaults with non-zero overrides applied.
 // resolveGaussian builds the NICHE Gaussian-mode run config: reconstruct the image as `shapes` soft GLOW
 // splats jointly trained by the polish (engine.GenerateGaussian), bypassing the greedy entirely. For
 // smooth/gradient/painterly content (8x better than greedy on a gradient; loses on fine detail). The
@@ -544,6 +597,10 @@ func polishOpts(iters int, tau0, tau1 float64, ste bool) engine.PolishOptions {
 	o.STE = ste
 	return o
 }
+
+// KindNames lists the supported shape primitives in canonical order. Shared by the UI kind picker;
+// adding a primitive means extending this plus ParseKinds (and the engine/raster support).
+var KindNames = []string{"ellipse", "triangle", "rectangle"}
 
 // ParseKinds maps a CSV of kind names to ShapeKinds. No "line" — the FH6 catalog has none.
 // Empty/garbage -> {ellipse}. Shared by Resolve and the CLI.

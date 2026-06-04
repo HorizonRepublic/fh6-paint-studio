@@ -52,10 +52,12 @@ func LoadRGBAFloat(path string) ([]float32, int, int, error) {
 		for x := 0; x < w; x++ {
 			r, g, bl, a := img.At(b.Min.X+x, b.Min.Y+y).RGBA() // 16-bit premultiplied
 			i := (y*w + x) * 4
-			px[i+0] = float32(r) / 65535
-			px[i+1] = float32(g) / 65535
-			px[i+2] = float32(bl) / 65535
 			px[i+3] = float32(a) / 65535
+			if a > 0 { // un-premultiply to straight alpha (RGB undefined where a==0)
+				px[i+0] = float32(r) / float32(a)
+				px[i+1] = float32(g) / float32(a)
+				px[i+2] = float32(bl) / float32(a)
+			}
 		}
 	}
 	return px, w, h, nil
