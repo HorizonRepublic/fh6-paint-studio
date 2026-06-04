@@ -105,6 +105,9 @@ func (c *CPU) Evaluate(cands []model.Candidate) ([]backend.EvalResult, error) {
 // evalShape computes the analytic optimal RGB that minimizes SSE under
 // alpha-compositing, plus the resulting ΔSSE.
 func (c *CPU) evalShape(cand model.Candidate) backend.EvalResult {
+	if raster.IsGradient(cand.Kind) {
+		return c.evalGradient(cand)
+	}
 	a := float64(cand.Color.A)
 	if a < 1e-3 {
 		a = 1e-3
@@ -210,6 +213,10 @@ func clamp01(v float64) float64 {
 }
 
 func (c *CPU) Apply(cand model.Candidate) error {
+	if raster.IsGradient(cand.Kind) {
+		c.applyGradient(cand)
+		return nil
+	}
 	a := cand.Color.A
 	if a < 0 {
 		a = 0

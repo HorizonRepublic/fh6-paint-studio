@@ -175,6 +175,16 @@ func buildKindCDF(kinds []model.ShapeKind, weights []float32) []float32 {
 	return cdf
 }
 
+// containsKind reports whether k is in the kind set.
+func containsKind(kinds []model.ShapeKind, k model.ShapeKind) bool {
+	for _, kk := range kinds {
+		if kk == k {
+			return true
+		}
+	}
+	return false
+}
+
 // pickKind draws a kind index from the cumulative table.
 func pickKind(rng *rand.Rand, kinds []model.ShapeKind, cdf []float32) model.ShapeKind {
 	if len(kinds) == 1 {
@@ -284,7 +294,7 @@ type boundaryCtx struct {
 // distance to the nearest target boundary is `dist`, so a shape near an edge can't
 // balloon ACROSS it. The cap RAMPS IN past `start` progress:
 // before start it returns maxR unchanged; at progress 1 it returns min(maxR, dist+padding);
-// between, it lerps maxR→cap so the coarse base stage still lays large covering shapes and
+// between, it lerps maxR->cap so the coarse base stage still lays large covering shapes and
 // only late detail is constrained. Identical formula on the host and device paths.
 func boundaryRadiusCap(maxR, dist, padding, progress, start float32) float32 {
 	mix := boundaryMix(progress, start)
@@ -295,7 +305,7 @@ func boundaryRadiusCap(maxR, dist, padding, progress, start float32) float32 {
 	if lim >= maxR {
 		return maxR
 	}
-	return maxR + (lim-maxR)*mix // lerp loose→tight as the run finishes
+	return maxR + (lim-maxR)*mix // lerp loose->tight as the run finishes
 }
 
 // boundaryMix is the boundary-cap ramp factor: 0 before `start` progress (no cap),
@@ -382,8 +392,11 @@ func clampCandidatesToCanvas(cands []model.Candidate, w, h, padFrac float32) {
 	pad := padFrac * minF(w, h)
 	for i := range cands {
 		c := &cands[i]
-		if c.Kind != model.KindEllipse && c.Kind != model.KindRectangle {
-			continue
+		switch c.Kind {
+		case model.KindEllipse, model.KindRectangle, model.KindGlow, model.KindDisk:
+			// elliptical/rect footprint with P[2],P[3] half-extents — uniformly shrink to fit
+		default:
+			continue // triangles/lines are vertex-clamped already
 		}
 		c.P[2], c.P[3] = clampExtents(c.P[0], c.P[1], c.P[2], c.P[3], c.P[4], w, h, pad)
 	}

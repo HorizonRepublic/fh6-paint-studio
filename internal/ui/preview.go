@@ -120,10 +120,10 @@ func (s *AppState) addCropCursors(gtx C, rect, sel image.Rectangle) {
 	if !s.cropSelValid() {
 		return
 	}
-	in := clip.Rect(sel).Push(gtx.Ops) // hover inside the selection → move (grab) cursor
+	in := clip.Rect(sel).Push(gtx.Ops) // hover inside the selection -> move (grab) cursor
 	pointer.CursorGrab.Add(gtx.Ops)
 	in.Pop()
-	for i, h := range cropHandlePts(sel) { // hover over a handle → its directional resize cursor (on top)
+	for i, h := range cropHandlePts(sel) { // hover over a handle -> its directional resize cursor (on top)
 		const r = 9
 		hc := clip.Rect(image.Rect(h.X-r, h.Y-r, h.X+r, h.Y+r)).Push(gtx.Ops)
 		cropCursorForHandle(i).Add(gtx.Ops)

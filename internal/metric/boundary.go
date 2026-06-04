@@ -23,7 +23,7 @@ func BoundaryDistance(target []float32, w, h int, edgeThresh float32) []float32 
 	lum := make([]float32, w*h)
 	hasAlpha := false
 	for i := 0; i < w*h; i++ {
-		lum[i] = 0.299*target[i*4] + 0.587*target[i*4+1] + 0.114*target[i*4+2]
+		lum[i] = Luma(target[i*4], target[i*4+1], target[i*4+2])
 		if target[i*4+3] < 0.999 {
 			hasAlpha = true
 		}
@@ -89,7 +89,7 @@ func BoundaryDistance(target []float32, w, h int, edgeThresh float32) []float32 
 			dist[i] = v
 		}
 	}
-	// Forward pass (top-left → bottom-right).
+	// Forward pass (top-left -> bottom-right).
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			i := y*w + x
@@ -110,7 +110,7 @@ func BoundaryDistance(target []float32, w, h int, edgeThresh float32) []float32 
 			}
 		}
 	}
-	// Backward pass (bottom-right → top-left).
+	// Backward pass (bottom-right -> top-left).
 	for y := h - 1; y >= 0; y-- {
 		for x := w - 1; x >= 0; x-- {
 			i := y*w + x
@@ -132,7 +132,7 @@ func BoundaryDistance(target []float32, w, h int, edgeThresh float32) []float32 
 		}
 	}
 	for i := range dist {
-		dist[i] /= 3 // chamfer 3-4 → ~pixel units
+		dist[i] /= 3 // chamfer 3-4 -> ~pixel units
 	}
 	return dist
 }

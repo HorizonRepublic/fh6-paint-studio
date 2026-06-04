@@ -18,7 +18,7 @@ func DetailGrid(target []float32, w, h, gw, gh int) []float32 {
 	}
 	lum := make([]float32, w*h)
 	for i := 0; i < w*h; i++ {
-		lum[i] = 0.299*target[i*4] + 0.587*target[i*4+1] + 0.114*target[i*4+2]
+		lum[i] = Luma(target[i*4], target[i*4+1], target[i*4+2])
 	}
 	at := func(x, y int) float32 {
 		if x < 0 {

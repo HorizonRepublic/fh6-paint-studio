@@ -11,13 +11,13 @@
 # (forward-compatible JIT for any other >=6.1 GPU incl Volta/Hopper/future). Maxwell (sm_52, <5.3)
 # is NOT supported: the FP16/half2 coarse filter needs compute capability >= 5.3.
 #
-# Usage: powershell -ExecutionPolicy Bypass -File .\build-cuda-fat.ps1 [-Toolkit <dir>]
+# Usage: powershell -ExecutionPolicy Bypass -File .\scripts\build-cuda-fat.ps1 [-Toolkit <dir>]
 # Point -Toolkit (or set the CUDA_TOOLKIT env var) at your portable CUDA 12.8 toolkit dir.
 param(
     [string]$Toolkit = $(if ($env:CUDA_TOOLKIT) { $env:CUDA_TOOLKIT } else { "C:\cuda12.8-portable\toolkit" })
 )
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 
 $nvcc = Join-Path $Toolkit "bin\nvcc.exe"

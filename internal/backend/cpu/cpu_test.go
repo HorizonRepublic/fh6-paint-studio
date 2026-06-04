@@ -33,7 +33,7 @@ func TestEvaluateRecoversOptimalColor(t *testing.T) {
 
 func TestEvaluateRejectsEmptyEllipse(t *testing.T) {
 	c := newSolid(20, 20, 1, 0, 0)
-	// Ellipse fully off-canvas → no covered pixels → rejected score.
+	// Ellipse fully off-canvas -> no covered pixels -> rejected score.
 	cand := model.Candidate{Kind: model.KindEllipse, P: [6]float32{-100, -100, 2, 2, 0, 0}, Color: model.RGBA{A: 1}}
 	res, _ := c.Evaluate([]model.Candidate{cand})
 	if res[0].Score != rejected {

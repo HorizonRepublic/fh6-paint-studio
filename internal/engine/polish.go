@@ -58,6 +58,25 @@ type PolishOptions struct {
 	// device->host copy is added to the polish wall-time). The slice is reused between calls — the
 	// callee must copy/convert it immediately, not retain it.
 	OnPreview func(render []float32, w, h int)
+
+	// OnProgress, if set, is called once per refinement iteration with (iter 1..Iters, total Iters).
+	// It carries NO device read, so it is cheap to fire every iteration — used by the Gaussian mode to
+	// drive a training % bar (the greedy's shape-count progress is meaningless when all glows train at
+	// once). nil for the normal greedy+polish (whose bar tracks placed shapes instead).
+	OnProgress func(iter, total int)
+
+	// PreviewInterval throttles OnPreview's device->host render read. 0 -> 50ms (the short greedy-polish
+	// phase wants a smooth animation). The Gaussian mode trains for MINUTES, so each 50ms frame is a
+	// full-canvas D2H copy stealing training time — it sets this longer (a slower preview, faster run).
+	PreviewInterval time.Duration
+}
+
+// previewInterval returns the throttle for OnPreview reads (default 50ms).
+func (o PolishOptions) previewInterval() time.Duration {
+	if o.PreviewInterval > 0 {
+		return o.PreviewInterval
+	}
+	return 50 * time.Millisecond
 }
 
 // DefaultPolishOptions returns the tuned defaults from the design.
@@ -325,10 +344,13 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		// forward/backward (not hidden in the next sync). Net overhead ~0 — the work must
 		// complete before readgrad anyway; the sync just moves the wait into the timer.
 		tick(&tFwd, func() { accel.PolishForward(tau, hBBX); accel.PolishSync() })
-		if prevRd != nil && time.Since(lastPrev) >= 50*time.Millisecond {
+		if prevRd != nil && time.Since(lastPrev) >= opt.previewInterval() {
 			lastPrev = time.Now()
 			prevRd.PolishReadRender(prevBuf)
 			opt.OnPreview(prevBuf, w, h)
+		}
+		if opt.OnProgress != nil {
+			opt.OnProgress(it+1, opt.Iters)
 		}
 		// PolishLoss forces a device sync but `post` is only used for the final report —
 		// only fetch it on the last iteration (huge per-iter sync saving).
@@ -457,9 +479,12 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		t := float64(it) / float64(maxInt(1, opt.Iters-1))
 		tau := opt.Tau0 * math.Pow(opt.Tau1/opt.Tau0, t)
 		polishForward(ps, base, render, below, bbx, w, h, tau, opt.STE)
-		if opt.OnPreview != nil && time.Since(lastPrevCPU) >= 50*time.Millisecond {
+		if opt.OnPreview != nil && time.Since(lastPrevCPU) >= opt.previewInterval() {
 			lastPrevCPU = time.Now()
 			opt.OnPreview(render, w, h)
+		}
+		if opt.OnProgress != nil {
+			opt.OnProgress(it+1, opt.Iters)
 		}
 		post = polishLoss(render, target, weight, w, h)
 		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE)
@@ -530,19 +555,32 @@ func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h in
 			fp[i] = float32(ps[si].P[i])
 		}
 		a := float32(clampF64(ps[si].col[3], 0, 1))
-		ia := 1 - a
-		R, G, B := float32(ps[si].col[0])*a, float32(ps[si].col[1])*a, float32(ps[si].col[2])*a
+		cr, cg, cb := float32(ps[si].col[0]), float32(ps[si].col[1]), float32(ps[si].col[2])
+		isGrad := raster.IsGradient(ps[si].kind)
 		xMin, yMin, xMax, yMax := raster.BBox(ps[si].kind, fp, w, h)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
-				if !raster.Inside(ps[si].kind, fp, x, y) {
-					continue
+				// Gradient kinds composite with their per-pixel falloff; hard kinds with binary
+				// coverage (aEff=a, byte-identical to the prior premultiplied path).
+				var aEff float32
+				if isGrad {
+					cov := float32(raster.Coverage(ps[si].kind, fp, x, y))
+					if cov <= 0 {
+						continue
+					}
+					aEff = a * cov
+				} else {
+					if !raster.Inside(ps[si].kind, fp, x, y) {
+						continue
+					}
+					aEff = a
 				}
+				ia := 1 - aEff
 				p := (y*w + x) * 4
-				render[p+0] = render[p+0]*ia + R
-				render[p+1] = render[p+1]*ia + G
-				render[p+2] = render[p+2]*ia + B
-				render[p+3] = render[p+3]*ia + a
+				render[p+0] = render[p+0]*ia + cr*aEff
+				render[p+1] = render[p+1]*ia + cg*aEff
+				render[p+2] = render[p+2]*ia + cb*aEff
+				render[p+3] = render[p+3]*ia + aEff
 			}
 		}
 	}
@@ -641,7 +679,10 @@ func polishForward(ps []pshape, base, render []float32, below [][]float32, bbx [
 // optimizableGeo reports whether a kind has a differentiable SDF (geometry refined in
 // the polish). Ellipse + rectangle (5 params) and triangle (6 vertex params) all do.
 func optimizableGeo(k model.ShapeKind) bool {
-	return k == model.KindEllipse || k == model.KindRectangle || k == model.KindTriangle
+	// KindGlow (gaussian splat) has a SMOOTH analytic coverage gradient (raster.GaussianCovGrad), so its
+	// geometry is trainable by the joint polish — the basis of the GaussianImage direction. KindDisk's
+	// opaque core has zero geometry gradient, so it stays frozen (colour/alpha refit only).
+	return k == model.KindEllipse || k == model.KindRectangle || k == model.KindTriangle || k == model.KindGlow
 }
 
 // sdfGrad dispatches the signed-distance + gradient by kind (negative inside). Returns
@@ -666,6 +707,9 @@ func sdfGrad(kind model.ShapeKind, P [6]float64, px, py float64) (sdf float64, g
 // Under STE, optimizable shapes use HARD coverage (sdf<=0) in the forward composite —
 // the exact deliverable render — while the backward still uses the soft surrogate slope.
 func coverage(p pshape, fp [6]float32, x, y int, tau float64, ste bool) float32 {
+	if raster.IsGradient(p.kind) {
+		return float32(raster.Coverage(p.kind, fp, x, y)) // radial falloff — same whether geometry is frozen or trained
+	}
 	if !p.optGeo {
 		if raster.Inside(p.kind, fp, x, y) {
 			return 1
@@ -749,7 +793,19 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 				var covEff, covS, dcovdsdf float64
 				var sdfg [6]float64
 				geoActive := false
-				if s.optGeo {
+				if raster.IsGradient(s.kind) {
+					// Gaussian/disk: coverage IS the radial falloff. For a TRAINABLE glow (optGeo) route
+					// its analytic dcov/dparam through the geometry-grad block by carrying it in sdfg with
+					// dcovdsdf=1 (so gP[i] += dcov·dcov/dparam[i]); a frozen gradient (disk) only composites.
+					cov, gg := raster.GaussianCovGrad(s.kind, fp, x, y)
+					covEff = cov
+					if s.optGeo {
+						covS = cov
+						sdfg = gg
+						dcovdsdf = 1
+						geoActive = cov > 1e-9
+					}
+				} else if s.optGeo {
 					var sdf float64
 					sdf, sdfg = sdfGrad(s.kind, s.P, float64(x)+0.5, float64(y)+0.5)
 					covS = sigmoidCov(sdf, tau)
@@ -856,8 +912,8 @@ func adamStep(ps []pshape, opt PolishOptions, step int, w, h int) {
 }
 
 // geoColorLR returns the per-slot Adam learning rates for a shape's 6 geometry + 4 color
-// params. Triangle geometry = 3 vertex coords (all position-like → LRPos); ellipse/rect =
-// cx,cy,rx,ry,θ (slot 5 unused → lr 0).
+// params. Triangle geometry = 3 vertex coords (all position-like -> LRPos); ellipse/rect =
+// cx,cy,rx,ry,θ (slot 5 unused -> lr 0).
 func geoColorLR(k model.ShapeKind, opt PolishOptions) [10]float64 {
 	if k == model.KindTriangle {
 		return [10]float64{opt.LRPos, opt.LRPos, opt.LRPos, opt.LRPos, opt.LRPos, opt.LRPos,

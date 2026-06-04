@@ -33,3 +33,12 @@ jobs:
         run: |
           go build -tags cuda ./cmd/studio
           go build -tags cuda ./cmd/fh6paint
+      # The studio half of the release build (version resource + ldflags), no CUDA toolkit needed.
+      - name: Release smoke (version resource + studio exe)
+        shell: pwsh
+        run: |
+          ./scripts/gen-winres.ps1 -Version 0.0.0-ci
+          go build -tags cuda -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.0.0-ci" -o bin/fh6-paint-studio.exe ./cmd/studio
+          $vi = (Get-Item bin/fh6-paint-studio.exe).VersionInfo
+          if ($vi.CompanyName -ne 'Horizon Republic') { throw "version resource missing: CompanyName='$($vi.CompanyName)'" }
+          Write-Host "release smoke OK: $($vi.ProductName) $($vi.FileVersion) ($($vi.CompanyName))"

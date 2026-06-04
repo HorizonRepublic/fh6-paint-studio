@@ -51,14 +51,19 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			total = 1
 		}
 
-		// Throttle live frames to a steady cadence so the reconstruction visibly forms on the
-		// fly regardless of how fast shapes are placed: at most one frame per frameInterval
-		// (~25 fps). Reading the canvas every shape would stall the run (each ReadCanvas is a
-		// D2H copy + sync on the engine goroutine). Progress (cheap counters) is still emitted
-		// every shape, so the bar/error/sparkline stay fully live.
-		const frameInterval = 40 * time.Millisecond // ~25 fps preview cadence
+		// Live preview cadence. Each frame does a full-canvas ReadCanvas (D2H + sync) + RGBA
+		// convert ON THIS engine goroutine, so it directly steals generation time, and the per-frame
+		// cost scales with the canvas resolution. A fixed high rate (the old 25 fps) therefore starves
+		// the engine badly at studio resolutions (measured ~3x slower than the raw run). So throttle
+		// ADAPTIVELY: space frames at >= measured-cost / previewBudget, floored at minInterval — i.e.
+		// the preview may consume at most ~previewBudget of wall time, automatically backing off to a
+		// lower fps when each frame is expensive. Progress (cheap counters) still fires every shape, so
+		// the bar/error/sparkline stay fully live; only the IMAGE refresh adapts.
+		const minInterval = 40 * time.Millisecond
+		const previewBudget = 0.12 // preview costs at most ~12% of run time
 		start := time.Now()
 		var lastFrame time.Time
+		var frameCost time.Duration
 		refineHinted := false
 		postBuild := opt.Polish || opt.BackFit // phases that run after the greedy build with no live frames
 		opt.Progress = func(n int, e float64) {
@@ -70,23 +75,58 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 				refineHinted = true
 				onEvent(Log{Line: "build complete — joint polish refining (edges sharpen)…"})
 			}
-			if time.Since(lastFrame) >= frameInterval {
-				lastFrame = time.Now()
-				if img := readCanvas(be, w, h); img != nil {
+			interval := minInterval
+			if d := time.Duration(float64(frameCost) / previewBudget); d > interval {
+				interval = d
+			}
+			if time.Since(lastFrame) >= interval {
+				t := time.Now()
+				img := readCanvas(be, w, h)
+				frameCost = time.Since(t)
+				if img != nil {
 					onEvent(Frame{Img: img})
 				}
+				lastFrame = time.Now()
 			}
 		}
 
 		// Animate the polish phase too: stream the (already-computed) device soft render as it
 		// sharpens. Pure read, so the polish result is unchanged; only a throttled D2H copy is added.
-		if opt.Polish {
+		// Gaussian mode trains via the same polish loop, so its live preview rides the same hook.
+		if opt.Polish || opt.Gaussian {
 			opt.PolishOpts.OnPreview = func(render []float32, rw, rh int) {
 				onEvent(Frame{Img: floatToNRGBA(render, rw, rh)})
 			}
 		}
 
-		res := engine.Run(be, opt)
+		var res engine.Result
+		if opt.Gaussian {
+			// NICHE Gaussian mode: no greedy — reconstruct as soft glow splats jointly trained by the
+			// polish (engine.GenerateGaussian). The training streams to the live preview via OnPreview.
+			// The % bar tracks TRAINING ITERATIONS (not shape count, which is fixed): override the
+			// heavy frame-reading Progress with a LIGHT iter-counter (frames already come from OnPreview).
+			gTotal := opt.PolishOpts.Iters
+			if gTotal < 1 {
+				gTotal = 1
+			}
+			// THROTTLE: OnProgress fires every training iteration (thousands), and the studio's event
+			// pump calls w.Invalidate() per event — firing all of them would flood the UI with repaints
+			// and visibly slow the run. Emit ~200 evenly-spaced updates + always the final one.
+			progStep := gTotal / 200
+			if progStep < 1 {
+				progStep = 1
+			}
+			opt.Progress = func(iter int, e float64) {
+				if iter != gTotal && iter%progStep != 0 {
+					return
+				}
+				onEvent(Progress{Shapes: iter, Total: gTotal, Err: e, Elapsed: time.Since(start)})
+			}
+			onEvent(Log{Line: fmt.Sprintf("Gaussian mode: training %d glow splats over %d iters (smooth/gradient content)…", opt.StopAt, gTotal)})
+			res = engine.GenerateGaussian(be, opt)
+		} else {
+			res = engine.Run(be, opt)
+		}
 		// Final preview = RenderFH6 of the FINAL SHAPES — the exact in-game-faithful render of what
 		// injection places, IDENTICAL to the CLI's WYSIWYG preview. NOT readCanvas: the engine's working
 		// canvas composites in the working space (sRGB-byte when not linear) at float precision, so it
@@ -128,7 +168,7 @@ func readCanvas(be backend.Backend, w, h int) *image.NRGBA {
 // floatToNRGBA converts a straight-alpha RGBA float buffer (len w*h*4) to an NRGBA image.
 // The buffer is the engine's WORKING canvas, which is LINEAR light in -linear mode, so it must be
 // sRGB-encoded before display — otherwise linear values shown as raw bytes look dark/colour-shifted
-// (e.g. yellow→orange). EncodeForDisplay is a no-op in sRGB mode and never mutates the input.
+// (e.g. yellow->orange). EncodeForDisplay is a no-op in sRGB mode and never mutates the input.
 func floatToNRGBA(buf []float32, w, h int) *image.NRGBA {
 	buf = imageio.EncodeForDisplay(buf)
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))

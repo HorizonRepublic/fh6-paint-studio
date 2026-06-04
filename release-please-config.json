@@ -5,7 +5,19 @@
       "release-type": "simple",
       "package-name": "fh6-paint-studio",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": false
+      "include-component-in-tag": false,
+      "changelog-sections": [
+        { "type": "feat", "section": "Features" },
+        { "type": "perf", "section": "Performance" },
+        { "type": "fix", "section": "Bug Fixes" },
+        { "type": "refactor", "hidden": true },
+        { "type": "docs", "hidden": true },
+        { "type": "test", "hidden": true },
+        { "type": "chore", "hidden": true },
+        { "type": "build", "hidden": true },
+        { "type": "ci", "hidden": true },
+        { "type": "style", "hidden": true }
+      ]
     }
   }
 }

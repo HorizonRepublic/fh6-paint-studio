@@ -211,6 +211,74 @@ __device__ bool insideC(int kind, const SC* sc, const float* P, int x, int y) {
     return xr * xr / sc->a0 + yr * yr / sc->a1 <= 1.0f;
 }
 
+// ---- radial-gradient coverage (mirrors raster.FalloffGlow / FalloffDisk) ----
+// The native FH6 gradient kinds (KindGlow=4, KindDisk=5) contribute a per-pixel alpha = colour.A *
+// falloff(t), where t is the elliptical normalised radius (0 centre, 1 footprint edge). The two
+// profiles were calibrated live; constants must match internal/raster/gradient.go. This path is NOT
+// bit-golden vs the CPU (float exp), so it is validated by SSE match-or-beat like the on-device search.
+#define GRAD_GLOW_E 0.0820849986238988f // exp(-2.5)
+__device__ inline float gradFalloff(int kind, float t2) {
+    if (t2 >= 1.0f) return 0.0f;
+    if (kind == 4) { // soft gaussian glow: 0.89 * (exp(-2.5 t²) - e) / (1 - e)
+        float g = (expf(-2.5f * t2) - GRAD_GLOW_E) / (1.0f - GRAD_GLOW_E);
+        return 0.89f * g;
+    }
+    // disk (kind 5): opaque core to 0.40, then 1 - smoothstep over the rim
+    float t = sqrtf(t2);
+    if (t <= 0.40f) return 1.0f;
+    float u = (t - 0.40f) * (1.0f / 0.60f);
+    return 1.0f - (3.0f * u * u - 2.0f * u * u * u);
+}
+
+// gradCovC: gradient coverage in the eval hot loop (reuses the precomputed SC rotation/axes²).
+__device__ inline float gradCovC(int kind, const SC* sc, int x, int y) {
+    float dx = (x + 0.5f) - sc->cx, dy = (y + 0.5f) - sc->cy;
+    float xr = dx * sc->c + dy * sc->s, yr = -dx * sc->s + dy * sc->c;
+    return gradFalloff(kind, xr * xr / sc->a0 + yr * yr / sc->a1);
+}
+
+// gradCovP: gradient coverage from raw params (apply kernel — one thread per pixel, no SC).
+__device__ inline float gradCovP(int kind, const float* P, int x, int y) {
+    float rx = fmaxf(1.0f, P[2]), ry = fmaxf(1.0f, P[3]);
+    float th = (float)(P[4] * DEG2RAD), c = cosf(th), s = sinf(th);
+    float dx = (x + 0.5f) - P[0], dy = (y + 0.5f) - P[1];
+    float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+    return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
+}
+
+__device__ inline bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+
+// gaussianCovGradD: KindGlow coverage at pixel (x,y) AND its analytic gradient wrt the 5 ellipse
+// params [cx,cy,rx,ry,thetaDeg] (slot 5 = 0). Device mirror of the FD-verified CPU reference
+// raster.GaussianCovGrad — the SMOOTH (trainable) gaussian-splat gradient that makes a glow's
+// geometry optimisable in the joint polish (#7 GaussianImage). cov = 0.89·norm·(exp(-2.5u) − E),
+// u = (xr/rx)²+(yr/ry)² the squared elliptical radius in the rotated frame. Disk (kind 5) has a flat
+// opaque core → zero geometry gradient (g stays 0); the caller still composites its falloff coverage.
+// Inputs are the float params (mirrors CPU using float32 fp → float64 math); returns cov in double.
+__device__ inline double gaussianCovGradD(int kind, const float* fp, int x, int y, double* g) {
+    for (int i = 0; i < 6; i++) g[i] = 0.0;
+    if (kind != 4) return (double)gradCovP(kind, fp, x, y); // disk/other: coverage only, geometry frozen
+    double cx = (double)fp[0], cy = (double)fp[1];
+    double rx = fmax(1.0, (double)fp[2]), ry = fmax(1.0, (double)fp[3]);
+    double th = (double)fp[4] * DEG2RAD, c = cos(th), s = sin(th);
+    double dx = (double)x + 0.5 - cx, dy = (double)y + 0.5 - cy;
+    double xr = dx * c + dy * s, yr = -dx * s + dy * c;
+    double u = xr * xr / (rx * rx) + yr * yr / (ry * ry);
+    if (u >= 1.0) return 0.0;
+    const double E = (double)GRAD_GLOW_E;       // exp(-2.5), matches gradFalloff
+    const double norm = 1.0 / (1.0 - E), peak = 0.89;
+    double cov  = peak * norm * (exp(-2.5 * u) - E);
+    double dcov = peak * norm * (-2.5 * exp(-2.5 * u)); // dcov/du
+    double dudxr = 2.0 * xr / (rx * rx);
+    double dudyr = 2.0 * yr / (ry * ry);
+    g[0] = dcov * (dudxr * (-c) + dudyr * (s));   // d/dcx
+    g[1] = dcov * (dudxr * (-s) + dudyr * (-c));  // d/dcy
+    if ((double)fp[2] > 1.0) g[2] = dcov * (-2.0 * xr * xr / (rx * rx * rx)); // d/drx (respect max(1,·) clamp)
+    if ((double)fp[3] > 1.0) g[3] = dcov * (-2.0 * yr * yr / (ry * ry * ry)); // d/dry
+    g[4] = dcov * (2.0 * DEG2RAD * xr * yr * (1.0 / (rx * rx) - 1.0 / (ry * ry))); // d/dthetaDeg
+    return cov;
+}
+
 // ---- on-device candidate generation (build "B1") ----
 // A counter-based hash RNG (no per-thread state array, no curand_init cost): each
 // uniform draw is hash(seed, candidateIdx, ++ctr). Independent-enough streams for
@@ -239,6 +307,7 @@ static float* d_grid   = nullptr;
 static int g_w = 0, g_h = 0, g_gw = 0, g_gh = 0, g_maxCands = 0;
 static int g_sampleBudget = 4000; // progressive-sampling pixel cap (see sampleStep / fp_set_sample_budget)
 static int g_warpEval = 1;        // 1 = evalKernelWarp (warp/candidate, faster); 0 = evalKernel (block, golden fallback)
+static int g_gradients = 0;       // 1 = the batch may contain gradient kinds -> force evalKernel (block): only it carries the per-pixel-alpha gradient branch (the warp kernel does not)
 
 // ---- on-device search state (fp_search_random) ----
 // Separate scratch from d_cands/d_out so the search can hold a very high candidate volume
@@ -258,6 +327,8 @@ static int*   d_redIdx  = nullptr; // argmin partials (REDBLK)
 static int*   d_bestIdx = nullptr; // argmin winner index
 static float* d_best    = nullptr; // best candidate out (12 floats)
 static int g_searchCap  = 0;
+static float* d_seeds   = nullptr; // moment seed params (g_momentCap*6: cx,cy,rx,ry,theta,capR)
+static int g_momentCap  = 0;
 #define REDBLK 512
 
 // ---- coarse-to-fine search (fp_set_coarse) ----
@@ -303,11 +374,35 @@ __global__ void evalKernel(const float* __restrict__ cands, int n, const float* 
     // throughput, and this 19-add inner loop is the dominant cost. The sums feed a
     // final ΔSSE formula computed in double (below); golden-diff tolerance guards
     // the precision trade-off (verified by cuda_test.go).
+    bool isGrad = isGradKind(kind);
     float L[NACC];
     for (int k = 0; k < NACC; k++) L[k] = 0.0f;
     for (long tt = threadIdx.x; tt < total; tt += blockDim.x) {
         int x = xMin + (int)(tt % cols) * step;
         int y = yMin + (int)(tt / cols) * step;
+        if (isGrad) {
+            // per-pixel alpha a(x)=A*cov; gradient accumulators (slots differ from the hard path):
+            // L0=Σwa² L1=n L2=nt | L3-5=Σwa·r | L6-8=Σwa²·s | L9-11=Σwa·r·s | L12-14=Σwa²·s² |
+            // L15=alpha ΔSSE (O_A=1, direct) | L16=Σwa² over transparent (spill).
+            float cov = gradCovC(kind, &sc, x, y);
+            if (cov <= 0.0f) continue;
+            float ap = (float)a * cov;
+            int gidx = y * W + x, gp = gidx * 4;
+            float4 t = __ldg(reinterpret_cast<const float4*>(target + gp));
+            float wgt = __ldg(weight + gidx);
+            float wa = wgt * ap, wa2 = wa * ap;
+            if (t.w < 0.5f) { L[2] += 1.0f; L[16] += wa2; continue; }
+            float4 s = __ldg(reinterpret_cast<const float4*>(canvas + gp));
+            float rr = t.x - s.x, rg = t.y - s.y, rb = t.z - s.z;
+            L[0] += wa2; L[1] += 1.0f;
+            L[3] += wa * rr; L[4] += wa * rg; L[5] += wa * rb;
+            L[6] += wa2 * s.x; L[7] += wa2 * s.y; L[8] += wa2 * s.z;
+            L[9] += wa * rr * s.x; L[10] += wa * rg * s.y; L[11] += wa * rb * s.z;
+            L[12] += wa2 * s.x * s.x; L[13] += wa2 * s.y * s.y; L[14] += wa2 * s.z * s.z;
+            float oms = 1.0f - s.w;
+            L[15] += wgt * (ap * ap * oms * oms - 2.0f * ap * oms * (t.w - s.w));
+            continue;
+        }
         if (!insideC(kind, &sc, P, x, y)) continue;
         int idx = y * W + x, p = idx * 4;
         // Vectorized 16-byte loads through the read-only cache: target+canvas are RGBA-
@@ -336,6 +431,34 @@ __global__ void evalKernel(const float* __restrict__ cands, int n, const float* 
         __syncthreads();
     }
     if (threadIdx.x != 0) return;
+
+    if (isGrad) {
+        double saa = sh[0], nn = sh[1], nt = sh[2];
+        if (nn < 1 || saa <= 0) { out[gid * 5] = REJECTED; return; }
+        if (nt > 0 && nt > 1.5 * nn) { out[gid * 5] = REJECTED; return; }
+        double sarR = sh[3], sarG = sh[4], sarB = sh[5];
+        double saasR = sh[6], saasG = sh[7], saasB = sh[8];
+        double sarsR = sh[9], sarsG = sh[10], sarsB = sh[11];
+        double saassR = sh[12], saassG = sh[13], saassB = sh[14];
+        double dAcc = sh[15], saaT = sh[16];
+        double oR = clamp01d((sarR + saasR) / saa);
+        double oG = clamp01d((sarG + saasG) / saa);
+        double oB = clamp01d((sarB + saasB) / saa);
+        double td = dAcc;
+        td += 2 * sarsR + saassR - 2 * oR * (sarR + saasR) + oR * oR * saa;
+        td += 2 * sarsG + saassG - 2 * oG * (sarG + saasG) + oG * oG * saa;
+        td += 2 * sarsB + saassB - 2 * oB * (sarB + saasB) + oB * oB * saa;
+        if (nt > 0) {
+            double spillFrac = nt / (nn + nt);
+            td += saaT * (1 + 2 * spillFrac) * (oR * oR + oG * oG + oB * oB + 1);
+        }
+        out[gid * 5 + 0] = (float)(td * (double)(step * step));
+        out[gid * 5 + 1] = (float)oR;
+        out[gid * 5 + 2] = (float)oG;
+        out[gid * 5 + 3] = (float)oB;
+        out[gid * 5 + 4] = cc[10];
+        return;
+    }
 
     double W_ = sh[0], nn = sh[1], nt = sh[2];
     if (nn < 1 || W_ <= 0) { out[gid * 5] = REJECTED; return; }
@@ -543,10 +666,16 @@ __global__ void applyKernel(const float* cc, float* canvas, int W, int H,
     if (x > xMax || y > yMax) return;
     int kind = (int)(cc[0] + 0.5f);
     float P[6] = { cc[1], cc[2], cc[3], cc[4], cc[5], cc[6] };
-    if (!inside(kind, P, x, y)) return;
     float a = cc[10];
     if (a < 0) a = 0;
     if (a > 1) a = 1;
+    if (isGradKind(kind)) { // per-pixel falloff: aEff = A * cov(x)
+        float cov = gradCovP(kind, P, x, y);
+        if (cov <= 0.0f) return;
+        a *= cov;
+    } else if (!inside(kind, P, x, y)) {
+        return;
+    }
     float invA = 1.0f - a;
     int p = (y * W + x) * 4;
     canvas[p + 0] = canvas[p + 0] * invA + cc[7] * a;
@@ -693,6 +822,160 @@ __global__ void genKernel(float* cands, int n, unsigned long long seed,
                                          : 2.f + u2 * (emaxR - 2.f);
             c[1] = cx; c[2] = cy; c[3] = rx; c[4] = ry; c[5] = theta; c[6] = 0.f;
             if (canvasPad > 0.f) clampExtentsD(cx, cy, &c[3], &c[4], theta, (float)W, (float)H, canvasPad * fminf((float)W, (float)H));
+        }
+    }
+}
+
+// ---- moment-seeding (on-device) ----
+// momentFitDevice fits the covariance ellipse of the residual error in a grid window around
+// pixel (px,py), mirroring the host momentEllipse/momentSeedFromGrid. The per-cell error is
+// recovered from the cumulative gridCDF (cell i = cdf[i] - cdf[i-1]). Output in PIXEL coords.
+__device__ void momentFitDevice(const float* gridCDF, int gw, int gh, int W, int H,
+                                float px, float py, float radiusPx,
+                                float* ocx, float* ocy, float* orx, float* ory, float* oth, int* valid) {
+    float sx = (float)W / gw, sy = (float)H / gh;
+    int gcx = (int)(px / sx), gcy = (int)(py / sy);
+    int rcx = (int)(radiusPx / sx) + 1, rcy = (int)(radiusPx / sy) + 1;
+    int gx0 = gcx - rcx, gy0 = gcy - rcy, gx1 = gcx + rcx, gy1 = gcy + rcy;
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 > gw - 1) gx1 = gw - 1;
+    if (gy1 > gh - 1) gy1 = gh - 1;
+    double m00 = 0, m10 = 0, m01 = 0;
+    for (int gy = gy0; gy <= gy1; gy++)
+        for (int gx = gx0; gx <= gx1; gx++) {
+            int idx = gy * gw + gx;
+            float e = gridCDF[idx] - (idx > 0 ? gridCDF[idx - 1] : 0.f);
+            if (e <= 0.f) continue;
+            m00 += e; m10 += (double)gx * e; m01 += (double)gy * e;
+        }
+    if (m00 <= 1e-9) { *valid = 0; return; }
+    double mcx = m10 / m00, mcy = m01 / m00;
+    double u20 = 0, u02 = 0, u11 = 0;
+    for (int gy = gy0; gy <= gy1; gy++)
+        for (int gx = gx0; gx <= gx1; gx++) {
+            int idx = gy * gw + gx;
+            float e = gridCDF[idx] - (idx > 0 ? gridCDF[idx - 1] : 0.f);
+            if (e <= 0.f) continue;
+            double dx = gx - mcx, dy = gy - mcy;
+            u20 += e * dx * dx; u02 += e * dy * dy; u11 += e * dx * dy;
+        }
+    u20 /= m00; u02 /= m00; u11 /= m00;
+    double half = (u20 - u02) / 2;
+    double d = sqrt(fmax(0.0, half * half + u11 * u11));
+    double lmax = (u20 + u02) / 2 + d, lmin = (u20 + u02) / 2 - d;
+    if (lmin < 0) lmin = 0;
+    double major = 2.0 * sqrt(lmax), minor = 2.0 * sqrt(lmin);
+    float s = (sx + sy) / 2; // isotropic axis scale (preserves the fitted angle)
+    *ocx = (float)((mcx + 0.5) * sx);
+    *ocy = (float)((mcy + 0.5) * sy);
+    *orx = (float)(fmax(major, 0.5) * s);
+    *ory = (float)(fmax(minor, 0.5) * s);
+    *oth = (float)(0.5 * atan2(2 * u11, u20 - u02) * 57.295779513082323);
+    *valid = 1;
+}
+
+// momentSeedKernel fits K covariance-ellipse seeds: each thread samples a centre from the
+// error-grid CDF (same importance bias as the random search), caps its radius at the boundary,
+// fits the residual blob, and writes the seed (cx,cy,rx,ry,theta,capR). An invalid fit (window
+// with ~no error) falls back to a round seed at the sampled centre so the gen step always has one.
+__global__ void momentSeedKernel(float* seeds, int K, unsigned long long seed,
+                                 const float* gridCDF, int gw, int gh, int W, int H,
+                                 float maxR, const float* boundDist, float boundPad, float boundMix) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return;
+    unsigned int ctr = 0;
+    float total = gridCDF[gw * gh - 1];
+    float cx, cy;
+    if (total <= 0.f) { cx = uf(seed, k, ctr) * W; cy = uf(seed, k, ctr) * H; }
+    else {
+        float u = uf(seed, k, ctr) * total;
+        int lo = 0, hi = gw * gh - 1;
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (gridCDF[mid] < u) lo = mid + 1; else hi = mid; }
+        int gx = lo % gw, gy = lo / gw;
+        int x0 = gx * W / gw, x1 = (gx + 1) * W / gw, y0 = gy * H / gh, y1 = (gy + 1) * H / gh;
+        if (x1 <= x0) x1 = x0 + 1;
+        if (y1 <= y0) y1 = y0 + 1;
+        cx = x0 + uf(seed, k, ctr) * (x1 - x0);
+        cy = y0 + uf(seed, k, ctr) * (y1 - y0);
+    }
+    cx = clampf2(cx, 0.f, W - 1.f);
+    cy = clampf2(cy, 0.f, H - 1.f);
+    float capR = maxR;
+    if (boundDist && boundMix > 0.f) {
+        int bidx = (int)cy * W + (int)cx;
+        if (bidx >= 0 && bidx < W * H) {
+            float lim = boundDist[bidx] + boundPad;
+            if (lim < capR) capR = capR + (lim - capR) * boundMix;
+        }
+    }
+    float scx, scy, srx, sry, sth; int valid;
+    momentFitDevice(gridCDF, gw, gh, W, H, cx, cy, capR, &scx, &scy, &srx, &sry, &sth, &valid);
+    float* s = seeds + (long)k * 6;
+    if (!valid) { // round fallback at the sampled centre
+        scx = cx; scy = cy; srx = fmaxf(4.f, capR * 0.3f); sry = srx; sth = uf(seed, k, ctr) * 360.f;
+    }
+    s[0] = scx; s[1] = scy; s[2] = srx; s[3] = sry; s[4] = sth; s[5] = capR;
+}
+
+// genMomentKernel builds the candidate pool from the K seeds (mirrors the host momentPool):
+// candidate i belongs to seed i/perSeed; the first of each group is the EXACT moment ellipse,
+// the rest are kind-weighted candidates LOCALISED (centre jitter, seed orientation/size/aspect)
+// around the seed — the same localisation that lets a small pool match the 50k random search.
+__global__ void genMomentKernel(float* cands, int n, int perSeed, int K, unsigned long long seed,
+                                const float* seeds, const float* kinds, const float* kindCDF, int nKinds,
+                                int allowAlpha, float alphaMin, int W, int H, float canvasPad) {
+    float padPx = canvasPad * fminf((float)W, (float)H);
+    int stride = gridDim.x * blockDim.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        unsigned int ctr = 0;
+        float* c = cands + (long)i * 11;
+        int sIdx = i / perSeed;
+        if (sIdx >= K) sIdx = K - 1;
+        const float* s = seeds + (long)sIdx * 6;
+        float scx = s[0], scy = s[1], srx = s[2], sry = s[3], sth = s[4], capR = s[5];
+        c[7] = 0.f; c[8] = 0.f; c[9] = 0.f;
+        if (i % perSeed == 0) { // exact moment ellipse (opaque)
+            c[0] = 0.f; c[10] = 1.f;
+            c[1] = scx; c[2] = scy; c[3] = clampf2(srx, 2.f, capR); c[4] = clampf2(sry, 2.f, capR); c[5] = sth; c[6] = 0.f;
+            if (canvasPad > 0.f) clampExtentsD(scx, scy, &c[3], &c[4], sth, (float)W, (float)H, padPx);
+            continue;
+        }
+        float major = fmaxf(srx, sry), minor = fminf(srx, sry);
+        float aspect = 1.f;
+        if (minor > 0.5f) aspect = clampf2(major / minor, 1.f, 8.f);
+        float localR = fminf(capR, fmaxf(4.f, major * 1.4f));
+        float jit = localR * 0.5f;
+        float jx = clampf2(scx + (uf(seed, i, ctr) * 2.f - 1.f) * jit, 0.f, W - 1.f);
+        float jy = clampf2(scy + (uf(seed, i, ctr) * 2.f - 1.f) * jit, 0.f, H - 1.f);
+        float theta = sth + (uf(seed, i, ctr) * 30.f - 15.f);
+        float alpha = 1.f;
+        if (allowAlpha) alpha = alphaMin + (1.f - alphaMin) * uf(seed, i, ctr);
+        c[10] = alpha;
+        int kind = (int)(kinds[nKinds - 1] + 0.5f);
+        { float ku = uf(seed, i, ctr) * kindCDF[nKinds - 1];
+          for (int kk = 0; kk < nKinds; kk++) if (ku < kindCDF[kk]) { kind = (int)(kinds[kk] + 0.5f); break; } }
+        c[0] = (float)kind;
+        if (kind == 1) { // rectangle
+            float hw = 1.f + uf(seed, i, ctr) * (localR - 1.f);
+            float u2 = uf(seed, i, ctr);
+            float hh = (aspect > 1.f) ? fmaxf(0.5f, hw / (1.f + u2 * (aspect - 1.f))) : 1.f + u2 * (localR - 1.f);
+            c[1] = jx; c[2] = jy; c[3] = hw; c[4] = hh; c[5] = theta; c[6] = 0.f;
+            if (canvasPad > 0.f) clampExtentsD(jx, jy, &c[3], &c[4], theta, (float)W, (float)H, padPx);
+        } else if (kind == 2) { // triangle
+            float rr = 4.f + uf(seed, i, ctr) * (localR - 4.f);
+            c[1] = clampf2(jx + (-rr + 2.f * rr * uf(seed, i, ctr)), 0.f, W - 1.f);
+            c[2] = clampf2(jy + (-rr + 2.f * rr * uf(seed, i, ctr)), 0.f, H - 1.f);
+            c[3] = clampf2(jx + (-rr + 2.f * rr * uf(seed, i, ctr)), 0.f, W - 1.f);
+            c[4] = clampf2(jy + (-rr + 2.f * rr * uf(seed, i, ctr)), 0.f, H - 1.f);
+            c[5] = clampf2(jx + (-rr + 2.f * rr * uf(seed, i, ctr)), 0.f, W - 1.f);
+            c[6] = clampf2(jy + (-rr + 2.f * rr * uf(seed, i, ctr)), 0.f, H - 1.f);
+        } else { // ellipse
+            float rx = 2.f + uf(seed, i, ctr) * (localR - 2.f);
+            float u2 = uf(seed, i, ctr);
+            float ry = (aspect > 1.f) ? fmaxf(1.f, rx / (1.f + u2 * (aspect - 1.f))) : 2.f + u2 * (localR - 2.f);
+            c[1] = jx; c[2] = jy; c[3] = rx; c[4] = ry; c[5] = theta; c[6] = 0.f;
+            if (canvasPad > 0.f) clampExtentsD(jx, jy, &c[3], &c[4], theta, (float)W, (float)H, padPx);
         }
     }
 }
@@ -981,7 +1264,8 @@ __global__ void polishForwardShape(float* render, float* below, const double* pP
     } else {
         float fp[6];
         for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
-        cov = inside(kind, fp, x, y) ? 1.0 : 0.0;
+        // Gradient kinds: per-pixel falloff (geometry frozen — they are not optGeo). Hard kinds: binary.
+        cov = isGradKind(kind) ? (double)gradCovP(kind, fp, x, y) : (inside(kind, fp, x, y) ? 1.0 : 0.0);
     }
     float covf = (float)cov;
     if (covf > 0.0f) {
@@ -1010,10 +1294,17 @@ __global__ void polishHardForwardShape(float* render, const double* pP, const do
     int kind = pkind[si];
     float fp[6];
     for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
-    if (!inside(kind, fp, x, y)) return; // HARD coverage, every kind
-    int p = (y * W + x) * 4;
     float a = (float)col[3];
     a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a); // CPU clamps alpha to [0,1]
+    // Gradient kinds composite with their per-pixel falloff; hard kinds with binary coverage.
+    if (isGradKind(kind)) {
+        float cov = gradCovP(kind, fp, x, y);
+        if (cov <= 0.0f) return;
+        a *= cov;
+    } else if (!inside(kind, fp, x, y)) {
+        return;
+    }
+    int p = (y * W + x) * 4;
     float ia = 1.0f - a;
     render[p + 0] = render[p + 0] * ia + (float)col[0] * a;
     render[p + 1] = render[p + 1] * ia + (float)col[1] * a;
@@ -1104,7 +1395,21 @@ __global__ void polishBackwardShape(const float* below, float* dC, const double*
         // Soft mode (g_polishSTE=0): covEff==covS so both collapse to the old single guard.
         double covEff = 0.0, covS = 0.0, dcovdsdf = 0.0, sdfg[6];
         bool geoActive = false;
-        if (opt) {
+        if (isGradKind(kind)) {
+            // Gaussian/disk: coverage IS the radial falloff (checked FIRST, mirrors polish.go). A
+            // TRAINABLE glow (kind 4) routes its analytic ∂cov/∂param through the geometry-grad block
+            // by carrying it in sdfg with dcovdsdf=1 (so L[0..4] += dcov·∂cov/∂param); disk (kind 5)
+            // has a flat core → frozen geometry, only the colour/alpha refit composites its falloff.
+            double gg[6];
+            double cov = gaussianCovGradD(kind, fp, x, y, gg);
+            covEff = cov;
+            if (kind == 4) {
+                covS = cov;
+                for (int i = 0; i < 6; i++) sdfg[i] = gg[i];
+                dcovdsdf = 1.0;
+                geoActive = cov > 1e-9;
+            }
+        } else if (opt) {
             double sdf = polishSDFGrad(kind, P, x + 0.5, y + 0.5, sdfg);
             covS = sigmoidCovD(sdf, tau);
             dcovdsdf = -covS * (1.0 - covS) / tau; // soft surrogate (STE gradient)
@@ -1194,7 +1499,7 @@ API void fp_eval(const float* cands, int n, float* out) {
     if (n <= 0) return;
     if (n > g_maxCands) n = g_maxCands;
     cudaMemcpy(d_cands, cands, (size_t)n * 11 * sizeof(float), cudaMemcpyHostToDevice);
-    if (g_warpEval)
+    if (g_warpEval && !g_gradients)
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
     else
         evalKernel<<<n, BLOCK>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
@@ -1211,6 +1516,12 @@ API void fp_set_sample_budget(int n) {
 // fp_set_warp_eval toggles the eval kernel: 1 = warp-per-candidate (faster), 0 =
 // block-per-candidate (the original golden kernel). For comparison + a safe fallback.
 API void fp_set_warp_eval(int on) { g_warpEval = on ? 1 : 0; }
+
+// fp_set_gradients tells fp_eval the batch may contain the native gradient kinds (KindGlow/KindDisk),
+// so it routes to the block kernel (evalKernel) whose per-candidate branch evaluates their per-pixel
+// falloff. Hard candidates in the same batch take evalKernel's unchanged path. The apply kernel keys
+// off the candidate's kind directly, so it needs no flag.
+API void fp_set_gradients(int on) { g_gradients = on ? 1 : 0; }
 
 // fp_set_coarse enables coarse-to-fine search (see g_coarseSearch): budget = the cheap
 // pixel cap for the filter pass (<1 -> 4000). Allocates the survivor scratch on first
@@ -1336,6 +1647,72 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         gatherBest<<<1, 1>>>(d_scand2, d_sout2, d_bestIdx, d_best);
     } else {
         argminPass1<<<REDBLK, 256>>>(d_adj, n, d_redVal, d_redIdx);
+        argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
+        gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
+    }
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+}
+
+// fp_search_moment runs the on-device MOMENT-seeded search for one shape: fit K covariance-
+// ellipse seeds from the residual grid, generate a localised refine pool around them, then score
+// + argmin (same eval/coarse path as fp_search_random). Fully self-contained and additive — it
+// shares no code with fp_search_random (the random path stays byte-identical), so either search
+// can be removed independently. ip[7] = K (seed centres); the pool is perSeed = n/K per seed.
+API void fp_search_moment(unsigned long long seed, const int* ip, const float* fp,
+                          const float* kinds, const float* kindCDF,
+                          const float* gridCDF, float* out_best) {
+    int n = ip[0], nKinds = ip[1], gw = ip[2], gh = ip[3];
+    int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6], K = ip[7];
+    float maxR = fp[0], alphaMin = fp[1];
+    float boundPad = fp[3], boundMix = fp[4], canvasPad = fp[5];
+    if (n < 1 || nKinds < 1 || K < 1) { out_best[0] = REJECTED; return; }
+    ensureSearch(n);
+    if (!d_kinds) { cudaMalloc(&d_kinds, 8 * sizeof(float)); cudaMalloc(&d_kindcdf, 8 * sizeof(float)); }
+    if (!d_gridcdf) cudaMalloc(&d_gridcdf, (size_t)gw * gh * sizeof(float));
+    if (!d_redVal) {
+        cudaMalloc(&d_redVal, REDBLK * sizeof(float));
+        cudaMalloc(&d_redIdx, REDBLK * sizeof(int));
+        cudaMalloc(&d_bestIdx, sizeof(int));
+        cudaMalloc(&d_best, 12 * sizeof(float));
+    }
+    if (g_momentCap < K) { cudaFree(d_seeds); cudaMalloc(&d_seeds, (size_t)K * 6 * sizeof(float)); g_momentCap = K; }
+    cudaMemcpy(d_kinds, kinds, nKinds * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_kindcdf, kindCDF, nKinds * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_gridcdf, gridCDF, (size_t)gw * gh * sizeof(float), cudaMemcpyHostToDevice);
+
+    int perSeed = n / K;
+    if (perSeed < 1) perSeed = 1;
+    int nGen = perSeed * K; // candidates actually generated (<= n)
+    momentSeedKernel<<<(K + 127) / 128, 128>>>(d_seeds, K, seed, d_gridcdf, gw, gh, g_w, g_h, maxR, d_boundDist, boundPad, boundMix);
+    int gblocks = (nGen + 255) / 256;
+    if (gblocks > 65535) gblocks = 65535;
+    genMomentKernel<<<gblocks, 256>>>(d_scand, nGen, perSeed, K, seed, d_seeds, d_kinds, d_kindcdf, nKinds,
+                                      allowAlpha, alphaMin, g_w, g_h, canvasPad);
+
+    // Score + argmin (coarse-to-fine auto-applies only at high pool sizes; off for the small moment pool).
+    int kpart = g_kpart;
+    bool useCoarse = g_coarseSearch && d_scand2 && nGen > 4 * kpart;
+    int firstBudget = useCoarse ? g_coarseBudget : g_sampleBudget;
+    if (useCoarse && g_coarseFP16)
+        evalKernelWarpFP16<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
+    else if (g_warpEval)
+        evalKernelWarp<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
+    else
+        evalKernel<<<nGen, BLOCK>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
+    prepAdj<<<gblocks, 256>>>(d_sout, d_scand, nGen, compact, shapeCount, g_w, g_h, d_adj);
+    if (useCoarse) {
+        coarsePartitionMin<<<kpart, 128>>>(d_adj, nGen, kpart, d_cselIdx);
+        gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
+        if (g_warpEval)
+            evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
+        else
+            evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
+        prepAdj<<<(kpart + 255) / 256, 256>>>(d_sout2, d_scand2, kpart, compact, shapeCount, g_w, g_h, d_adj2);
+        argminPass1<<<REDBLK, 256>>>(d_adj2, kpart, d_redVal, d_redIdx);
+        argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
+        gatherBest<<<1, 1>>>(d_scand2, d_sout2, d_bestIdx, d_best);
+    } else {
+        argminPass1<<<REDBLK, 256>>>(d_adj, nGen, d_redVal, d_redIdx);
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
@@ -1510,8 +1887,10 @@ API void fp_free() {
     cudaFree(d_orient); cudaFree(d_gridcdf); cudaFree(d_kinds); cudaFree(d_kindcdf);
     cudaFree(d_scand); cudaFree(d_sout); cudaFree(d_adj);
     cudaFree(d_redVal); cudaFree(d_redIdx); cudaFree(d_bestIdx); cudaFree(d_best);
+    cudaFree(d_seeds);
     d_orient = d_gridcdf = d_kinds = d_kindcdf = d_scand = d_sout = d_adj = nullptr;
-    d_redVal = d_best = nullptr;
+    d_redVal = d_best = d_seeds = nullptr;
     d_redIdx = d_bestIdx = nullptr;
     g_searchCap = 0;
+    g_momentCap = 0;
 }

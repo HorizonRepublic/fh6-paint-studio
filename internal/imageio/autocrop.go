@@ -92,7 +92,7 @@ func AutoCropRect(img image.Image) image.Rectangle {
 	maxX, maxY = clamp(maxX+m, 0, w-1), clamp(maxY+m, 0, h-1)
 	cw, ch := maxX-minX+1, maxY-minY+1
 
-	// GUARD: nothing meaningful to trim (full-bleed) → no-op.
+	// GUARD: nothing meaningful to trim (full-bleed) -> no-op.
 	if cw*ch*100 >= w*h*97 {
 		return b
 	}

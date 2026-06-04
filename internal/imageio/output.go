@@ -110,18 +110,28 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 		if a <= 0 {
 			continue
 		}
-		invA := 1 - a
+		isGrad := raster.IsGradient(kind)
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, W, H)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
-				if !raster.Inside(kind, p, x, y) {
+				// Gradient kinds composite with their baked per-pixel falloff so the preview matches
+				// the in-game render; hard kinds use binary coverage (aEff = a, unchanged).
+				aEff := a
+				if isGrad {
+					cov := float32(raster.Coverage(kind, p, x, y))
+					if cov <= 0 {
+						continue
+					}
+					aEff = a * cov
+				} else if !raster.Inside(kind, p, x, y) {
 					continue
 				}
+				ia := 1 - aEff
 				q := (y*W + x) * 4
-				canvas[q+0] = canvas[q+0]*invA + cr*a
-				canvas[q+1] = canvas[q+1]*invA + cg*a
-				canvas[q+2] = canvas[q+2]*invA + cb*a
-				canvas[q+3] = canvas[q+3]*invA + a
+				canvas[q+0] = canvas[q+0]*ia + cr*aEff
+				canvas[q+1] = canvas[q+1]*ia + cg*aEff
+				canvas[q+2] = canvas[q+2]*ia + cb*aEff
+				canvas[q+3] = canvas[q+3]*ia + aEff
 			}
 		}
 	}

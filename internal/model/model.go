@@ -10,16 +10,26 @@ const (
 	KindRectangle                  // P = [cx, cy, halfW, halfH, thetaDeg, _]
 	KindTriangle                   // P = [x1, y1, x2, y2, x3, y3]
 	KindLine                       // P = [x1, y1, x2, y2, halfWidth, _]
+	// KindGlow and KindDisk are the native FH6 RADIAL GRADIENT primitives (calibrated live
+	// 2026-06-03). Geometry is an ellipse (P = [cx, cy, rx, ry, thetaDeg, _]) but coverage is
+	// PER-PIXEL alpha (a baked radial falloff), not a binary fill — see raster.Coverage:
+	//   KindGlow (word 0xE4) — soft 2D-gaussian splat (the GaussianImage primitive): peak α≈0.89,
+	//     fades smoothly to 0 at the footprint edge. For gradients / smooth blending.
+	//   KindDisk (word 0xE2) — opaque core (α=1 to ~0.4·R) + soft alpha rim. A feathered disk:
+	//     covers a flat region with no hard edge.
+	// rx,ry are the alpha->0 footprint radii (in image px). effective alpha(x) = color.A · falloff(t).
+	KindGlow
+	KindDisk
 )
 
 // Output JSON shape-type ids. These are the engine's intermediate type ids (NOT the
 // game's shape codes). The injector maps them to the editor's in-game 16-bit shape
 // words (layer offset 0x7A). Mapping:
 //
-//	TypeRectangle / TypeRotatedRectangle → Square  1048677 (rotation via the layer's rot field)
-//	TypeRotatedEllipse (rx==ry)          → Circle  1048678
-//	TypeRotatedEllipse                   → Ellipse 1048712
-//	TypeTriangle                         → Triangle 1048679
+//	TypeRectangle / TypeRotatedRectangle -> Square  1048677 (rotation via the layer's rot field)
+//	TypeRotatedEllipse (rx==ry)          -> Circle  1048678
+//	TypeRotatedEllipse                   -> Ellipse 1048712
+//	TypeTriangle                         -> Triangle 1048679
 //	(also available in-game, not yet emitted: Circle Border 1048688, 880 font glyphs)
 //
 // NOTE: there is NO "line" primitive in the in-game shape catalog, so TypeLine has no
@@ -30,6 +40,11 @@ const (
 	TypeRotatedEllipse   = 16
 	TypeTriangle         = 32
 	TypeLine             = 64 // no in-game equivalent — do not use for liveries
+	// Native FH6 radial-gradient primitives. The id == the in-game low 16-bit shape word, so the
+	// injector maps Type->word directly (KindGlow->0xE4 glow, KindDisk->0xE2 feathered disk). Data layout
+	// is the ellipse's [cx, cy, rx, ry, angle]; the falloff is baked in the mesh (word selects it).
+	TypeGradGlow = 0xE4 // 228 — soft radial gaussian (GaussianImage splat)
+	TypeGradDisk = 0xE2 // 226 — opaque core + soft rim
 )
 
 // RGBA is a color with channel values in 0..1.
@@ -81,6 +96,12 @@ func (c Candidate) ToShape(score float64) Shape {
 	case KindLine:
 		return Shape{Type: TypeLine, Color: col, Score: score,
 			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), float64(c.P[4])}}
+	case KindGlow:
+		return Shape{Type: TypeGradGlow, Color: col, Score: score,
+			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
+	case KindDisk:
+		return Shape{Type: TypeGradDisk, Color: col, Score: score,
+			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
 	default:
 		return Shape{Type: TypeRotatedEllipse, Color: col, Score: score,
 			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
@@ -108,6 +129,10 @@ func KindFromType(t int) ShapeKind {
 		return KindTriangle
 	case TypeLine:
 		return KindLine
+	case TypeGradGlow:
+		return KindGlow
+	case TypeGradDisk:
+		return KindDisk
 	default:
 		return KindEllipse
 	}

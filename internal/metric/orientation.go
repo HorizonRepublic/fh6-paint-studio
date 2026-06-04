@@ -11,7 +11,7 @@ import "math"
 func OrientationMap(target []float32, w, h int) []float32 {
 	lum := make([]float32, w*h)
 	for i := 0; i < w*h; i++ {
-		lum[i] = 0.299*target[i*4] + 0.587*target[i*4+1] + 0.114*target[i*4+2]
+		lum[i] = Luma(target[i*4], target[i*4+1], target[i*4+2])
 	}
 	at := func(x, y int) float64 {
 		if x < 0 {
@@ -72,7 +72,7 @@ func OrientationMap(target []float32, w, h int) []float32 {
 			sxy := box(jxy, x, y)
 			// Eigenvector of the smaller eigenvalue = along-edge direction.
 			ang := 0.5 * math.Atan2(2*sxy, sxx-syy) // direction of max change (gradient)
-			along := ang*rad2deg + 90               // rotate 90° → along the edge
+			along := ang*rad2deg + 90               // rotate 90° -> along the edge
 			along = math.Mod(along, 180)
 			if along < 0 {
 				along += 180

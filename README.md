@@ -18,8 +18,9 @@ See it end to end: [source photo](assets/cat/source.jpg) → [generated reconstr
 ## How to use it
 
 ### 1. Get the app
-Download the [latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases), unzip it
-(you get **two files** — keep them in the same folder), and run **`fh6-paint-studio.exe`**.
+Download the [latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases) and extract
+it — it's a `.7z` (Windows 11 opens it natively; on Windows 10 use [7-Zip](https://www.7-zip.org/)). You
+get **two files** — keep them in the same folder, and run **`fh6-paint-studio.exe`**.
 
 ### 2. Make a livery
 1. **Open any image** you like — a photo, a logo, some art, whatever caught your eye.
@@ -55,6 +56,24 @@ doors…). Match your budget to the panel you're decorating.
 
 ---
 
+## Is it safe? Verify your download
+
+Every release is built by GitHub Actions and carries a **Sigstore build-provenance attestation** — a
+signed, public record that ties the exact files you download to the commit and workflow that produced
+them. You don't have to take my word that the binaries match the source; you can check it yourself with
+the [GitHub CLI](https://cli.github.com/):
+
+```sh
+gh attestation verify fh6-paint-studio-<version>-windows-x64.7z --repo HorizonRepublic/fh6-paint-studio
+```
+
+A `SHA256SUMS` file ships with each release if you'd rather just confirm the download isn't corrupted.
+
+**Heads-up on antivirus:** some scanners flag the app. Putting a livery on your car works by writing
+into Forza's memory — the same technique cheats use — so heuristic scanners treat it as suspicious even
+though it isn't. The code here is open and the build is attested, so you can confirm the binary is
+exactly what's in this repo.
+
 ## Roadmap
 
 - **Bulk processing** — reconstruct a whole folder of images in one run.
@@ -62,9 +81,9 @@ doors…). Match your budget to the panel you're decorating.
 
 ## Build from source
 
-Needs [Go 1.26+](https://go.dev/dl/). For the CPU build, run `.\build.ps1` (Windows) or `./build.sh`
-(Linux/macOS); `.\build.ps1 -Cuda` adds the GPU DLL. First-time Windows toolchain setup (Go + CUDA +
-MSVC) is in `setup-windows.ps1`. Run the tests with `go test ./...`.
+Needs [Go 1.26+](https://go.dev/dl/). For the CPU build, run `.\scripts\build.ps1` (Windows) or
+`./scripts/build.sh` (Linux/macOS); `.\scripts\build.ps1 -Cuda` adds the GPU DLL. First-time Windows
+toolchain setup (Go + CUDA + MSVC) is in `scripts\setup-windows.ps1`. Run the tests with `go test ./...`.
 
 ## License
 

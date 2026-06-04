@@ -1,8 +1,8 @@
 name: Release build
 
-# Builds the 2-file Windows release (GUI exe + fat multi-arch CUDA DLL) and attaches the zip to a
-# release. Called automatically by release.yml on a new release, or dispatched by hand to (re)build
-# the assets for an existing tag.
+# Builds the 2-file Windows release (GUI exe + fat CUDA DLL). On a release it attaches the .7z to the
+# GitHub release; on a release-touching PR it builds the same and uploads the .7z as an artifact (a
+# dry-run, so a tag is never the first time the release build runs). Also dispatchable by hand.
 on:
   workflow_call:
     inputs:
@@ -16,20 +16,30 @@ on:
         description: "Release tag to build and attach assets to (e.g. v0.1.0)"
         required: true
         type: string
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "cmd/studio/**"
+      - "internal/backend/cuda/shim.cu"
+      - ".github/workflows/release-build.yml"
 
 permissions:
   contents: write
+  id-token: write # OIDC identity — proves to Sigstore which workflow/commit is signing
+  attestations: write # publish the build-provenance attestation
 
 jobs:
   windows:
     name: Build & attach (GUI + fat CUDA DLL)
     # windows-2022 ships VS 2022 (MSVC 14.4x), which CUDA 12.8's cudafe++ supports. windows-latest now
     # ships VS 18 / MSVC 14.51, on which 12.8's cudafe++ crashes (ACCESS_VIOLATION at compile time).
-    runs-on: windows-2025
+    runs-on: windows-2022
+    env:
+      VERSION: ${{ inputs.tag || format('0.0.0-pr.{0}', github.run_number) }}
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.tag }} # build the exact tagged source
+          ref: ${{ inputs.tag || github.sha }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -46,15 +56,42 @@ jobs:
           method: "network"
       - name: Build release (fat CUDA DLL + GUI)
         shell: pwsh
-        run: .\build-release.ps1 -Toolkit "$env:CUDA_PATH"
-      - name: Package zip
+        run: .\scripts\build-release.ps1 -Toolkit "$env:CUDA_PATH" -Version "$env:VERSION"
+      # Archived from inside bin\ so the files sit flat (no bin\ folder on extract).
+      - name: Package (7z)
         shell: pwsh
         run: |
-          $zip = "fh6-paint-studio-${{ inputs.tag }}-windows-x64.zip"
-          Compress-Archive -Path bin\fh6-paint-studio.exe, bin\fh6cuda.dll -DestinationPath $zip -Force
-          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $archive = "fh6-paint-studio-${env:VERSION}-windows-x64.7z"
+          Push-Location bin
+          7z a -mx=9 "..\$archive" fh6-paint-studio.exe fh6cuda.dll
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { throw "7z failed ($code)" }
+          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $sum = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          # `<hash><2 spaces><name>` so `sha256sum -c SHA256SUMS.txt` works; ascii avoids a BOM.
+          "$sum  $env:ARCHIVE" | Out-File SHA256SUMS.txt -Encoding ascii
+          Get-Content SHA256SUMS.txt
+      # Skipped on fork PRs, where the GITHUB_TOKEN can't write id-token/attestations.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+      - name: Upload artifact (PR dry-run)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fh6-paint-studio-windows-x64
+          path: |
+            ${{ env.ARCHIVE }}
+            SHA256SUMS.txt
       - name: Attach to the release
+        if: github.event_name != 'pull_request'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" "$env:ZIP" --clobber
+        run: gh release upload "${{ inputs.tag }}" "$env:ARCHIVE" SHA256SUMS.txt --clobber

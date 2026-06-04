@@ -5,7 +5,7 @@
 // (built from shim.cu by nvcc) through golang.org/x/sys/windows + syscall — no
 // cgo, so the Go build stays CGO_ENABLED=0 and the DLL is the only native artifact.
 //
-// Build the DLL first (see build-cuda.ps1), then build Go with -tags cuda. The
+// Build the DLL first (see scripts/build-cuda.ps1), then build Go with -tags cuda. The
 // DLL is found via the OS loader search order (exe dir, CWD, PATH).
 package cuda
 
@@ -48,9 +48,11 @@ type CUDA struct {
 	procFree       *windows.Proc
 	procSampleBud  *windows.Proc // optional: fp_set_sample_budget (nil on older DLLs)
 	procWarpEval   *windows.Proc // optional: fp_set_warp_eval
+	procGradients  *windows.Proc // optional: fp_set_gradients (route gradient kinds to the block eval kernel)
 	procCoarse     *windows.Proc // optional: fp_set_coarse (coarse-to-fine search)
 	procCoarseFP16 *windows.Proc // optional: fp_set_coarse_fp16 (FP16 coarse filter)
 	procSearchRand *windows.Proc // optional: fp_search_random (on-device search)
+	procSearchMom  *windows.Proc // optional: fp_search_moment (on-device moment-seeded search)
 	procSetOrient  *windows.Proc // optional: fp_set_orient
 	procSetBound   *windows.Proc // optional: fp_set_boundary_dist (boundary-aware radius)
 	procPolSTE     *windows.Proc // optional: fp_set_polish_ste (straight-through coverage)
@@ -77,7 +79,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	}
 	dll, err := windows.LoadDLL("fh6cuda.dll")
 	if err != nil {
-		return nil, fmt.Errorf("load fh6cuda.dll (build it with build-cuda.ps1): %w", err)
+		return nil, fmt.Errorf("load fh6cuda.dll (build it with scripts/build-cuda.ps1): %w", err)
 	}
 	proc := func(name string) *windows.Proc {
 		p, perr := dll.FindProc(name)
@@ -111,6 +113,9 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	if p, perr := dll.FindProc("fp_search_random"); perr == nil {
 		g.procSearchRand = p
 	}
+	if p, perr := dll.FindProc("fp_search_moment"); perr == nil {
+		g.procSearchMom = p
+	}
 	if p, perr := dll.FindProc("fp_set_orient"); perr == nil {
 		g.procSetOrient = p
 	}
@@ -130,6 +135,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procPolHard, _ = dll.FindProc("fp_polish_hard_loss")
 	g.procPolSTE, _ = dll.FindProc("fp_set_polish_ste")
 	g.procWarpEval, _ = dll.FindProc("fp_set_warp_eval")
+	g.procGradients, _ = dll.FindProc("fp_set_gradients")
 	g.procCoarse, _ = dll.FindProc("fp_set_coarse")
 	g.procCoarseFP16, _ = dll.FindProc("fp_set_coarse_fp16")
 	initProc, err := dll.FindProc("fp_init")
@@ -317,6 +323,57 @@ func (g *CUDA) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCDF 
 	return c, out[0], true
 }
 
+// SearchMoment runs the on-device MOMENT-seeded search for one shape: fit `centers`
+// covariance-ellipse seeds from the residual grid + a localised refine pool of `n` total
+// candidates, score + argmin, return the single best. ok=false when the DLL predates
+// fp_search_moment (caller falls back to the host moment pool). aspectMax is unused here —
+// the per-candidate aspect comes from each seed's fitted axes. Mirrors SearchRandom's wire
+// format with K appended to ip; scalars cross the syscall via the ip/fp slices.
+func (g *CUDA) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKind, kindCDF []float32,
+	maxR float32, allowAlpha bool, alphaMin float32, compact bool, shapeCount int,
+	grid []float32, gw, gh int, boundPad, boundMix, canvasPad float32) (model.Candidate, float32, bool) {
+	if g.procSearchMom == nil || len(kinds) == 0 || n < 1 || centers < 1 {
+		return model.Candidate{}, 0, false
+	}
+	cdf := make([]float32, len(grid))
+	var tot float32
+	for i, v := range grid {
+		if v < 0 {
+			v = 0
+		}
+		tot += v
+		cdf[i] = tot
+	}
+	kf := make([]float32, len(kinds))
+	for i, k := range kinds {
+		kf[i] = float32(k)
+	}
+	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers)}
+	fp := []float32{maxR, alphaMin, 0, boundPad, boundMix, canvasPad}
+	out := make([]float32, 12)
+	g.procSearchMom.Call(
+		uintptr(uint64(seed)),
+		uintptr(unsafe.Pointer(&ip[0])),
+		fptr(fp),
+		fptr(kf),
+		fptr(kindCDF),
+		fptr(cdf),
+		fptr(out),
+	)
+	runtime.KeepAlive(ip)
+	runtime.KeepAlive(fp)
+	runtime.KeepAlive(kf)
+	runtime.KeepAlive(kindCDF)
+	runtime.KeepAlive(cdf)
+	runtime.KeepAlive(out)
+	c := model.Candidate{
+		Kind:  model.ShapeKind(int(out[1] + 0.5)),
+		P:     [6]float32{out[2], out[3], out[4], out[5], out[6], out[7]},
+		Color: model.RGBA{R: out[8], G: out[9], B: out[10], A: out[11]},
+	}
+	return c, out[0], true
+}
+
 func b2i32(b bool) int32 {
 	if b {
 		return 1
@@ -456,6 +513,17 @@ func (g *CUDA) SetWarpEval(on bool) {
 	if g.procWarpEval != nil {
 		g.procWarpEval.Call(uintptr(b2i32(on)))
 	}
+}
+
+// SetGradients routes the eval to the block kernel so gradient kinds (KindGlow/KindDisk) get their
+// per-pixel-alpha branch. Call with the run's gradient flag before evaluating. No-op if the DLL
+// predates the export (then gradients require the CPU backend). Returns whether the export exists.
+func (g *CUDA) SetGradients(on bool) bool {
+	if g.procGradients == nil {
+		return false
+	}
+	g.procGradients.Call(uintptr(b2i32(on)))
+	return true
 }
 
 // SetCoarse enables coarse-to-fine on-device search: the random batch is scored at the

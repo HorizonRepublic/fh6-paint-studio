@@ -28,11 +28,11 @@ func TestRecolorFixesDrift(t *testing.T) {
 	}
 	recolorVisible(shapes, target, weight, w, h, 0)
 
-	// Shape 1 now owns px0,px1 (px2,px3 taken by shape 2) → mean(red,red) = red.
+	// Shape 1 now owns px0,px1 (px2,px3 taken by shape 2) -> mean(red,red) = red.
 	if big := shapes[1].Color; big[0] < 250 || big[2] > 5 {
 		t.Fatalf("drifted shape should be repainted ~red, got %v", big)
 	}
-	// Shape 2 owns px2,px3 → blue, unchanged.
+	// Shape 2 owns px2,px3 -> blue, unchanged.
 	if shapes[2].Color[2] < 250 || shapes[2].Color[0] > 5 {
 		t.Fatalf("top shape should stay blue, got %v", shapes[2].Color)
 	}

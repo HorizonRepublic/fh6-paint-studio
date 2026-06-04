@@ -1,8 +1,8 @@
 ﻿# build-cuda.ps1 -- compile the CUDA shim into fh6cuda.dll and build fh6paint-cuda.exe.
 # Run from the repo root. Needs: CUDA Toolkit (nvcc) + MSVC Build Tools (cl.exe) + Go.
-# Usage: powershell -ExecutionPolicy Bypass -File .\build-cuda.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File .\scripts\build-cuda.ps1
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
 
 function Find-One($base, $filter) {
