@@ -78,7 +78,7 @@ jobs:
       # Skipped on fork PRs, where the GITHUB_TOKEN can't write id-token/attestations.
       - name: Attest build provenance
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.ARCHIVE }}
       - name: Upload artifact (PR dry-run)
