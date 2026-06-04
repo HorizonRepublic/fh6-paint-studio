@@ -8,7 +8,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"image"
 	"io"
@@ -34,7 +33,6 @@ import (
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/runner"
 	"fh6-paint-studio/internal/ui"
-	"fh6-paint-studio/internal/update"
 )
 
 // version is the release version, injected at build time via -ldflags "-X main.version=...". It stays
@@ -86,6 +84,7 @@ func loop(w *app.Window) error {
 	st := ui.NewAppState(th)
 	st.Version = version
 	st.BackendLabel = "shape engine · " + backendName
+	st.UpdateCheckEnabled = updateCheckEnabled
 	st.Elevated = inject.Elevated()
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
@@ -178,21 +177,8 @@ func loop(w *app.Window) error {
 
 	post := func(e runner.Event) { q.push(e); w.Invalidate() }
 
-	checker := update.Default()
-	var upd updateHolder
-	checkUpdate := func() {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-			defer cancel()
-			rel, ok, err := checker.Latest(ctx)
-			upd.put(updateResult{rel: rel, ok: ok, err: err})
-			w.Invalidate()
-		}()
-	}
-	// Throttled to once/day; dev builds never match a release, so don't probe.
-	if version != "dev" && st.AutoUpdate.Value && time.Since(lastUpdateCheck) >= 24*time.Hour {
-		checkUpdate()
-	}
+	upd := newUpdater()
+	upd.startup(version, st.AutoUpdate.Value, lastUpdateCheck, w)
 
 	// beginOpen starts an async decode of an image path (from the Open dialog or a file drop) off the
 	// UI thread, so the window never freezes; opening guards re-entry. The result is applied via il.take.
@@ -448,7 +434,7 @@ func loop(w *app.Window) error {
 			if st.CheckNowBtn.Clicked(gtx) {
 				st.UpdateStatus = "Checking…"
 				st.Update = nil
-				checkUpdate()
+				upd.kick(w)
 			}
 			if st.AutoUpdate.Update(gtx) {
 				savePrefs()
@@ -598,21 +584,9 @@ func loop(w *app.Window) error {
 				}
 			}
 
-			if r, ok := upd.take(); ok {
-				if r.err != nil {
-					st.AppendLog("update check: " + r.err.Error())
-					st.UpdateStatus = "Couldn't check for updates"
-				} else {
-					lastUpdateCheck = time.Now()
-					if r.ok && update.IsNewer(version, r.rel.Version) {
-						st.Update = &ui.UpdateInfo{Version: r.rel.Tag, Notes: r.rel.Notes, URL: r.rel.URL}
-						st.UpdateStatus = ""
-					} else {
-						st.Update = nil
-						st.UpdateStatus = "You're up to date"
-					}
-					savePrefs()
-				}
+			if t, ok := upd.drain(st, version); ok {
+				lastUpdateCheck = t
+				savePrefs()
 			}
 
 			// While a run is active, keep the elapsed clock live and the indeterminate stage bar
@@ -940,34 +914,6 @@ func (p *pathPick) take() (string, bool) {
 type injectOutcome struct {
 	id  string
 	err error
-}
-
-type updateResult struct {
-	rel update.Release
-	ok  bool
-	err error
-}
-
-type updateHolder struct {
-	mu    sync.Mutex
-	ready bool
-	res   updateResult
-}
-
-func (h *updateHolder) put(r updateResult) {
-	h.mu.Lock()
-	h.res, h.ready = r, true
-	h.mu.Unlock()
-}
-
-func (h *updateHolder) take() (updateResult, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.ready {
-		return updateResult{}, false
-	}
-	h.ready = false
-	return h.res, true
 }
 
 // injectHolder is the thread-safe one-slot hand-off for an inject outcome (mirrors pathPick/imageLoad).

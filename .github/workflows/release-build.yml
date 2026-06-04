@@ -72,8 +72,8 @@ jobs:
         shell: pwsh
         run: |
           $sum = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
-          # `<hash><2 spaces><name>` so `sha256sum -c SHA256SUMS.txt` works; ascii avoids a BOM.
-          "$sum  $env:ARCHIVE" | Out-File SHA256SUMS.txt -Encoding ascii
+          # LF + no BOM so `sha256sum -c` accepts it on Unix (Out-File would write CRLF).
+          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), "$sum  $env:ARCHIVE`n")
           Get-Content SHA256SUMS.txt
       # Skipped on fork PRs, where the GITHUB_TOKEN can't write id-token/attestations.
       - name: Attest build provenance
