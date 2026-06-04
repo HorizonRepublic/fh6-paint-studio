@@ -13,6 +13,7 @@ import (
 	"gioui.org/widget"
 
 	"fh6-paint-studio/internal/preset"
+	"fh6-paint-studio/internal/userpreset"
 )
 
 // Phase is the app's coarse state machine.
@@ -98,11 +99,10 @@ type AppState struct {
 	PreviewOp paint.ImageOp
 
 	// run
-	Phase   Phase
-	Stats   RunStats
-	Log     []string
-	Backend string
-	Toast   string
+	Phase Phase
+	Stats RunStats
+	Log   []string
+	Toast string
 
 	// settings widgets
 	Budget     widget.Float
@@ -123,17 +123,73 @@ type AppState struct {
 	ModeHint       Hint
 	SeedHint       Hint
 
-	alphaTouched    bool
-	backfitTouched  bool
-	boundaryTouched bool
-
 	// advanced
 	AdvClick  widget.Clickable
 	AdvOpen   bool
 	RandomEd  widget.Editor
 	MutatedEd widget.Editor
 	SampleEd  widget.Editor
-	SeedFocus bool
+
+	// expert mode: a master toggle inside the Custom section that unlocks every generator knob.
+	// The knobs always show CONCRETE values (filled from the mode's tuned defaults), so they read
+	// like a preset and can be cloned/saved. Hidden by default to keep the common path clean.
+	Expert     widget.Bool
+	ExpertHint Hint
+
+	QualityDD   *Dropdown
+	QualityHint Hint
+
+	PolishOn        widget.Bool
+	PolishHint      Hint
+	PolishItersEd   widget.Editor
+	PolishItersHint Hint
+	TauSlider       widget.Float // edge softness (polish tau1); lower = crisper
+	TauHint         Hint
+
+	AlphaMinSlider widget.Float // semi-transparent alpha floor; higher = more opaque
+	AlphaMinHint   Hint
+
+	WeightedOn      widget.Bool
+	WeightedHint    Hint
+	WeightStrSlider widget.Float
+	WeightStrHint   Hint
+
+	CompactOn   widget.Bool
+	CompactHint Hint
+
+	AspectEd        widget.Editor
+	AspectHint      Hint
+	KindsSel        *MultiSelect
+	KindsHint       Hint
+	KindWeightEds   []widget.Editor // one per kind (parallel to preset.KindNames); only selected ones render
+	KindWeightsHint Hint
+
+	StandoutSlider widget.Float // post-polish standout suppression tolerance; 0 = off
+	StandoutHint   Hint
+
+	MaxNIEd      widget.Editor
+	MaxNIHint    Hint
+	GridEd       widget.Editor
+	GridHint     Hint
+	OverdrawEd   widget.Editor
+	OverdrawHint Hint
+	RandomHint   Hint
+	MutatedHint  Hint
+	SampleHint   Hint
+
+	// content descriptor for the concrete mode defaults (set by main when an image loads)
+	ContentColors int
+	ContentCutout bool
+
+	// custom presets: a saved config snapshot reloadable from the Preset dropdown (loaded by main).
+	// baseMode is the content mode sent to the engine; the dropdown may instead show a preset name.
+	Presets         []userpreset.Preset
+	baseMode        string
+	PresetNameEd    widget.Editor
+	SavePresetBtn   widget.Clickable
+	DeletePresetBtn widget.Clickable
+	PresetNameHint  Hint
+	ExpGroups       [4]expertGroup // collapse state of the expert sub-sections
 
 	// actions
 	OpenBtn         widget.Clickable
@@ -215,6 +271,12 @@ type AppState struct {
 	LogList    widget.List
 }
 
+// expertGroup is the collapse state of one expert sub-section.
+type expertGroup struct {
+	click widget.Clickable
+	open  bool
+}
+
 // NewAppState builds the initial app state with sensible defaults.
 func NewAppState(th *Theme) *AppState {
 	s := &AppState{
@@ -236,6 +298,21 @@ func NewAppState(th *Theme) *AppState {
 	s.RandomEd.SingleLine = true
 	s.MutatedEd.SingleLine = true
 	s.SampleEd.SingleLine = true
+	s.PolishItersEd.SingleLine = true
+	s.AspectEd.SingleLine = true
+	allKinds := make([]bool, len(preset.KindNames))
+	for i := range allKinds {
+		allKinds[i] = true
+	}
+	s.KindsSel = NewMultiSelect(preset.KindNames, allKinds)
+	s.KindWeightEds = make([]widget.Editor, len(preset.KindNames))
+	for i := range s.KindWeightEds {
+		s.KindWeightEds[i].SingleLine = true
+	}
+	s.MaxNIEd.SingleLine = true
+	s.GridEd.SingleLine = true
+	s.OverdrawEd.SingleLine = true
+	s.QualityDD = NewDropdown([]string{"fast", "balanced", "max", "quality", "ultra"}, 3)
 	s.InjectLayers.SingleLine = true
 	s.InjectScale.SingleLine = true
 	s.InjectScale.SetText("1.0")
@@ -250,6 +327,10 @@ func NewAppState(th *Theme) *AppState {
 		s.Shield = img
 		s.ShieldOp = paint.NewImageOp(img)
 	}
+	s.PresetNameEd.SingleLine = true
+	s.ExpGroups[0].open = true // the smoothness/crispness group is open by default
+	s.baseMode = s.Mode.Value()
+	s.applyModeKnobs() // fill the expert knobs with the default mode's concrete values
 	return s
 }
 
@@ -427,94 +508,145 @@ func (s *AppState) RestoreBudget(n int) {
 func (s *AppState) Choices() preset.Choices {
 	c := preset.DefaultChoices()
 	c.Shapes = s.BudgetShapes()
-	c.Mode = s.Mode.Value()
-	c.Quality = "quality" // the high-quality knee (50k candidates); advanced fields override per-knob
-	if s.alphaTouched {
-		a := s.Alpha.Value
-		c.Alpha = &a
-	}
-	if s.backfitTouched {
-		b := s.Backfit.Value
-		c.Backfit = &b
-	}
-	if s.boundaryTouched {
-		b := s.Boundary.Value
-		c.Boundary = &b
-	}
+	c.Mode = s.baseMode   // the engine mode; the dropdown may show a custom preset name instead
+	c.Quality = "quality" // the high-quality knee; expert overrides this and every knob below
 	if v, err := strconv.ParseInt(strings.TrimSpace(s.Seed.Text()), 10, 64); err == nil {
 		c.Seed = v
 	}
-	if v, err := strconv.Atoi(strings.TrimSpace(s.RandomEd.Text())); err == nil && v > 0 {
+	if !s.Expert.Value {
+		return c
+	}
+
+	// Expert: every knob holds a concrete value, so each one is an explicit override.
+	c.Quality = s.QualityDD.Value()
+
+	polish := s.PolishOn.Value
+	c.Polish = &polish
+	if v := editorPosInt(&s.PolishItersEd); v > 0 {
+		c.PolishIters = v
+	}
+	c.PolishTau1 = float64(sliderToVal(s.TauSlider.Value, tauLo, tauHi))
+
+	alpha := s.Alpha.Value
+	c.Alpha = &alpha
+	c.AlphaMin = float64(sliderToVal(s.AlphaMinSlider.Value, alphaFloorLo, alphaFloorHi))
+
+	weighted := s.WeightedOn.Value
+	c.Weighted = &weighted
+	c.WeightStrength = float64(sliderToVal(s.WeightStrSlider.Value, weightStrLo, weightStrHi))
+
+	boundary := s.Boundary.Value
+	c.Boundary = &boundary
+	backfit := s.Backfit.Value
+	c.Backfit = &backfit
+	compact := s.CompactOn.Value
+	c.Compact = &compact
+
+	if v, ok := editorFloat(&s.AspectEd); ok && v >= 0 {
+		c.Aspect = v
+	}
+	c.Kinds = s.KindsSel.ValueCSV()
+	c.KindWeights = s.kindWeightsCSV()
+	c.StandoutTol = float64(sliderToVal(s.StandoutSlider.Value, standoutLo, standoutHi))
+
+	if v := editorPosInt(&s.RandomEd); v > 0 {
 		c.Random = v
 	}
-	if v, err := strconv.Atoi(strings.TrimSpace(s.MutatedEd.Text())); err == nil && v > 0 {
+	if v := editorPosInt(&s.MutatedEd); v > 0 {
 		c.Mutated = v
 	}
-	if v, err := strconv.Atoi(strings.TrimSpace(s.SampleEd.Text())); err == nil && v > 0 {
+	if v := editorPosInt(&s.SampleEd); v > 0 {
 		c.SampleBudget = v
+	}
+	if v := editorPosInt(&s.MaxNIEd); v > 0 {
+		c.MaxNoImprove = v
+	}
+	if v := editorPosInt(&s.GridEd); v > 0 {
+		c.Grid = v
+	}
+	if v, ok := editorFloat(&s.OverdrawEd); ok && v >= 1 {
+		c.Overdraw = v
 	}
 	return c
 }
 
-// syncAutoToggles updates the alpha/backfit checkboxes to the current mode's default while
-// the user has not touched them, and flips the touched flag once they interact.
-func (s *AppState) syncAutoToggles(gtx C) {
-	if s.Alpha.Update(gtx) {
-		s.alphaTouched = true
-	}
-	if s.Backfit.Update(gtx) {
-		s.backfitTouched = true
-	}
-	if s.Boundary.Update(gtx) {
-		s.boundaryTouched = true
-	}
-	m := s.Mode.Value()
-	if !s.alphaTouched {
-		s.Alpha.Value = modeAlphaDefault(m)
-	}
-	if !s.backfitTouched {
-		s.Backfit.Value = modeBackfitDefault(m)
-	}
-	if !s.boundaryTouched {
-		s.Boundary.Value = modeBoundaryDefault(m)
-	}
-	// A mode change should re-apply auto defaults: clear touched when the dropdown changed.
+// ApplyChoices loads a full configuration into the widgets (the inverse of Choices): the base mode,
+// budget, seed, and every expert knob, with Expert mode turned on so the loaded knobs are visible.
+// KeepInside is not part of Choices, so the caller restores it separately. Mode.Set does not raise the
+// dropdown's changed flag, so the next frame will not overwrite these knobs with the mode defaults.
+func (s *AppState) ApplyChoices(c preset.Choices) {
+	s.baseMode = c.Mode
+	s.RestoreBudget(c.Shapes)
+	s.Seed.SetText(strconv.FormatInt(c.Seed, 10))
+	s.Expert.Value = true
+	s.applyKnobs(c)
+}
+
+// syncSettings reloads the knobs when the Preset dropdown changes (a built-in mode loads its concrete
+// defaults; a custom preset loads its full snapshot), then keeps the budget slider in agreement.
+func (s *AppState) syncSettings() {
 	if s.Mode.Changed() {
-		s.alphaTouched = false
-		s.backfitTouched = false
-		s.boundaryTouched = false
+		s.applySelectedMode()
 	}
+	s.syncBudget()
 }
 
-func modeAlphaDefault(mode string) bool {
-	switch mode {
-	case "flat", "logo", "line", "cutout":
-		return false
-	default:
-		return true
+// applySelectedMode applies the dropdown's current selection: a built-in mode fills the expert knobs
+// with that mode's concrete defaults; a custom preset name loads its saved snapshot.
+func (s *AppState) applySelectedMode() {
+	v := s.Mode.Value()
+	if !IsBuiltinMode(v) {
+		for i := range s.Presets {
+			if s.Presets[i].Name == v {
+				s.ApplyChoices(s.Presets[i].Choices)
+				s.KeepInside.Value = s.Presets[i].KeepInside
+				return
+			}
+		}
 	}
+	s.baseMode = v
+	s.applyModeKnobs()
 }
 
-func modeBackfitDefault(mode string) bool {
-	switch mode {
-	case "flat", "logo", "line", "cutout":
+func IsBuiltinMode(m string) bool {
+	switch m {
+	case "anime", "photo", "flat", "gaussian":
 		return true
-	default:
-		return false
 	}
+	return false
 }
 
-// modeBoundaryDefault mirrors preset.boundaryDefault for the advanced toggle's displayed state:
-// boundary-aware radius defaults ON for character/illustration content (and "auto", which is usually
-// anime in FH6), OFF for flat/photo/logo where it frays or is mixed. The engine re-decides at run
-// time from the resolved mode, so for "auto" this is just the checkbox hint until the user touches it.
-func modeBoundaryDefault(mode string) bool {
-	switch mode {
-	case "anime", "shaded", "illustration", "realism", "auto", "":
-		return true
-	default: // photo, flat, logo, line, cutout
-		return false
+// SelectPreset sets the Preset dropdown to value and applies it (a built-in mode loads its concrete
+// defaults; a custom preset loads its snapshot). Used by main after a save/delete to refresh the view.
+func (s *AppState) SelectPreset(value string) {
+	s.Mode.Set(value)
+	s.applySelectedMode()
+}
+
+// SetPresets stores the loaded custom presets and rebuilds the Preset dropdown options (built-in modes
+// followed by the preset names), preserving the current selection where possible.
+func (s *AppState) SetPresets(ps []userpreset.Preset) {
+	s.Presets = ps
+	builtin := []string{"anime", "photo", "flat", "gaussian"}
+	opts := append([]string{}, builtin...)
+	for i := range ps {
+		opts = append(opts, ps[i].Name)
 	}
+	s.Mode.SetOptions(opts, len(builtin))
+}
+
+// SelectedPreset returns the custom preset matching the dropdown's current value, or nil for a built-in.
+func (s *AppState) SelectedPreset() *userpreset.Preset {
+	v := s.Mode.Value()
+	if IsBuiltinMode(v) {
+		return nil
+	}
+	for i := range s.Presets {
+		if s.Presets[i].Name == v {
+			return &s.Presets[i]
+		}
+	}
+	return nil
 }
 
 func shapesToFrac(n int) float32 {
@@ -539,4 +671,159 @@ func fracToShapes(f float32) int {
 		n = preset.MaxShapes
 	}
 	return n
+}
+
+// Expert slider ranges: a widget.Float value in 0..1 maps linearly into [lo, hi].
+const (
+	tauLo, tauHi               float32 = 0.02, 0.20
+	alphaFloorLo, alphaFloorHi float32 = 0.0, 1.0
+	weightStrLo, weightStrHi   float32 = 0.0, 1.0
+	standoutLo, standoutHi     float32 = 0.0, 0.02
+)
+
+func sliderToVal(f, lo, hi float32) float32 { return lo + f*(hi-lo) }
+
+func valToSlider(v, lo, hi float32) float32 {
+	if hi <= lo {
+		return 0
+	}
+	s := (v - lo) / (hi - lo)
+	if s < 0 {
+		return 0
+	}
+	if s > 1 {
+		return 1
+	}
+	return s
+}
+
+func derefBool(p *bool, def bool) bool {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+func orFloat(v, def float64) float64 {
+	if v > 0 {
+		return v
+	}
+	return def
+}
+
+func formatFloat(v float64) string { return strconv.FormatFloat(v, 'g', -1, 64) }
+
+func setEditorInt(ed *widget.Editor, v int) {
+	if v > 0 {
+		ed.SetText(strconv.Itoa(v))
+	} else {
+		ed.SetText("")
+	}
+}
+
+func editorPosInt(ed *widget.Editor) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(ed.Text())); err == nil && v > 0 {
+		return v
+	}
+	return 0
+}
+
+func editorFloat(ed *widget.Editor) (float64, bool) {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(ed.Text()), 64); err == nil {
+		return v, true
+	}
+	return 0, false
+}
+
+// applyKnobs sets every expert control to the values in c. A mode/preset snapshot carries concrete
+// values; sentinels (-1, nil) fall back to a sane display default. Budget/mode/seed are caller-owned.
+func (s *AppState) applyKnobs(c preset.Choices) {
+	if c.Quality != "" {
+		s.QualityDD.Set(c.Quality)
+	}
+	s.PolishOn.Value = derefBool(c.Polish, true)
+	setEditorInt(&s.PolishItersEd, c.PolishIters)
+	s.TauSlider.Value = valToSlider(float32(orFloat(c.PolishTau1, 0.08)), tauLo, tauHi)
+
+	s.Alpha.Value = derefBool(c.Alpha, true)
+	floor := c.AlphaMin
+	if floor < 0 {
+		floor = 0.40
+	}
+	s.AlphaMinSlider.Value = valToSlider(float32(floor), alphaFloorLo, alphaFloorHi)
+
+	s.WeightedOn.Value = derefBool(c.Weighted, true)
+	wstr := c.WeightStrength
+	if wstr < 0 {
+		wstr = 0.15
+	}
+	s.WeightStrSlider.Value = valToSlider(float32(wstr), weightStrLo, weightStrHi)
+
+	s.Boundary.Value = derefBool(c.Boundary, false)
+	s.Backfit.Value = derefBool(c.Backfit, false)
+	s.CompactOn.Value = derefBool(c.Compact, true)
+
+	if c.Aspect >= 0 {
+		s.AspectEd.SetText(formatFloat(c.Aspect))
+	} else {
+		s.AspectEd.SetText("")
+	}
+	kinds := strings.TrimSpace(c.Kinds)
+	if kinds == "" {
+		kinds = strings.Join(preset.KindNames, ",") // empty = the default all-kinds mix
+	}
+	s.KindsSel.SetCSV(kinds)
+	// Distribute the weights (parallel to the kinds CSV) into the per-kind editors.
+	for i := range s.KindWeightEds {
+		s.KindWeightEds[i].SetText("")
+	}
+	wkinds := strings.Split(kinds, ",")
+	wvals := strings.Split(c.KindWeights, ",")
+	for j, kn := range wkinds {
+		if idx := kindIndex(strings.TrimSpace(kn)); idx >= 0 && j < len(wvals) {
+			if v := strings.TrimSpace(wvals[j]); v != "" {
+				s.KindWeightEds[idx].SetText(v)
+			}
+		}
+	}
+	s.StandoutSlider.Value = valToSlider(float32(c.StandoutTol), standoutLo, standoutHi)
+
+	setEditorInt(&s.RandomEd, c.Random)
+	setEditorInt(&s.MutatedEd, c.Mutated)
+	setEditorInt(&s.SampleEd, c.SampleBudget)
+	setEditorInt(&s.MaxNIEd, c.MaxNoImprove)
+	setEditorInt(&s.GridEd, c.Grid)
+	if c.Overdraw > 1 {
+		s.OverdrawEd.SetText(formatFloat(c.Overdraw))
+	} else {
+		s.OverdrawEd.SetText("")
+	}
+}
+
+// applyModeKnobs fills the expert knobs with the selected built-in mode's concrete defaults for the
+// loaded image's content (palette + cutout), so the controls always read like a real preset.
+func (s *AppState) applyModeKnobs() {
+	s.applyKnobs(preset.ModeKnobDefaults(s.baseMode, s.ContentColors, s.ContentCutout))
+}
+
+// kindWeightsCSV reads the per-kind weight editors for the currently selected kinds, in selection
+// order, so the CSV stays parallel to the kinds CSV. A blank entry leaves the engine on a uniform mix.
+func (s *AppState) kindWeightsCSV() string {
+	checked := s.KindsSel.Value()
+	ws := make([]string, 0, len(checked))
+	for _, name := range checked {
+		if idx := kindIndex(name); idx >= 0 {
+			ws = append(ws, strings.TrimSpace(s.KindWeightEds[idx].Text()))
+		}
+	}
+	return strings.Join(ws, ",")
+}
+
+func kindIndex(name string) int {
+	for i, k := range preset.KindNames {
+		if strings.EqualFold(k, name) {
+			return i
+		}
+	}
+	return -1
 }

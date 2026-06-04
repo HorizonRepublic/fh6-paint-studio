@@ -54,7 +54,7 @@ func FalloffDisk(t float64) float64 {
 		return 0
 	}
 	u := (t - diskCore) / (1 - diskCore) // 0 at the core edge, 1 at the footprint edge
-	return 1 - (3*u*u - 2*u*u*u)         // 1 − smoothstep(u)
+	return 1 - (3*u*u - 2*u*u*u)         // 1 - smoothstep(u)
 }
 
 // IsGradient reports whether a kind uses a per-pixel falloff (vs a binary fill).

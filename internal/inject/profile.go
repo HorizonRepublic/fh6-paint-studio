@@ -21,9 +21,9 @@ type GameProfile struct {
 	ColorOffset    int // 4 bytes RGBA
 	MaskOffset     int // 1 byte (0/1)
 	ShapeIDOffset  int // uint16 shape word (low 16 bits of the game shape code)
-	ResourceOffset int // uint64 per-layer geometry resource pointer — READ-ONLY diagnostic (layer dump).
-	// NEVER written by the injector: FH6 selects the mesh from the shape-word; aliasing this pointer
-	// across layers corrupts FH6's per-layer ownership and crashes the game on free (FHE01).
+	// The per-layer geometry resource pointer at 0xA8 is deliberately NEVER written: FH6 selects the
+	// mesh from the shape-word, and aliasing that pointer across layers corrupts FH6's per-layer
+	// ownership and crashes the game on free (FHE01).
 }
 
 // FH6Profile returns the Forza Horizon 6 memory profile.
@@ -48,7 +48,6 @@ func FH6Profile() GameProfile {
 		ColorOffset:    0x74,
 		MaskOffset:     0x78,
 		ShapeIDOffset:  0x7A,
-		ResourceOffset: 0xA8,
 	}
 }
 

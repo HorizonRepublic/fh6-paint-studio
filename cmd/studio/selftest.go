@@ -15,8 +15,7 @@ import (
 	"fh6-paint-studio/internal/runner"
 )
 
-// ---- selftest: headless end-to-end smoke (no window) --------------------------------------
-
+// selftest runs a headless end-to-end smoke test (no window).
 func selftest() {
 	applog.Init("fh6-paint-studio.log")
 	defer applog.Close()

@@ -269,7 +269,7 @@ func (s *AppState) emptyStateOpen(gtx C) D {
 				fillRRect(gtx, border, sz, 14)
 				in := image.Rectangle{Min: image.Pt(2, 2), Max: image.Pt(sz.X-2, sz.Y-2)}
 				paint.FillShape(gtx.Ops, bg, clip.UniformRRect(in, 12).Op(gtx.Ops))
-				pointer.CursorPointer.Add(gtx.Ops) // hand cursor over the whole card
+				pointer.CursorPointer.Add(gtx.Ops)
 				return D{Size: sz}
 			}),
 			layout.Stacked(func(gtx C) D {

@@ -64,17 +64,31 @@ func LoadRegion(path string, maxRes int, fx, fy, fw, fh float64) (*Prepared, ima
 	cy := b.Min.Y + int(fy*float64(H))
 	cw := int(fw * float64(W))
 	ch := int(fh * float64(H))
-	if cw < 1 {
-		cw = 1
+	// Keep the origin inside the image first, then fit the size to what remains, so an out-of-range
+	// fraction yields a 1px crop instead of a degenerate (<=0) rectangle.
+	if cx < b.Min.X {
+		cx = b.Min.X
 	}
-	if ch < 1 {
-		ch = 1
+	if cy < b.Min.Y {
+		cy = b.Min.Y
+	}
+	if cx > b.Max.X-1 {
+		cx = b.Max.X - 1
+	}
+	if cy > b.Max.Y-1 {
+		cy = b.Max.Y - 1
 	}
 	if cx+cw > b.Max.X {
 		cw = b.Max.X - cx
 	}
 	if cy+ch > b.Max.Y {
 		ch = b.Max.Y - cy
+	}
+	if cw < 1 {
+		cw = 1
+	}
+	if ch < 1 {
+		ch = 1
 	}
 	crop := image.NewRGBA(image.Rect(0, 0, cw, ch))
 	draw.Draw(crop, crop.Bounds(), img, image.Pt(cx, cy), draw.Src)

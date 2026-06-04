@@ -32,6 +32,10 @@ const (
 
 // CUDA is the GPU-backed Backend. It owns no device memory directly — the DLL
 // does — but keeps host copies of target/weight to satisfy Target()/Weight().
+//
+// Not safe for concurrent use: the DLL holds a single device context with global
+// scratch, so callers must serialize all method calls (the engine drives one backend
+// from a single goroutine).
 type CUDA struct {
 	w, h, gridSize int
 	target, weight []float32
@@ -100,6 +104,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 		procFree:     proc("fp_free"),
 	}
 	if err != nil {
+		g.Close() // release the loaded DLL handle
 		return nil, fmt.Errorf("resolve fh6cuda.dll exports: %w", err)
 	}
 	// Optional export (added for runtime-configurable progressive sampling). Resolve
@@ -140,6 +145,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procCoarseFP16, _ = dll.FindProc("fp_set_coarse_fp16")
 	initProc, err := dll.FindProc("fp_init")
 	if err != nil {
+		g.Close()
 		return nil, err
 	}
 	ret, _, _ := initProc.Call(
@@ -147,6 +153,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 		uintptr(w), uintptr(h), uintptr(maxCands), uintptr(gridSize),
 	)
 	if ret != 0 {
+		g.Close() // fp_free releases any partial device allocations, then the DLL handle
 		return nil, fmt.Errorf("fp_init failed (code %d) — check GPU/CUDA", ret)
 	}
 	return g, nil
@@ -191,6 +198,8 @@ func (g *CUDA) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 	}
 	g.outBuf = g.outBuf[:n*resStride]
 	g.procEval.Call(fptr(g.candBuf), uintptr(n), fptr(g.outBuf))
+	runtime.KeepAlive(g.candBuf)
+	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
 		b := g.outBuf[i*resStride:]
 		out[i] = backend.EvalResult{
@@ -207,22 +216,26 @@ func (g *CUDA) Apply(c model.Candidate) error {
 	buf := g.candBuf[:candStride]
 	packCand(c, buf)
 	g.procApply.Call(fptr(buf))
+	runtime.KeepAlive(buf)
 	return nil
 }
 
 func (g *CUDA) ErrorGrid() ([]float32, int, int, error) {
 	grid := make([]float32, g.gridSize*g.gridSize)
 	g.procGrid.Call(fptr(grid))
+	runtime.KeepAlive(grid)
 	return grid, g.gridSize, g.gridSize, nil
 }
 
 func (g *CUDA) ReadCanvas(dst []float32) error {
 	g.procReadCanv.Call(fptr(dst))
+	runtime.KeepAlive(dst)
 	return nil
 }
 
 func (g *CUDA) Reset(canvas []float32) error {
 	g.procReset.Call(fptr(canvas))
+	runtime.KeepAlive(canvas)
 	return nil
 }
 

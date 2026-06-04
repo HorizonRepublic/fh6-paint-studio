@@ -170,7 +170,7 @@ func (s *AppState) rowThumb(gtx C, r *LibraryRow) D {
 	// The thumb is a click target — opens the full preview in a lightbox.
 	return r.ThumbBtn.Layout(gtx, func(gtx C) D {
 		fillRRect(gtx, th.SurfaceHi, sz, 6)
-		pointer.CursorPointer.Add(gtx.Ops) // hand cursor over the clickable thumb
+		pointer.CursorPointer.Add(gtx.Ops)
 		gtx.Constraints = layout.Exact(sz)
 		if (r.Thumb != paint.ImageOp{}) {
 			defer clip.UniformRRect(image.Rectangle{Max: sz}, 6).Push(gtx.Ops).Pop()

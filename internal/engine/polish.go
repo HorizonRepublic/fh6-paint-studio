@@ -627,9 +627,8 @@ func maxInt(a, b int) int {
 
 // polishForward composites all shapes over base into render (soft cov for
 // ellipses, hard for others) and stores each shape's "below" color over its
-// bbox for the backward pass. The loss is computed separately by polishLoss,
-// so this returns 0.
-func polishForward(ps []pshape, base, render []float32, below [][]float32, bbx [][4]int, w, h int, tau float64, ste bool) float64 {
+// bbox for the backward pass. The loss is computed separately by polishLoss.
+func polishForward(ps []pshape, base, render []float32, below [][]float32, bbx [][4]int, w, h int, tau float64, ste bool) {
 	copy(render, base)
 	for si := range ps {
 		bb := expandedBBox(ps[si], w, h, tau)
@@ -673,7 +672,6 @@ func polishForward(ps []pshape, base, render []float32, below [][]float32, bbx [
 			}
 		}
 	}
-	return 0
 }
 
 // optimizableGeo reports whether a kind has a differentiable SDF (geometry refined in
@@ -751,9 +749,8 @@ func polishLoss(render, target, weight []float32, w, h int) float64 {
 	return sum
 }
 
-// polishBackward accumulates dLoss/dparam into each pshape's Adam gradient
-// staging (stored transiently in m/v? no — we use a separate grad slice). It
-// recomputes per-pixel gradients in a reverse (top->bottom) pass.
+// polishBackward accumulates dLoss/dparam into each pshape's grad slice,
+// recomputing per-pixel gradients in a reverse (top-to-bottom) pass.
 func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste bool) {
 	_ = base
 	// dL/dC_final = 2*weight*(C-target), per channel.
@@ -858,8 +855,7 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 				}
 			}
 		}
-		// stash gradients in the shape's grad buffer (reuse v's pair? no) — store
-		// into a transient field via the moments? We keep a separate grad array.
+		// stash gradients in the shape's separate grad buffer for the Adam step.
 		s.grad = [10]float64{gP[0], gP[1], gP[2], gP[3], gP[4], gP[5], gR, gG, gB, gA}
 	}
 }

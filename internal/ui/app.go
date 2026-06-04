@@ -134,7 +134,7 @@ func (s *AppState) bodyRow(gtx C) D {
 			}
 		}
 		return layout.Flex{}.Layout(gtx,
-			layout.Rigid(fixed(320, s.sourcePanel)),
+			layout.Rigid(fixed(336, s.sourcePanel)),
 			layout.Rigid(GapH(12).Layout),
 			layout.Flexed(1, fillH(s.centerPanel)),
 			layout.Rigid(GapH(12).Layout),
