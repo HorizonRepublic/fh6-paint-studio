@@ -33,7 +33,7 @@ jobs:
     name: Build & attach (GUI + fat CUDA DLL)
     # windows-2022 ships VS 2022 (MSVC 14.4x), which CUDA 12.8's cudafe++ supports. windows-latest now
     # ships VS 18 / MSVC 14.51, on which 12.8's cudafe++ crashes (ACCESS_VIOLATION at compile time).
-    runs-on: windows-2022
+    runs-on: windows-2025
     env:
       VERSION: ${{ inputs.tag || format('0.0.0-pr.{0}', github.run_number) }}
     steps:
