@@ -131,6 +131,22 @@ func (s *AppState) activityDone(gtx C) D {
 		layout.Rigid(func(gtx C) D {
 			return th.Dim(gtx, fmt.Sprintf("%s shapes in %s · err %s", group(st.Shapes), fmtDur(st.Elapsed), fmtErr(st.Err)))
 		}),
+		// Auto-budget: when the knee finished BELOW the requested cap, surface that the app picked the
+		// optimal count itself (the user's number is a ceiling, not a fixed target).
+		layout.Rigid(func(gtx C) D {
+			if st.Cap <= 0 || st.Shapes >= st.Cap*9/10 {
+				return D{}
+			}
+			return layout.Inset{Top: 8}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return fillDot(gtx, th.Accent, 8) }),
+					layout.Rigid(GapH(8).Layout),
+					layout.Rigid(func(gtx C) D {
+						return th.Lbl(gtx, 13, fmt.Sprintf("Auto: %s shapes — optimal (cap %s)", group(st.Shapes), group(st.Cap)), th.Accent)
+					}),
+				)
+			})
+		}),
 		layout.Rigid(func(gtx C) D {
 			if !s.Quality.Set {
 				return D{}

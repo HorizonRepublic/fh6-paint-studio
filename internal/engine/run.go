@@ -62,7 +62,14 @@ type run struct {
 func Run(be backend.Backend, opt Options) Result {
 	runStart := time.Now()
 	r := newRun(be, opt)
-	r.greedy()
+	if opt.LiveBatch > 0 {
+		r.live() // EXPERIMENTAL co-adaptation scheduler for the structural base...
+		if len(r.shapes)-1 < r.genTarget {
+			r.greedy() // ...then greedy fills the remaining budget with detail (two-phase economy)
+		}
+	} else {
+		r.greedy()
+	}
 	r.postProcess()
 	r.refine()
 	r.tm.Total = time.Since(runStart)
@@ -243,7 +250,7 @@ func newRun(be backend.Backend, opt Options) *run {
 func (r *run) greedy() {
 	// Auto-shape-count knee detector (opt-in via ShapeKneeTol>0): stops the loop when the
 	// per-shape RELATIVE marginal improvement plateaus (see kneeDetector).
-	knee := newKneeDetector(r.opt.ShapeKneeTol)
+	knee := newKneeDetector(r.opt.ShapeKneeTol, r.opt.ShapeKneeFloor, r.initialErr)
 
 	// Compact-shape bias for the per-shape pick (selection-only, never accumulated):
 	// penalize large shapes — heavily for the first 8 — so the coarse stage doesn't
@@ -277,6 +284,18 @@ func (r *run) greedy() {
 				break
 			}
 			continue
+		}
+		// Low-contrast gate: the best findable shape improves the canvas, but if it barely
+		// differs from what it covers (mean per-pixel SSE gain below MinShapeGain — a faint
+		// ghost facet over an already-solved region) skip it. Counts as no-improvement, so
+		// the search reallocates to genuine detail or stops once nothing high-contrast remains.
+		if r.opt.MinShapeGain > 0 {
+			if area := candidateArea(best, r.w, r.h); area > 0 && -float64(bestScore)/area < r.opt.MinShapeGain {
+				if noImprove++; noImprove >= r.maxNI {
+					break
+				}
+				continue
+			}
 		}
 		noImprove = 0
 		t0 := time.Now()

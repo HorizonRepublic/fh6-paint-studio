@@ -343,8 +343,12 @@ func loop(w *app.Window) error {
 					st.Stats.Err = ev.Result.FinalError
 					st.Stats.ETA = 0
 					lastShapes = shapes
-					st.AppendLog(fmt.Sprintf("done: %d shapes, error %.1f in %s",
-						st.Stats.Shapes, ev.Result.FinalError, fmtSecs(st.Stats.Elapsed)))
+					doneMsg := fmt.Sprintf("done: %d shapes, error %.1f in %s",
+						st.Stats.Shapes, ev.Result.FinalError, fmtSecs(st.Stats.Elapsed))
+					if st.Stats.Cap > 0 && st.Stats.Shapes < st.Stats.Cap*9/10 {
+						doneMsg += fmt.Sprintf(" — auto-trimmed from %d (optimal for this image)", st.Stats.Cap)
+					}
+					st.AppendLog(doneMsg)
 					cancelRun = nil
 					st.Phase = ui.PhaseDone
 					st.Stats.Stage = ""
@@ -476,6 +480,7 @@ func loop(w *app.Window) error {
 				}
 				st.ClearQuality() // drop the previous run's quality badge
 				st.Stats = ui.RunStats{Total: r.Options.StopAt}
+				st.Stats.Cap = ch.Shapes // remember the requested cap so Done can show the auto-picked optimal count
 				cancelRun = runner.RunAsync(*genPrep, r, post)
 			}
 			if st.CancelBtn.Clicked(gtx) && cancelRun != nil {

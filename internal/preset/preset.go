@@ -134,6 +134,11 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		qual = "balanced"
 	}
 
+	// Economy auto-schedule: at low-mid budgets a co-adapted LIVE base (or anneal at the tightest budgets)
+	// lifts quality — the app spends fewer shapes on the structural base so the greedy detail builds on a
+	// better foundation. Off for flat (knee handles it) and above economyLiveMax (marginal vs cost).
+	ecoLB, ecoBase, ecoAnneal := EconomyParams(resolved, shapes)
+
 	opt := engine.Options{
 		Width: w, Height: h, Background: prep.Background,
 		StopAt: shapes, RandomSamples: random, MutatedSamples: mutated, Seed: c.Seed,
@@ -148,6 +153,10 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		// boundary-straddling fur/contour slivers instead of replacing it with a muddy weighted mean.
 		RecolorVarSkip: 0.03,
 		MaxNoImprove:   maxNI,
+		// Auto-shape-count knee — per-content (md): flat/line-art trims the white-background ghost-facet
+		// over-fill (3000→~600 on img_2, EYE-equal); 0/off for anime/photo to protect detail/eyes.
+		ShapeKneeTol:   md.KneeTol,
+		ShapeKneeFloor: md.KneeFloor,
 		SampleBudget:   sampleBudget,
 		CompactPenalty: compact && !transparent,
 		OnDeviceSearch: true, // CUDA build uses it; CPU ignores
@@ -182,6 +191,9 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
+		LiveBatch:         ecoLB,
+		LiveBase:          ecoBase,
+		AnnealIters:       ecoAnneal,
 		StandoutTol:       c.StandoutTol,
 		// Boundary-aware radius: opt-in (caller toggle). A real win on smooth photo/anime character
 		// content but a regression on text/flat, with no clean way to gate automatically — so it is
@@ -421,6 +433,8 @@ type ModeDefaults struct {
 	PolishTau1  float64   // final polish edge softness
 	Boundary    bool      // boundary-aware radius
 	Backfit     bool      // post-polish back-fitting
+	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
+	KneeFloor   float64   // knee absolute floor (frac of initialErr) so it trips on near-SOLVED flat content
 }
 
 // ModeDefaultsFor returns the tuned defaults for a resolved preset (anime|photo|flat). palette is the
@@ -448,6 +462,17 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 	if flat {
 		d.AspectMax = 8
 		d.PolishTau1 = 0.06
+		// Auto-shape-count knee (flat/line-art only): large uniform regions (white bg) saturate fast,
+		// after which the greedy wastes budget on imperceptible ghost facets ("квашня"). The floor lets
+		// the knee trip on near-SOLVED flats (where the ÷currentErr rate blows up and never stops).
+		// SELF-ADAPTIVE per image — validated on the bank: img_2 (sparse face on white) 3000→982 shapes
+		// (−67%, SSIM ≥ base, LOWER banding); img_17 (dense brush-art) 3000→2354 (−22%, EYE-EQUAL at 3×
+		// zoom — the −0.012 SSIM is below the perceptual threshold); img_18 (dense sketch) untouched (3000).
+		// floor 0.003 (vs the more aggressive 0.005) is the eye-confirmed-safe value: still a big win on
+		// sparse line-art, no visible loss on dense. OFF for anime/photo so genuine detail/eyes keep the
+		// full budget. Later: a perceptual ΔE/JND gate (research #2) can make the cut fully surgical.
+		d.KneeTol = 2e-4
+		d.KneeFloor = 0.003
 		if palette < 80 { // VECTOR logo (few colours): rect-rich + keep refining edges to 600
 			d.KindWeights = []float32{0.8, 0.05, 0.15}
 			d.PolishIters = 600
@@ -456,6 +481,42 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		}
 	}
 	return d
+}
+
+// Economy auto-schedule thresholds (the low-budget global-search regime, validated on the bank). The
+// co-adapted LIVE base lifts quality most at low-mid budgets; below ~80 the discrete anneal relocation wins;
+// above ~1500 the gain is marginal vs the ~4x cost, so it's off. Off for flat (the knee already trims it).
+const (
+	economyAnnealMax   = 80   // budgets ≤ this use the basin-hopping anneal (tightest budget: discrete relocation beats co-adaptation)
+	economyAnnealIters = 25   // anneal outer iterations at the tightest budgets
+	economyLiveMax     = 1500 // budgets ≤ this (and > economyAnnealMax) use the two-phase LIVE base
+	economyBaseCap     = 400  // LIVE base size cap (base ≈ budget/4, capped here)
+	economyBatch       = 6    // LIVE batch size
+)
+
+// EconomyParams returns the AUTO low-budget global-search schedule for a content mode + shape budget — the
+// economy "efficient base → detail budget" win. Returns engine.Options' LiveBatch / LiveBase / AnnealIters.
+// Off (0,0,0) for flat/line-art (the knee handles those) and for budgets above economyLiveMax (marginal vs
+// the ~4x cost). Single source of truth shared by the studio (Resolve) and the CLI so they can't drift.
+func EconomyParams(resolvedMode string, shapes int) (liveBatch, liveBase, annealIters int) {
+	if PresetMode(resolvedMode) == "flat" || shapes <= 0 {
+		return 0, 0, 0
+	}
+	switch {
+	case shapes <= economyAnnealMax:
+		return 0, 0, economyAnnealIters
+	case shapes <= economyLiveMax:
+		base := shapes / 4
+		if base > economyBaseCap {
+			base = economyBaseCap
+		}
+		if base >= shapes {
+			return 0, 0, 0
+		}
+		return economyBatch, base, 0
+	default:
+		return 0, 0, 0
+	}
 }
 
 // ModeKnobDefaults returns the CONCRETE knob values a built-in content preset resolves to for the

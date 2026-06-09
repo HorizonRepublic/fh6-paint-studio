@@ -37,6 +37,7 @@ const (
 // RunStats is the live telemetry shown in the run panel.
 type RunStats struct {
 	Shapes, Total int
+	Cap           int // the shape budget the user REQUESTED (the slider). The auto-knee may finish below it; Shapes < Cap then means the app auto-picked the optimal count.
 	Err, Err0     float64
 	Elapsed, ETA  time.Duration
 	History       []float64 // error per progress tick, for the sparkline

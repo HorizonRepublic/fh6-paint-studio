@@ -54,6 +54,8 @@ func main() {
 	standout := flag.Float64("standout", 0, "post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. 0=off. ~0.005 = conservative. The metric will NOT show the win — judge by eye; the gate only bounds the loss.")
 	alphaMinFlag := flag.Float64("alpha-min", -1, "lower bound for candidate alpha when -alpha is on (candidates draw alpha~U(alpha-min,1)). -1 = content-mode default (photo 0.3, anime 0.55). HIGHER = crisper/more-opaque shapes (less soft muddying of detail like eyes/lips), at the cost of needing more shapes for smooth gradients; test 0.7-0.85 on detailed faces.")
 	shapeTol := flag.Float64("shape-tol", 0, "auto-shape-count: stop placing shapes when the relative marginal improvement rate r=ΔErr/(window·currentErr) per shape stays below this (0=off, fill -shapes budget). Adapts the count per image: saturated flat/logo stop early (~175-400), detailed photo/anime/cartoon fill the budget. -shapes is the ceiling. Recommended auto value: 0.0002 (conservative; trims only genuinely-saturated content). 0.0005 = aggressive/draft.")
+	kneeFloor := flag.Float64("knee-floor", 0, "with -shape-tol: floor the knee denominator at this fraction of the INITIAL error so the same tol also trips on near-SOLVED content (clean line-art / fully-filled flats) where ÷currentErr blows up and never stops. 0=off (pure relative). ~0.02 = treat <2% residual as solved. Detailed photos (currentErr ≫ floor) are unaffected.")
+	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (−score/area) is below this — a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small — try ~1e-4..1e-3.")
 	compact := flag.Bool("compact", true, "bias the per-shape pick toward compact shapes (cleaner coarse stage)")
 	mode := flag.String("mode", "anime", "content PRESET (3 manual): anime | photo | flat. Legacy names (logo/line/illustration/cutout/auto) collapse to one of the 3 via preset.PresetMode. anime/photo = semi-transparent + triangle-rich + STE; flat = opaque + rect/triangle by palette + boundary + backfit. Transparency is auto-detected (forces opaque). Explicit flags override.")
 	weightV2 := flag.Bool("weight-v2", false, "force the richer dilated ink-aware saliency map (WeightMapV2) on/off; default is auto (on for flat/logo/line/cutout, off for photo/anime). V2 protects 1-2px black contours from being smeared by flat-fill shapes.")
@@ -85,6 +87,9 @@ func main() {
 	backfit := flag.Bool("backfit", false, "back-fitting: remove the lowest-contribution shapes and RE-GREEDY them against the completed-canvas residual (breaks the greedy plateau — each shape was optimal WHEN placed, but later shapes changed the canvas). Gated END-TO-END: polish(greedy) vs polish(backfit(greedy)), keep the winner, so it NEVER regresses. AUTO-ON for flat/logo/line + cutout (where the greedy plateau bites hardest); opt-in elsewhere since it costs ~one extra polish for a smaller gain.")
 	backfitPasses := flag.Int("backfit-passes", 2, "number of back-fitting passes (each removes+regrows -backfit-frac of the shapes); passes stop early once one stops improving")
 	backfitFrac := flag.Float64("backfit-frac", 0.1, "fraction of shapes removed+regrown per back-fitting pass (0.1 = the weakest 10%)")
+	live := flag.Int("live", 0, "EXPERIMENTAL LIVE-style component-init scheduler (0=off, REPLACES greedy when >0): add shapes in batches of this size seeded from the largest residual components (big regions first) + re-polish ALL jointly after every batch. The proven low-primitive-count win (5 paths vs 256). For the low-budget economy regime; ~6-10 batch. Use at low -shapes with -polish.")
+	liveBase := flag.Int("live-base", 0, "with -live: run the LIVE co-adaptation only for the first this-many shapes (the structural BASE), then greedy for the rest of -shapes (the detail). 0 = LIVE all the way. The two-phase economy: cheap co-adapted base frees budget for detail; affordable at full -shapes since LIVE runs only on the base.")
+	anneal := flag.Int("anneal", 0, "EXPERIMENTAL basin-hopping / iterated local search (0=off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget economy regime (50-300 shapes); ~20-40 iters. Costly (re-polishes each iter) — use only at low -shapes.")
 	scoreJSON := flag.String("score-json", "", "comparison mode: render an existing geometry JSON through our backend, score it (unweighted SSE + per-pixel) vs -input, save -preview, then exit. Set -max-res to the JSON's canvas size for alignment.")
 	polishJSON := flag.String("polish-json", "", "polish-harness mode: load a saved greedy geometry JSON, run ONLY the gated joint polish on it (current -polish-* opts) against -input, save polished -output + -preview, then exit. The greedy input is FIXED, so any final-error delta is purely the polish change — an isolated harness for tuning polish (faster than a full run). Set -max-res to the JSON canvas size.")
 	imgVs := flag.String("img-vs", "", "image-space comparison: compare the -input PNG against this PNG pixel-for-pixel (must be same size), report SSE + per-pixel, save a difference heatmap to -preview, then exit. Convention-free (no rendering).")
@@ -218,6 +223,19 @@ func main() {
 	// Boundary-aware radius default (md.Boundary: on anime/character, off flat/photo). -boundary overrides.
 	if !userSet["boundary"] {
 		*boundary = md.Boundary
+	}
+	// Auto-shape-count knee default (md: flat/line-art trims the white-bg ghost-facet over-fill; off for
+	// anime/photo). -shape-tol / -knee-floor override. Same source of truth as the studio (ModeDefaultsFor).
+	if !userSet["shape-tol"] {
+		*shapeTol = md.KneeTol
+	}
+	if !userSet["knee-floor"] {
+		*kneeFloor = md.KneeFloor
+	}
+	// Economy auto-schedule (same source of truth as the studio): a co-adapted LIVE base / anneal at low-mid
+	// budgets lifts quality. Explicit -live / -live-base / -anneal override.
+	if !userSet["live"] && !userSet["live-base"] && !userSet["anneal"] {
+		*live, *liveBase, *anneal = presetpkg.EconomyParams(resolvedMode, fillBudget)
 	}
 	// Alpha + kind mix (md): organic = semi-transparent, alphaMin 0.40, triangle-rich; flat = OPAQUE,
 	// rect-rich for VECTOR logos (few colours), triangle-rich for TEXTURED flat.
@@ -449,6 +467,8 @@ func main() {
 		AspectMax:           aspectMax,
 		MaxNoImprove:        *maxNoImprove,
 		ShapeKneeTol:        *shapeTol,
+		ShapeKneeFloor:      *kneeFloor,
+		MinShapeGain:        *minGain,
 		RecolorVarSkip:      *recolorVar,
 		SampleBudget:        *sampleBudget,
 		DetailStrength:      float32(*detailStrength),
@@ -476,6 +496,9 @@ func main() {
 		BackFit:           *backfit,
 		BackFitPasses:     *backfitPasses,
 		BackFitFrac:       *backfitFrac,
+		AnnealIters:       *anneal,
+		LiveBatch:         *live,
+		LiveBase:          *liveBase,
 		Progress: func(n int, e float64) {
 			if n%25 == 0 {
 				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, fillBudget, e, time.Since(start).Seconds())
