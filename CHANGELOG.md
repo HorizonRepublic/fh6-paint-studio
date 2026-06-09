@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.1.0...v1.2.0) (2026-06-09)
+
+
+### Features
+
+* line-art stylizer, hybrid mode, and AMD/Intel GPU support ([ce261b4](https://github.com/HorizonRepublic/fh6-paint-studio/commit/ce261b4084da58dbe35fabacf741e4a9a7a25ebb))
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/image to v0.42.0 ([#23](https://github.com/HorizonRepublic/fh6-paint-studio/issues/23)) ([b431681](https://github.com/HorizonRepublic/fh6-paint-studio/commit/b431681569fb31378f10247df9d98e89a1dda251))
+
 ## [1.1.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.0.1...v1.1.0) (2026-06-04)
 
 
