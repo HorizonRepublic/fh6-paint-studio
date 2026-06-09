@@ -109,6 +109,7 @@ type AppState struct {
 	BudgetEd   widget.Editor // manual shape-count entry, two-way synced with Budget
 	lastBudget int
 	Mode       *Dropdown
+	InkRatio   widget.Float // hybrid Artist knob: fraction of the budget for FDoG ink lines (slider 0..1 -> ratio 0..MaxInkRatio); the rest is the geometrize fill
 	Alpha      widget.Bool
 	Backfit    widget.Bool
 	Boundary   widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
@@ -121,6 +122,7 @@ type AppState struct {
 	KeepInsideHint Hint
 	BudgetHint     Hint
 	ModeHint       Hint
+	InkHint        Hint
 	SeedHint       Hint
 
 	// advanced
@@ -285,7 +287,7 @@ func NewAppState(th *Theme) *AppState {
 		// niche "gaussian" mode (soft-glow reconstruction for SMOOTH / gradient / painterly content —
 		// 8x better than greedy on a gradient, loses on fine detail; no greedy, trains on the GPU).
 		// Default = anime, the best general-purpose preset.
-		Mode: NewDropdown([]string{"anime", "photo", "flat", "gaussian"}, 0),
+		Mode: NewDropdown([]string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}, 0),
 	}
 	s.Budget.Value = shapesToFrac(1000)
 	s.BudgetEd.SingleLine = true
@@ -295,6 +297,7 @@ func NewAppState(th *Theme) *AppState {
 	s.SoundOn.Value = true    // chime on finish by default (overridden by the saved preference)
 	s.Seed.SingleLine = true
 	s.Seed.SetText("1")
+	s.InkRatio.Value = ratioToSlider(preset.DefaultInkRatio("anime-ink")) // sane start; reseeded when a hybrid preset is picked
 	s.RandomEd.SingleLine = true
 	s.MutatedEd.SingleLine = true
 	s.SampleEd.SingleLine = true
@@ -488,6 +491,26 @@ func (s *AppState) syncBudget() {
 // SetBudgetShapes positions the budget slider at a given shape count.
 func (s *AppState) SetBudgetShapes(n int) { s.Budget.Value = shapesToFrac(n) }
 
+// InkRatioValue is the current Artist Lines<->Fill split (fraction of budget for ink, 0..MaxInkRatio).
+func (s *AppState) InkRatioValue() float64 { return sliderToRatio(s.InkRatio.Value) }
+
+// SetInkRatio positions the Artist slider at a given ink fraction (clamped to [0, MaxInkRatio]).
+func (s *AppState) SetInkRatio(r float64) { s.InkRatio.Value = ratioToSlider(r) }
+
+// sliderToRatio / ratioToSlider map the Artist slider (0..1) to the ink fraction (0..MaxInkRatio).
+func sliderToRatio(f float32) float64 { return float64(f) * preset.MaxInkRatio }
+
+func ratioToSlider(r float64) float32 {
+	s := float32(r / preset.MaxInkRatio)
+	if s < 0 {
+		s = 0
+	}
+	if s > 1 {
+		s = 1
+	}
+	return s
+}
+
 // RestoreBudget sets the budget from a saved/clamped count, keeping the slider, the manual entry, and
 // the internal sync baseline in agreement so syncBudget does not fight the restore on the first frame.
 func (s *AppState) RestoreBudget(n int) {
@@ -508,8 +531,9 @@ func (s *AppState) RestoreBudget(n int) {
 func (s *AppState) Choices() preset.Choices {
 	c := preset.DefaultChoices()
 	c.Shapes = s.BudgetShapes()
-	c.Mode = s.baseMode   // the engine mode; the dropdown may show a custom preset name instead
-	c.Quality = "quality" // the high-quality knee; expert overrides this and every knob below
+	c.InkRatio = s.InkRatioValue() // the Artist Lines<->Fill split (used only for hybrid modes); non-expert, always set
+	c.Mode = s.baseMode            // the engine mode; the dropdown may show a custom preset name instead
+	c.Quality = "quality"          // the high-quality knee; expert overrides this and every knob below
 	if v, err := strconv.ParseInt(strings.TrimSpace(s.Seed.Text()), 10, 64); err == nil {
 		c.Seed = v
 	}
@@ -577,6 +601,7 @@ func (s *AppState) Choices() preset.Choices {
 func (s *AppState) ApplyChoices(c preset.Choices) {
 	s.baseMode = c.Mode
 	s.RestoreBudget(c.Shapes)
+	s.SetInkRatio(c.InkRatio)
 	s.Seed.SetText(strconv.FormatInt(c.Seed, 10))
 	s.Expert.Value = true
 	s.applyKnobs(c)
@@ -606,11 +631,14 @@ func (s *AppState) applySelectedMode() {
 	}
 	s.baseMode = v
 	s.applyModeKnobs()
+	if preset.IsHybridMode(v) { // seed the Artist Lines<->Fill slider from the preset's default split
+		s.SetInkRatio(preset.DefaultInkRatio(v))
+	}
 }
 
 func IsBuiltinMode(m string) bool {
 	switch m {
-	case "anime", "photo", "flat", "gaussian":
+	case "anime", "photo", "flat", "lineart", "anime-ink", "gaussian":
 		return true
 	}
 	return false
@@ -627,7 +655,7 @@ func (s *AppState) SelectPreset(value string) {
 // followed by the preset names), preserving the current selection where possible.
 func (s *AppState) SetPresets(ps []userpreset.Preset) {
 	s.Presets = ps
-	builtin := []string{"anime", "photo", "flat", "gaussian"}
+	builtin := []string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}
 	opts := append([]string{}, builtin...)
 	for i := range ps {
 		opts = append(opts, ps[i].Name)

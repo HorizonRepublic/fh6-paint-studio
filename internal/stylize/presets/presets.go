@@ -26,6 +26,11 @@ func init() {
 	stylize.RegisterPreset(stylize.Preset{Name: "lines", Stages: []stylize.Stage{
 		{Engine: "ink"},
 	}})
+	// ink-fdog — FDoG coherent ink centerlines only (no fill), the clean designed-outline layer for the
+	// HYBRID (geometrize colour/detail fill + these crisp lines on top). Same line config as `anime`.
+	stylize.RegisterPreset(stylize.Preset{Name: "ink-fdog", Stages: []stylize.Stage{
+		{Engine: "ink", Config: json.RawMessage(`{"method":"fdog","thresh":0.75}`)},
+	}})
 	// outline — the older region-boundary stroke engine, kept as an alternative line source.
 	stylize.RegisterPreset(stylize.Preset{Name: "outline", Smooth: dtSmooth, Stages: []stylize.Stage{
 		{Engine: "stroke"},

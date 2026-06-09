@@ -51,7 +51,7 @@ func selftest() {
 	// niche gaussian path (preset.resolveGaussian -> runner -> engine.GenerateGaussian) end-to-end.
 	for _, a := range os.Args[2:] {
 		switch strings.ToLower(a) {
-		case "anime", "photo", "flat", "gaussian", "gauss", "smooth":
+		case "anime", "photo", "flat", "lineart", "anime-ink", "gaussian", "gauss", "smooth":
 			c.Mode = strings.ToLower(a)
 		}
 	}

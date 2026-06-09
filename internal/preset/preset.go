@@ -21,16 +21,21 @@ import (
 // MaxShapes is the FH6 per-group layer ceiling; Resolve clamps Shapes to it.
 const MaxShapes = 3000
 
+// MaxInkRatio caps the hybrid Lines<->Fill knob: at most half the budget goes to FDoG ink, so the
+// geometrize fill (the colour/detail that renders alive eyes) always keeps the majority of the shapes.
+const MaxInkRatio = 0.5
+
 // Choices is the high-level configuration the UI exposes. Curated fields drive the
 // common path; the advanced fields default to the quality preset / content mode unless
 // set. Tri-state toggles use *bool (nil = mode default). Float "auto" sentinels: Aspect
 // and WeightStrength use -1; PolishTau0/Tau1 use 0; Overdraw uses 0/1 for off.
 
 type Choices struct {
-	Shapes   int    // budget; clamped to [1, MaxShapes]
-	Mode     string // anime|photo|flat (3 manual presets; legacy names collapse via presetMode; "" -> anime)
-	Quality  string // fast|balanced|max|quality|ultra ("" -> balanced)
-	Alpha    *bool  // nil = mode default; set = override (forced off for cutouts)
+	Shapes   int     // budget; clamped to [1, MaxShapes]
+	Mode     string  // anime|photo|flat (3 manual presets; legacy names collapse via presetMode; "" -> anime)
+	InkRatio float64 // hybrid family only: fraction of the budget spent on FDoG ink lines (0..MaxInkRatio); fill gets the rest. 0 = no lines / non-hybrid.
+	Quality  string  // fast|balanced|max|quality|ultra ("" -> balanced)
+	Alpha    *bool   // nil = mode default; set = override (forced off for cutouts)
 	Seed     int64
 	Polish   *bool // nil = on
 	Backfit  *bool // nil = mode default (auto for flat/logo/line/cutout)
@@ -511,11 +516,56 @@ func PresetMode(mode string) string {
 		return "photo"
 	case "flat", "logo", "line", "cutout":
 		return "flat"
+	case "lineart", "line-art":
+		return "flat" // hybrid line-art: OPAQUE flat fill (a white background stays clean — no semi-transparent casts) + FDoG ink lines on top
 	case "gaussian", "gauss", "smooth", "gradient":
 		return "gaussian" // NICHE: soft-glow reconstruction for smooth/gradient content (engine.GenerateGaussian)
-	default: // "", "auto", "anime", "shaded", "illustration", anything else
-		return "anime"
+	default: // "", "auto", "anime", "anime-ink", "hybrid", "shaded", "illustration", anything else
+		return "anime" // hybrid anime-ink/hybrid: semi-transparent fill (alive eyes/gradients) + FDoG ink on top
 	}
+}
+
+// IsHybridMode reports whether mode is a hybrid-family preset (geometrize fill + FDoG ink lines on top):
+// "lineart" (opaque flat fill) or "anime-ink" (semi-transparent fill). The caller reserves InkBudget of
+// the shapes for the ink and appends the lines after the fill; non-hybrid modes draw the fill only.
+func IsHybridMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "lineart", "line-art", "anime-ink", "anime-hybrid", "hybrid":
+		return true
+	}
+	return false
+}
+
+// DefaultInkRatio is a hybrid preset's starting Lines<->Fill split (fraction of budget for ink): line-art
+// is line-led (the lines ARE the content), anime-ink is fill-led (colour dominates, fewer major contours).
+// The studio's Artist slider seeds from this; 0 for non-hybrid modes.
+func DefaultInkRatio(mode string) float64 {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "lineart", "line-art":
+		return 0.40
+	case "anime-ink", "anime-hybrid", "hybrid":
+		return 0.20
+	}
+	return 0
+}
+
+// InkBudget splits a total shape budget into the FDoG ink count for a Lines<->Fill ratio, always leaving
+// at least one fill shape. ratio is clamped to [0, MaxInkRatio]; the geometrize fill gets shapes-ink.
+func InkBudget(ratio float64, shapes int) int {
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > MaxInkRatio {
+		ratio = MaxInkRatio
+	}
+	ink := int(ratio*float64(shapes) + 0.5)
+	if ink >= shapes {
+		ink = shapes - 1
+	}
+	if ink < 0 {
+		ink = 0
+	}
+	return ink
 }
 
 // PresetCounts returns the (random, mutated, sampleBudget, maxNoImprove) base for a quality

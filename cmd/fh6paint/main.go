@@ -12,6 +12,7 @@ import (
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/engine"
+	"fh6-paint-studio/internal/hybrid"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/metric"
@@ -92,6 +93,9 @@ func main() {
 	fh6Score := flag.String("fh6-score", "", "comparison mode: render a geometry JSON the way the GAME composites it (LINEAR light) and report SSE vs -input (sRGB), then exit. Measures real in-game fidelity (the semi-transparent pop). Set -max-res to the JSON canvas size; -ss for AA; saves the in-game render to -preview.")
 	stylizeMode := flag.String("stylize", "", "STYLIZER mode: run a stylizer preset (auto|anime|poster|ink) instead of the geometrize engine, writing injectable geometry to -output (+ -preview). 'auto' analyses the image's style (line-art/cel/hatched/busy) and picks the line+fill+smooth knobs per content. Uses -max-res as the working resolution and -shapes as the budget.")
 	stylizeLibrary := flag.Bool("stylize-library", false, "with -stylize: also save the result as a Studio library entry (~/FH6PaintStudio/library) so it injects from the studio's Library tab via the normal word-only path — no GUI run needed.")
+	hybridInk := flag.Int("hybrid-ink", 0, "HYBRID: after the geometrize run, lay up to N clean FDoG ink lines (stylizer) ON TOP — the optimized colour/detail fill (alive eyes) + the designed anime outline. N>0: -shapes is the fill budget, total = -shapes + N. N=-1: AUTO — split -shapes by content (photo→no lines; line-art→line-heavy 35%; cel→fill-heavy 12%; else 20%). 0=off.")
+	saveLib := flag.Bool("library", false, "save the final geometry as a Studio library entry (~/FH6PaintStudio/library) for one-click word-only in-game inject from the Library tab (works for the geometrize + hybrid path).")
+	metrics := flag.Bool("metrics", false, "print perceptual quality of the final render vs the source (ΔE76 mean/p95, SSIM, banding) — the offline quality harness; the WYSIWYG render is in-game-faithful so these correlate with the eye.")
 	flag.Parse()
 
 	model.LinearLight = *linear
@@ -187,6 +191,25 @@ func main() {
 	// presets). "auto"/""/unknown -> anime.
 	resolvedMode := presetpkg.PresetMode(*mode)
 	flatMode := resolvedMode == "flat"
+	// Hybrid: generate the FDoG ink lines FIRST (from the source) so we know their ACTUAL count — then give
+	// the fill the rest of the budget, so nothing is wasted when FDoG self-limits below its ceiling.
+	// -hybrid-ink<0 = AUTO: pick the ink ceiling by content (photo→0, line-art→35%, cel→12%, else 20%) and
+	// split the -shapes total. -hybrid-ink N>0 = fixed ceiling N, added on top (total = -shapes + actual).
+	inkCeiling := *hybridInk
+	if *hybridInk < 0 {
+		inkCeiling = hybrid.AutoInkCeiling(prep, *shapes, resolvedMode)
+	}
+	var inkShapes []model.Shape
+	if inkCeiling > 0 {
+		inkShapes = hybrid.Ink(prep, inkCeiling)
+	}
+	fillBudget := *shapes
+	if *hybridInk < 0 { // auto: ink + fill share the -shapes total (no overflow, no waste)
+		fillBudget = *shapes - len(inkShapes)
+		if fillBudget < 1 {
+			fillBudget = 1
+		}
+	}
 	// All per-mode constants come from presetpkg.ModeDefaultsFor — the SINGLE source of truth shared
 	// with the studio (preset.Resolve), so the CLI and GUI can never drift. The CLI keeps its
 	// flag/userSet override plumbing; only the constant VALUES are sourced from md.
@@ -416,7 +439,7 @@ func main() {
 	}
 	o := engine.Options{
 		Width: prep.W, Height: prep.H, Background: prep.Background,
-		StopAt: *shapes, RandomSamples: *randomSamples, MutatedSamples: *mutated, Seed: *seed,
+		StopAt: fillBudget, RandomSamples: *randomSamples, MutatedSamples: *mutated, Seed: *seed,
 		Kinds:               presetpkg.ParseKinds(*kindsCSV),
 		KindWeights:         kindWeights,
 		TransparentBG:       prep.HasTransparency,
@@ -455,7 +478,7 @@ func main() {
 		BackFitFrac:       *backfitFrac,
 		Progress: func(n int, e float64) {
 			if n%25 == 0 {
-				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, *shapes, e, time.Since(start).Seconds())
+				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, fillBudget, e, time.Since(start).Seconds())
 			}
 		},
 	}
@@ -463,6 +486,14 @@ func main() {
 	applog.Printf("done: %d shapes, error %.1f -> %.1f in %.1fs",
 		len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
 	logTimings(res.Timings)
+
+	// HYBRID: lay clean FDoG ink lines (the stylizer's designed anime outline) ON TOP of the geometrize
+	// colour/detail fill — the optimized engine renders alive eyes + smooth shading that flat cells can't,
+	// and the crisp lines give the designed look. Built from prep.Pixels so the ink shares the exact canvas.
+	if len(inkShapes) > 0 {
+		res.Shapes = append(res.Shapes, inkShapes...) // designed FDoG outline, composited ON TOP of the fill
+		applog.Printf("hybrid-ink: +%d FDoG lines on top of %d fill shapes", len(inkShapes), len(res.Shapes)-len(inkShapes)-1)
+	}
 
 	// Map a transparent-surround run back to the original size: the shapes are all inside the content
 	// rectangle, so shifting them by -padPx yields a clean origin-0 reconstruction at the original dims.
@@ -475,15 +506,43 @@ func main() {
 
 	must(ensureDir(*out))
 	must(imageio.WriteGeometry(*out, model.Geometry{Shapes: res.Shapes}))
+	var canvas []float32
+	if *preview != "" || *saveLib || *metrics {
+		// WYSIWYG render: the way the GAME composites — LINEAR light — so semi-transparent shapes show
+		// their TRUE in-game appearance instead of an sRGB-blend preview that under-states the "pop". For
+		// opaque content this equals a plain preview (no blending). ss>1 supersamples for anti-aliased edges.
+		canvas = imageio.RenderFH6(res.Shapes, prep.HasTransparency, outW, outH, *ssaa)
+	}
+	if *metrics && padPx == 0 && outW == prep.W && outH == prep.H {
+		// canvas (RenderFH6) is sRGB; prep.Pixels is LINEAR in -linear mode — encode it to sRGB so the
+		// perceptual metrics (which expect sRGB) compare like-for-like.
+		srcSRGB := imageio.EncodeForDisplay(prep.Pixels)
+		de, p95 := metric.DeltaE76(srcSRGB, canvas, outW, outH)
+		ss := metric.SSIM(srcSRGB, canvas, outW, outH)
+		band := metric.FalseEdges(srcSRGB, canvas, outW, outH, 0.02)
+		fmt.Printf("[metrics] shapes=%d ΔE76 mean=%.2f p95=%.2f  SSIM=%.4f  band=%.2f\n", len(res.Shapes)-1, de, p95, ss, band)
+	}
 	if *preview != "" {
 		must(ensureDir(*preview))
-		// WYSIWYG preview: render the way the GAME composites — LINEAR light — so semi-transparent
-		// shapes show their TRUE in-game appearance instead of an sRGB-blend preview that under-states
-		// the "pop". For opaque content this equals a plain preview (no blending). ss>1 supersamples
-		// for anti-aliased edges.
-		canvas := imageio.RenderFH6(res.Shapes, prep.HasTransparency, outW, outH, *ssaa)
 		must(imageio.SavePreview(*preview, canvas, outW, outH))
 		applog.Printf("wrote WYSIWYG preview %s (ssaa=%d, linear-light composite)", *preview, *ssaa)
+	}
+	if *saveLib {
+		root, rerr := library.DefaultRoot()
+		must(rerr)
+		st := library.Open(root)
+		name := strings.TrimSuffix(filepath.Base(*in), filepath.Ext(*in))
+		preset := *mode
+		if len(inkShapes) > 0 {
+			preset = "hybrid"
+		}
+		ent, serr := st.Save(res.Shapes, floatToNRGBA(canvas, outW, outH), library.Entry{
+			Name: name, Source: *in, Preset: preset, Width: outW, Height: outH,
+			Budget: len(res.Shapes) - 1, InjectScale: 1.0, Created: time.Now(),
+		})
+		must(serr)
+		applog.Printf("library: saved %q -> %s (inject from the studio Library tab)", ent.ID, st.Dir(ent.ID))
+		fmt.Printf("library: saved %q (inject from the studio Library tab)\n", ent.ID)
 	}
 	applog.Printf("wrote %s", *out)
 }

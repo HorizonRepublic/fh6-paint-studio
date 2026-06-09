@@ -26,6 +26,7 @@ import (
 	"gioui.org/widget"
 
 	"fh6-paint-studio/internal/applog"
+	"fh6-paint-studio/internal/hybrid"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/inject"
 	"fh6-paint-studio/internal/library"
@@ -135,6 +136,7 @@ func loop(w *app.Window) error {
 
 	var curPrep *imageio.Prepared // engine input for the loaded image (always decoded in linear light)
 	var curGen *imageio.Prepared  // engine input for the ACTIVE run — curPrep, or a crop of it
+	var hybridInk int             // hybrid mode: FDoG ink budget reserved this run, appended in Done
 	// viewAbs is the absolute source rect (raw-file coords) that the current working image covers — the
 	// original's auto-crop rect after Open/Reset, or the composed crop rect after Apply crop. It is the
 	// base a new crop selection composes against, so repeated crops re-decode the original at full res.
@@ -281,6 +283,24 @@ func loop(w *app.Window) error {
 					st.SetPreview(img)
 				case runner.Done:
 					shapes, canvas := ev.Result.Shapes, ev.Canvas
+					if hybridInk > 0 && curGen != nil { // hybrid: lay the FDoG designed outline ON TOP of the fill
+						if lines := hybrid.Ink(curGen, hybridInk); len(lines) > 0 {
+							shapes = append(shapes, lines...)
+							buf := imageio.RenderFH6(shapes, curGen.HasTransparency, curGen.W, curGen.H, 2)
+							img := image.NewNRGBA(image.Rect(0, 0, curGen.W, curGen.H))
+							for i, v := range buf {
+								if v < 0 {
+									v = 0
+								} else if v > 1 {
+									v = 1
+								}
+								img.Pix[i] = uint8(v*255 + 0.5)
+							}
+							canvas = img
+							st.AppendLog(fmt.Sprintf("hybrid: +%d FDoG lines on top of the fill", len(lines)))
+						}
+						hybridInk = 0
+					}
 					if curGen != nil { // crop run -> crop dims; whole-image run -> full dims
 						lastW, lastH = curGen.W, curGen.H
 					}
@@ -407,7 +427,19 @@ func loop(w *app.Window) error {
 				st.Phase = ui.PhaseRunning
 				runStart = time.Now()
 				tb.indeterminate() // instant taskbar feedback until the first progress tick
-				r := preset.Resolve(*genPrep, st.Choices())
+				ch := st.Choices()
+				r := preset.Resolve(*genPrep, ch)
+				hybridInk = 0
+				if preset.IsHybridMode(ch.Mode) { // reserve part of the budget for the FDoG ink (appended in Done)
+					hybridInk = preset.InkBudget(ch.InkRatio, ch.Shapes)
+					if hybridInk > 0 {
+						r.Options.StopAt = ch.Shapes - hybridInk
+						if r.Options.StopAt < 1 {
+							r.Options.StopAt = 1
+						}
+					}
+					st.AppendLog(fmt.Sprintf("%s: %d ink lines + %d fill (%.0f%% lines)", ch.Mode, hybridInk, r.Options.StopAt, ch.InkRatio*100))
+				}
 				st.Stats = ui.RunStats{Total: r.Options.StopAt}
 				cancelRun = runner.RunAsync(*genPrep, r, post)
 			}

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"image"
 	"path/filepath"
 
@@ -8,6 +9,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/preset"
 )
 
 // sourcePanel is the left column: a scrollable Source + Settings stack with the primary
@@ -100,11 +103,57 @@ func (s *AppState) settingsCard(gtx C) D {
 		layout.Rigid(s.budgetRow),
 		layout.Rigid(GapV(10).Layout),
 		layout.Rigid(func(gtx C) D {
-			return s.fieldHint(gtx, "Preset", &s.ModeHint, "The content preset (pick to match your image): ANIME/illustration, PHOTO/realistic, or FLAT/logo/poster. Each one is benchmark-tuned — it sets the shape mix, transparency, edge sharpening and polish that suit that content. Transparency is detected automatically.", func(gtx C) D { return s.Mode.Layout(gtx, th) })
+			return s.fieldHint(gtx, "Preset", &s.ModeHint, "The content preset (pick to match your image): ANIME/illustration, PHOTO/realistic, FLAT/logo/poster, or the LINEART / ANIME-INK hybrids (geometrize fill + clean ink outline). Each one is benchmark-tuned — it sets the shape mix, transparency, edge sharpening and polish that suit that content. Transparency is detected automatically.", func(gtx C) D { return s.Mode.Layout(gtx, th) })
+		}),
+		layout.Rigid(func(gtx C) D {
+			if !preset.IsHybridMode(s.baseMode) { // the Artist tier only applies to the hybrid presets
+				return D{}
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(GapV(12).Layout),
+				layout.Rigid(s.artistBlock),
+			)
 		}),
 		layout.Rigid(GapV(12).Layout),
 		layout.Rigid(s.advancedSection),
 	)
+}
+
+// artistBlock is the semi-expert "Artist" tier shown for the hybrid presets: ONE friendly knob for the
+// line/fill balance (the single artistic decision), set apart from the technical Expert panel. The total
+// shape budget above is split into FDoG ink lines + geometrize fill by this ratio.
+func (s *AppState) artistBlock(gtx C) D {
+	th := s.Th
+	pct := int(s.InkRatioValue()*100 + 0.5)
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	return th.CardBg(gtx, th.SurfaceHi, 10, func(gtx C) D {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 13, "Artist", th.Accent) }),
+					layout.Rigid(GapH(6).Layout),
+					layout.Rigid(func(gtx C) D {
+						return s.InkHint.Layout(gtx, th, "How much outline vs paint. Left = more colour fill (alive shading, gradient eyes); right = a bolder ink outline. Set it to match your drawing — manga / line-art wants more line, painted art wants more fill. The shape budget above is split into ink lines + colour fill by this.")
+					}),
+					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 0)} }),
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, fmt.Sprintf("%d%% lines", pct)) }),
+				)
+			}),
+			layout.Rigid(GapV(6).Layout),
+			layout.Rigid(func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Fill") }),
+					layout.Flexed(1, func(gtx C) D {
+						sl := material.Slider(th.M, &s.InkRatio)
+						sl.Color = th.Accent
+						return layout.UniformInset(6).Layout(gtx, sl.Layout)
+					}),
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Lines") }),
+				)
+			}),
+		)
+	})
 }
 
 func (s *AppState) advancedSection(gtx C) D {
