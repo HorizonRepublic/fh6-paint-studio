@@ -58,8 +58,12 @@ func FalloffDisk(t float64) float64 {
 }
 
 // IsGradient reports whether a kind uses a per-pixel falloff (vs a binary fill).
+// IsGradient reports whether a kind uses a per-pixel SOFT coverage (vs a binary fill): the radial
+// gradients (KindGlow/KindDisk) and the captured mask words. Every soft-coverage call site keys off
+// this (RenderFH6 isGrad, cpu evalGradient/applyGradient, polish coverage, engine opaqueShape). Mask
+// geometry is still frozen — only KindGlow has a trainable analytic gradient (see optimizableGeo).
 func IsGradient(kind model.ShapeKind) bool {
-	return kind == model.KindGlow || kind == model.KindDisk
+	return kind == model.KindGlow || kind == model.KindDisk || model.IsMask(kind)
 }
 
 // GaussianCovGrad returns the KindGlow coverage at pixel-centre (x+0.5,y+0.5) AND its analytic gradient
@@ -125,6 +129,12 @@ func Coverage(kind model.ShapeKind, p [6]float32, x, y int) float64 {
 	case model.KindDisk:
 		return FalloffDisk(ellipseNormRadius(p, x, y))
 	default:
+		if model.IsMask(kind) {
+			if m := maskByKind(kind); m != nil {
+				return maskCoverage(m, p, x, y)
+			}
+			return 0
+		}
 		if Inside(kind, p, x, y) {
 			return 1
 		}

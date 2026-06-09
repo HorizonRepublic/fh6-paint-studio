@@ -66,6 +66,12 @@ func LoadRGBAFloat(path string) ([]float32, int, int, error) {
 // scaleParams scales a shape's raster parameters by ss for SSAA rendering. Position
 // and size scale; the rotation angle (slot 4 for ellipse/rectangle) does not.
 func scaleParams(kind model.ShapeKind, p [6]float32, ss float32) [6]float32 {
+	if model.IsMask(kind) {
+		// mask: [cx, cy, Hx, Hy, rotDeg, skew] — position + screen extents scale with SSAA; the
+		// rotation and skew are dimensionless and pass through unchanged (the default branch would
+		// zero slot 5 and kill the skew).
+		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4], p[5]}
+	}
 	switch kind {
 	case model.KindTriangle:
 		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4] * ss, p[5] * ss}

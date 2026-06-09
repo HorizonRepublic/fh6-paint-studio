@@ -54,6 +54,9 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 		if err := p.write(ptr+uintptr(prof.RotationOffset), f32b(cl.Rot)); err != nil {
 			return fmt.Errorf("calib slot %d rot: %w", cl.Slot, err)
 		}
+		if err := p.write(ptr+uintptr(prof.SkewOffset), f32b(cl.Skew)); err != nil {
+			return fmt.Errorf("calib slot %d skew: %w", cl.Slot, err)
+		}
 		if err := p.write(ptr+uintptr(prof.ColorOffset), cl.Color[:]); err != nil {
 			return fmt.Errorf("calib slot %d color: %w", cl.Slot, err)
 		}
@@ -67,8 +70,8 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 			}
 			wordNote = fmt.Sprintf("word 0x%04x→0x%04x (re-derives on save+reload)", cl.WantWord, cl.SetWord)
 		}
-		f.logf("calib slot %d ← pos(%.0f,%.0f) scale(%.2f,%.2f) rot%.0f col(%d,%d,%d,%d) [%s]",
-			cl.Slot, cl.Pos[0], cl.Pos[1], cl.Scale[0], cl.Scale[1], cl.Rot,
+		f.logf("calib slot %d ← pos(%.0f,%.0f) scale(%.2f,%.2f) rot%.0f skew%.0f col(%d,%d,%d,%d) [%s]",
+			cl.Slot, cl.Pos[0], cl.Pos[1], cl.Scale[0], cl.Scale[1], cl.Rot, cl.Skew,
 			cl.Color[0], cl.Color[1], cl.Color[2], cl.Color[3], wordNote)
 	}
 	f.logf("calib wrote %d slots (transform+colour only; shape-word & resource left untouched)", len(layers))

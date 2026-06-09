@@ -3,17 +3,22 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/imageio"
+	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 	presetpkg "fh6-paint-studio/internal/preset"
+	"fh6-paint-studio/internal/stylize"
+	_ "fh6-paint-studio/internal/stylize/presets" // register stylizer engines + presets
 )
 
 func main() {
@@ -85,6 +90,8 @@ func main() {
 	imgBlur := flag.Int("img-blur", 0, "with -img-vs: box-blur the compared (-img-vs) image by this radius before diffing — tests the anti-aliasing hypothesis (does softening our hard edges match an AA target?).")
 	linear := flag.Bool("linear", true, "composite in LINEAR light — the space the editor renders in (gamma ~2.2). DEFAULT-ON (matches the studio): the engine optimises the linear composite so the in-game result matches the target and semi-transparent shapes stop 'popping'; output colours are sRGB-encoded; opaque content is unaffected. Use -linear=false for an sRGB comparison. Measure with -fh6-score.")
 	fh6Score := flag.String("fh6-score", "", "comparison mode: render a geometry JSON the way the GAME composites it (LINEAR light) and report SSE vs -input (sRGB), then exit. Measures real in-game fidelity (the semi-transparent pop). Set -max-res to the JSON canvas size; -ss for AA; saves the in-game render to -preview.")
+	stylizeMode := flag.String("stylize", "", "STYLIZER mode: run a stylizer preset (auto|anime|poster|ink) instead of the geometrize engine, writing injectable geometry to -output (+ -preview). 'auto' analyses the image's style (line-art/cel/hatched/busy) and picks the line+fill+smooth knobs per content. Uses -max-res as the working resolution and -shapes as the budget.")
+	stylizeLibrary := flag.Bool("stylize-library", false, "with -stylize: also save the result as a Studio library entry (~/FH6PaintStudio/library) so it injects from the studio's Library tab via the normal word-only path — no GUI run needed.")
 	flag.Parse()
 
 	model.LinearLight = *linear
@@ -127,6 +134,13 @@ func main() {
 	// score it against the sRGB target — quantifies the semi-transparent "pop" and whether -linear fixes it.
 	if *fh6Score != "" {
 		scoreFH6(*fh6Score, *in, *maxRes, *ssaa, *preview)
+		return
+	}
+
+	// STYLIZER pipeline (the second engine): flat fills + dictionary-arc outlines written as injectable
+	// geometry. Bypasses the geometrize loading/backend entirely.
+	if *stylizeMode != "" {
+		runStylize(*stylizeMode, *in, *out, *preview, *maxRes, *shapes, *ssaa, *stylizeLibrary)
 		return
 	}
 
@@ -472,4 +486,64 @@ func main() {
 		applog.Printf("wrote WYSIWYG preview %s (ssaa=%d, linear-light composite)", *preview, *ssaa)
 	}
 	applog.Printf("wrote %s", *out)
+}
+
+// runStylize runs a stylizer preset and writes injectable geometry (+ optional preview) — the second
+// pipeline's CLI entry. Coordinates are at the working resolution (src.W×src.H), so inject at that
+// canvas size (printed below).
+func runStylize(preset, in, out, preview string, maxRes, budget, ss int, lib bool) {
+	src, err := stylize.Load(in, maxRes)
+	must(err)
+	geo, err := stylize.Run(src, preset, budget)
+	must(err)
+	must(ensureDir(out))
+	must(imageio.WriteGeometry(out, geo))
+	msg := fmt.Sprintf("stylize: preset=%s %dx%d %d shapes -> %s (inject at canvas %dx%d)",
+		preset, src.W, src.H, len(geo.Shapes)-1, out, src.W, src.H)
+	applog.Printf("%s", msg)
+	fmt.Println(msg)
+
+	var canvas []float32
+	if preview != "" || lib {
+		canvas = imageio.RenderFH6(geo.Shapes, false, src.W, src.H, ss)
+	}
+	if preview != "" {
+		must(ensureDir(preview))
+		must(imageio.SavePreview(preview, canvas, src.W, src.H))
+	}
+	if lib {
+		root, rerr := library.DefaultRoot()
+		must(rerr)
+		st := library.Open(root)
+		name := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
+		ent, serr := st.Save(geo.Shapes, floatToNRGBA(canvas, src.W, src.H), library.Entry{
+			Name: name, Source: in, Preset: preset, Width: src.W, Height: src.H,
+			Budget: budget, InjectScale: 1.0, Created: time.Now(),
+		})
+		must(serr)
+		m := fmt.Sprintf("library: saved %q -> %s (inject it from the studio Library tab)", ent.ID, st.Dir(ent.ID))
+		applog.Printf("%s", m)
+		fmt.Println(m)
+	}
+}
+
+// floatToNRGBA packs a sRGB float canvas (RenderFH6 output) into an *image.NRGBA for the library.
+func floatToNRGBA(buf []float32, w, h int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	cl := func(v float32) uint8 {
+		if v < 0 {
+			v = 0
+		}
+		if v > 1 {
+			v = 1
+		}
+		return uint8(v*255 + 0.5)
+	}
+	for i := 0; i < w*h; i++ {
+		img.Pix[i*4+0] = cl(buf[i*4+0])
+		img.Pix[i*4+1] = cl(buf[i*4+1])
+		img.Pix[i*4+2] = cl(buf[i*4+2])
+		img.Pix[i*4+3] = cl(buf[i*4+3])
+	}
+	return img
 }

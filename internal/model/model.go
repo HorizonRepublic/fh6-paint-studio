@@ -86,6 +86,13 @@ func F2B(v float32) int {
 // these Type ids to the editor's shape words.
 func (c Candidate) ToShape(score float64) Shape {
 	col := []int{EncByte(c.Color.R), EncByte(c.Color.G), EncByte(c.Color.B), F2B(c.Color.A)}
+	if IsMask(c.Kind) {
+		// Mask word: Type == the in-game shape word; Data is the full affine [cx,cy,Hx,Hy,rot,skew].
+		// rot is NOT rounded (mask placement keeps sub-degree fidelity) and skew is carried raw.
+		word, _ := MaskWord(c.Kind)
+		return Shape{Type: int(word), Color: col, Score: score,
+			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), float64(c.P[4]), float64(c.P[5])}}
+	}
 	switch c.Kind {
 	case KindRectangle:
 		return Shape{Type: TypeRotatedRectangle, Color: col, Score: score,
@@ -134,6 +141,11 @@ func KindFromType(t int) ShapeKind {
 	case TypeGradDisk:
 		return KindDisk
 	default:
+		if t >= 0 && t <= 0xFFFF {
+			if k, ok := MaskKind(uint16(t)); ok {
+				return k
+			}
+		}
 		return KindEllipse
 	}
 }
