@@ -1,0 +1,21 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// polish_dcinit.comp — dC[p] = 2*weight*(render-target) per channel, the backward
+// pass seed (dLoss/dC_final). Mirrors the head of engine.polishBackward.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 3) readonly buffer Rb { float render[]; };
+layout(std430, binding = 5)          buffer Db { float dC[]; };
+layout(std430, binding = 8) readonly buffer Tb { float target[]; };
+layout(std430, binding = 9) readonly buffer Wb { float weightb[]; };
+layout(push_constant) uniform PC {
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau;
+} pc;
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.npix) return;
+    float wt = weightb[idx];
+    int p = idx * 4;
+    for (int c = 0; c < 4; c++) dC[p + c] = 2.0 * wt * (render[p + c] - target[p + c]);
+}

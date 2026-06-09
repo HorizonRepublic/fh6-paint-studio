@@ -1,0 +1,171 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eval.comp — Vulkan port of shim.cu evalKernel (HARD path). One workgroup per
+// candidate; 128 threads stride the bbox pixels, accumulate 19 float32 sums in
+// shared memory, fixed-order tree-reduce (deterministic, no atomics), then thread 0
+// computes the optimal colour + ΔSSE in double — mirroring the CPU golden reference.
+// Accumulator layout (NACC=19): 0=W 1=n 2=nt 3..6=sT(rgba) 7..10=sC 11..14=sC2 15..18=sTC.
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly  buffer Cands  { float cands[]; };
+layout(std430, binding = 1) readonly  buffer Target { float target[]; };
+layout(std430, binding = 2) readonly  buffer Canvas { float canvasb[]; };
+layout(std430, binding = 3) readonly  buffer Weight { float weightb[]; };
+layout(std430, binding = 4) writeonly buffer Out    { float outb[]; };
+
+layout(push_constant) uniform PC { int n; int W; int H; int sampleBudget; } pc;
+
+const int   NACC     = 19;
+const float DEG2RAD  = 0.017453292519943295;
+const float REJECTED = 3.4028235e38; // FLT_MAX, matches shim.cu REJECTED
+
+shared float sh[128 * NACC];
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+double clamp01d(double v) { return v < 0.0LF ? 0.0LF : (v > 1.0LF ? 1.0LF : v); }
+
+// Per-pixel inside test in float32, mirroring shim.cu insideC. kind: 0=ellipse 1=rect 2=tri 3=line.
+bool insideShape(int kind, float P[6], int x, int y) {
+    float px = float(x) + 0.5;
+    float py = float(y) + 0.5;
+    if (kind == 2) {
+        float d1 = (px - P[4]) * (P[1] - P[5]) - (P[0] - P[4]) * (py - P[5]);
+        float d2 = (px - P[0]) * (P[3] - P[1]) - (P[2] - P[0]) * (py - P[1]);
+        float d3 = (px - P[2]) * (P[5] - P[3]) - (P[4] - P[2]) * (py - P[3]);
+        bool hasNeg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        bool hasPos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        return !(hasNeg && hasPos);
+    } else if (kind == 3) {
+        float x1 = P[0], y1 = P[1], x2 = P[2], y2 = P[3], hwid = max(0.5, P[4]);
+        float dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy, t = 0.0;
+        if (l2 > 0.0) { t = ((px - x1) * dx + (py - y1) * dy) / l2; t = clamp(t, 0.0, 1.0); }
+        float projX = x1 + t * dx, projY = y1 + t * dy;
+        float ddx = px - projX, ddy = py - projY;
+        return ddx * ddx + ddy * ddy <= hwid * hwid;
+    } else if (kind == 1) {
+        float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float dx = px - cx, dy = py - cy;
+        float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        return abs(xr) <= hw && abs(yr) <= hh;
+    } else {
+        float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float dx = px - cx, dy = py - cy;
+        float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        return xr * xr / (rx * rx) + yr * yr / (ry * ry) <= 1.0;
+    }
+}
+
+void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out int xMax, out int yMax) {
+    if (kind == 2) {
+        float minX = min(P[0], min(P[2], P[4])), maxX = max(P[0], max(P[2], P[4]));
+        float minY = min(P[1], min(P[3], P[5])), maxY = max(P[1], max(P[3], P[5]));
+        xMin = clampi(int(floor(minX)), 0, W - 1); xMax = clampi(int(ceil(maxX)), 0, W - 1);
+        yMin = clampi(int(floor(minY)), 0, H - 1); yMax = clampi(int(ceil(maxY)), 0, H - 1);
+    } else if (kind == 3) {
+        float x1 = P[0], y1 = P[1], x2 = P[2], y2 = P[3], hwid = max(0.5, P[4]);
+        xMin = clampi(int(floor(min(x1, x2) - hwid)), 0, W - 1); xMax = clampi(int(ceil(max(x1, x2) + hwid)), 0, W - 1);
+        yMin = clampi(int(floor(min(y1, y2) - hwid)), 0, H - 1); yMax = clampi(int(ceil(max(y1, y2) + hwid)), 0, H - 1);
+    } else if (kind == 1) {
+        float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float ex = abs(hw * c) + abs(hh * s), ey = abs(hw * s) + abs(hh * c);
+        xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
+        yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
+    } else {
+        float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float ex = sqrt(rx * rx * c * c + ry * ry * s * s), ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+        xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
+        yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
+    }
+}
+
+void main() {
+    uint gid = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+
+    int kind = 999;
+    float Ain = 0.0;
+    int step = 1;
+    float L[NACC];
+    for (int k = 0; k < NACC; k++) L[k] = 0.0;
+
+    if (gid < uint(pc.n)) {
+        uint base = gid * 11u;
+        kind = int(cands[base] + 0.5);
+        float P[6];
+        P[0] = cands[base + 1u]; P[1] = cands[base + 2u]; P[2] = cands[base + 3u];
+        P[3] = cands[base + 4u]; P[4] = cands[base + 5u]; P[5] = cands[base + 6u];
+        Ain = cands[base + 10u];
+
+        if (kind <= 3) {
+            int xMin, yMin, xMax, yMax;
+            bboxOf(kind, P, pc.W, pc.H, xMin, yMin, xMax, yMax);
+            int area = (xMax - xMin + 1) * (yMax - yMin + 1);
+            int budget = pc.sampleBudget < 1 ? 4000 : pc.sampleBudget;
+            if (area > budget) { step = int(sqrt(float(area) / float(budget))); if (step < 1) step = 1; }
+            int cols = (xMax - xMin) / step + 1;
+            int rows = (yMax - yMin) / step + 1;
+            int total = cols * rows;
+            for (int tt = int(lid); tt < total; tt += 128) {
+                int x = xMin + (tt % cols) * step;
+                int y = yMin + (tt / cols) * step;
+                if (!insideShape(kind, P, x, y)) continue;
+                int idx = y * pc.W + x, p = idx * 4;
+                float ta = target[p + 3];
+                if (ta < 0.5) { L[2] += 1.0; continue; }
+                float wgt = weightb[idx];
+                float tr = target[p], tg = target[p + 1], tb = target[p + 2];
+                float sr = canvasb[p], sg = canvasb[p + 1], sb = canvasb[p + 2], sa = canvasb[p + 3];
+                L[0] += wgt; L[1] += 1.0;
+                L[3] += wgt * tr; L[4] += wgt * tg; L[5] += wgt * tb; L[6] += wgt * ta;
+                L[7] += wgt * sr; L[8] += wgt * sg; L[9] += wgt * sb; L[10] += wgt * sa;
+                L[11] += wgt * sr * sr; L[12] += wgt * sg * sg; L[13] += wgt * sb * sb; L[14] += wgt * sa * sa;
+                L[15] += wgt * tr * sr; L[16] += wgt * tg * sg; L[17] += wgt * tb * sb; L[18] += wgt * ta * sa;
+            }
+        }
+    }
+
+    for (int k = 0; k < NACC; k++) sh[lid * uint(NACC) + uint(k)] = L[k];
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1) {
+        if (lid < s)
+            for (int k = 0; k < NACC; k++) sh[lid * uint(NACC) + uint(k)] += sh[(lid + s) * uint(NACC) + uint(k)];
+        barrier();
+    }
+    if (lid != 0u || gid >= uint(pc.n)) return;
+
+    uint ob = gid * 5u;
+    double a = double(Ain);
+    if (a < 1e-3LF) a = 1e-3LF;
+    if (a > 1.0LF) a = 1.0LF;
+    double W_ = double(sh[0]), nn = double(sh[1]), nt = double(sh[2]);
+    if (kind > 3 || nn < 1.0LF || W_ <= 0.0LF) { outb[ob] = REJECTED; return; }
+    if (nt > 0.0LF && nt > 1.5LF * nn) { outb[ob] = REJECTED; return; }
+    double sTR = double(sh[3]), sTG = double(sh[4]), sTB = double(sh[5]), sTA = double(sh[6]);
+    double sCR = double(sh[7]), sCG = double(sh[8]), sCB = double(sh[9]), sCA = double(sh[10]);
+    double sCR2 = double(sh[11]), sCG2 = double(sh[12]), sCB2 = double(sh[13]), sCA2 = double(sh[14]);
+    double sTCR = double(sh[15]), sTCG = double(sh[16]), sTCB = double(sh[17]), sTCA = double(sh[18]);
+    double invW = 1.0LF / W_, invA = 1.0LF - a;
+    double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / a);
+    double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / a);
+    double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / a);
+    double a2 = a * a, twoA = 2.0LF * a;
+    double dR = a2 * (W_ * oR * oR - 2.0LF * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
+    double dG = a2 * (W_ * oG * oG - 2.0LF * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
+    double dB = a2 * (W_ * oB * oB - 2.0LF * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
+    double dA = a2 * (W_ - 2.0LF * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
+    double totalDelta = dR + dG + dB + dA;
+    if (nt > 0.0LF) {
+        double spillFrac = nt / (nn + nt);
+        totalDelta += a2 * nt * (1.0LF + 2.0LF * spillFrac) * (oR * oR + oG * oG + oB * oB + 1.0LF);
+    }
+    outb[ob + 0u] = float(totalDelta * double(step * step));
+    outb[ob + 1u] = float(oR);
+    outb[ob + 2u] = float(oG);
+    outb[ob + 3u] = float(oB);
+    outb[ob + 4u] = Ain;
+}

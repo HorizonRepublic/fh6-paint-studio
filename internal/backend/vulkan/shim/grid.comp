@@ -1,0 +1,37 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// grid.comp — per-cell weighted-SSE error grid (importance-sampling map). One workgroup
+// per gw*gh cell; 64 threads stride the cell's pixels, reduce in double. Mirrors
+// cpu.ErrorGrid, moved on-device so the engine's per-shape re-seed no longer reads the
+// whole canvas back to the host each step.
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly  buffer Tb { float target[]; };
+layout(std430, binding = 1) readonly  buffer Cb { float canvasb[]; };
+layout(std430, binding = 2) readonly  buffer Wb { float weightb[]; };
+layout(std430, binding = 3) writeonly buffer Gb { float grid[]; };
+layout(push_constant) uniform PC { int W, H, gw, gh; } pc;
+
+shared double sh[64];
+
+void main() {
+    uint cell = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+    if (cell >= uint(pc.gw * pc.gh)) return;
+    int gx = int(cell) % pc.gw, gy = int(cell) / pc.gw;
+    int x0 = gx * pc.W / pc.gw, x1 = (gx + 1) * pc.W / pc.gw;
+    int y0 = gy * pc.H / pc.gh, y1 = (gy + 1) * pc.H / pc.gh;
+    int cw = x1 - x0, ch = y1 - y0, total = cw * ch;
+
+    double acc = 0.0LF;
+    for (int t = int(lid); t < total; t += 64) {
+        int x = x0 + t % cw, y = y0 + t / cw;
+        int idx = y * pc.W + x, p = idx * 4;
+        double wt = double(weightb[idx]);
+        for (int c = 0; c < 4; c++) { double d = double(target[p + c]) - double(canvasb[p + c]); acc += wt * d * d; }
+    }
+    sh[lid] = acc;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) { if (lid < s) sh[lid] += sh[lid + s]; barrier(); }
+    if (lid == 0u) grid[cell] = float(sh[0]);
+}

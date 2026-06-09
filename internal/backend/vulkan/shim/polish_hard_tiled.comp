@@ -1,0 +1,36 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+// polish_hard_tiled.comp — TILED HARD (binary inside) composite. One thread per PIXEL,
+// walks ALL shapes in order with a local running composite. Mirrors engine.polishHardLoss's
+// render; ONE dispatch, ZERO barriers. No below snapshot (hard loss is the shipped
+// deliverable render; backward never reads a hard below). Shares the tiled-forward DSL/set
+// — binding 4 (below) and 6 (boff) are bound but unused here.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Pb { double Pbuf[]; };
+layout(std430, binding = 1) readonly  buffer Cb { double Cbuf[]; };
+layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
+layout(std430, binding = 3) writeonly buffer Rb { float  render[]; };
+layout(std430, binding = 5) readonly  buffer Xb { int    bbx[]; };
+layout(std430, binding = 7) readonly  buffer Ab { float  base[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+#include "polish_common.glsl"
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.w * pc.h) return;
+    int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
+    float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
+    for (int si = 0; si < pc.n; si++) {
+        int bx0 = bbx[si * 4], by0 = bbx[si * 4 + 1], bx1 = bbx[si * 4 + 2], by1 = bbx[si * 4 + 3];
+        if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
+        int kind = Kbuf[si];
+        float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
+        if (!insideShape(kind, P, x, y)) continue;
+        float a = clamp(float(Cbuf[si * 4 + 3]), 0.0, 1.0), ia = 1.0 - a;
+        float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]);
+        ar = ar * ia + R * a; ag = ag * ia + G * a; ab = ab * ia + B * a; aa = aa * ia + a;
+    }
+    render[p] = ar; render[p + 1] = ag; render[p + 2] = ab; render[p + 3] = aa;
+}

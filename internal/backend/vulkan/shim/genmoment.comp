@@ -1,0 +1,88 @@
+#version 450
+// genmoment.comp — build the candidate pool from K moment seeds (port of shim.cu
+// genMomentKernel): candidate i belongs to seed i/perSeed; the first of each group is the
+// EXACT moment ellipse, the rest are kind-weighted candidates localised (centre jitter,
+// seed orientation/size/aspect) around the seed. Same wanghash RNG as gen.comp.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer Sc { float scand[]; };
+layout(std430, binding = 1) readonly  buffer Sd { float seeds[]; };
+layout(std430, binding = 2) readonly  buffer Kk { float kinds[]; };
+layout(std430, binding = 3) readonly  buffer Kc { float kindCDF[]; };
+layout(push_constant) uniform PC {
+    uint seedLo, seedHi; int n, perSeed, K, nKinds, allowAlpha, W, H; float alphaMin, canvasPad;
+} pc;
+
+uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float uf(uint i, inout uint ctr) {
+    uint a = pc.seedLo ^ 0x9e3779b9u, b = pc.seedHi;
+    ctr += 1u;
+    uint h = wanghash(a + wanghash(i + 0x85ebca6bu) + wanghash((b ^ ctr) * 0xc2b2ae35u));
+    return float(h >> 8) * (1.0 / 16777216.0);
+}
+float clampf2(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+void clampExtents(float cx, float cy, inout float a, inout float b, float thetaDeg, float W, float H, float pad) {
+    float th = thetaDeg * 0.017453292519943295, cs = cos(th), sn = sin(th);
+    float hx = length(vec2(a * cs, b * sn)), hy = length(vec2(a * sn, b * cs));
+    float allowX = max(1.0, min(cx, W - cx) + pad), allowY = max(1.0, min(cy, H - cy) + pad);
+    float scale = 1.0;
+    if (hx > allowX) scale = min(scale, allowX / hx);
+    if (hy > allowY) scale = min(scale, allowY / hy);
+    if (scale < 1.0) { a *= scale; b *= scale; }
+}
+
+void main() {
+    float padPx = pc.canvasPad * min(float(pc.W), float(pc.H));
+    int stride = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    for (int i = int(gl_GlobalInvocationID.x); i < pc.n; i += stride) {
+        uint ctr = 0u;
+        int b = i * 11;
+        int sIdx = i / pc.perSeed; if (sIdx >= pc.K) sIdx = pc.K - 1;
+        int sb = sIdx * 6;
+        float scx = seeds[sb], scy = seeds[sb + 1], srx = seeds[sb + 2], sry = seeds[sb + 3], sth = seeds[sb + 4], capR = seeds[sb + 5];
+        scand[b + 7] = 0.0; scand[b + 8] = 0.0; scand[b + 9] = 0.0;
+        if (i % pc.perSeed == 0) {
+            scand[b + 0] = 0.0; scand[b + 10] = 1.0;
+            float a = clampf2(srx, 2.0, capR), bb = clampf2(sry, 2.0, capR);
+            scand[b + 1] = scx; scand[b + 2] = scy; scand[b + 5] = sth; scand[b + 6] = 0.0;
+            if (pc.canvasPad > 0.0) clampExtents(scx, scy, a, bb, sth, float(pc.W), float(pc.H), padPx);
+            scand[b + 3] = a; scand[b + 4] = bb;
+            continue;
+        }
+        float major = max(srx, sry), minor = min(srx, sry);
+        float aspect = (minor > 0.5) ? clampf2(major / minor, 1.0, 8.0) : 1.0;
+        float localR = min(capR, max(4.0, major * 1.4));
+        float jit = localR * 0.5;
+        float jx = clampf2(scx + (uf(uint(i), ctr) * 2.0 - 1.0) * jit, 0.0, float(pc.W - 1));
+        float jy = clampf2(scy + (uf(uint(i), ctr) * 2.0 - 1.0) * jit, 0.0, float(pc.H - 1));
+        float theta = sth + (uf(uint(i), ctr) * 30.0 - 15.0);
+        float alpha = 1.0;
+        if (pc.allowAlpha != 0) alpha = pc.alphaMin + (1.0 - pc.alphaMin) * uf(uint(i), ctr);
+        scand[b + 10] = alpha;
+        int kind = int(kinds[pc.nKinds - 1] + 0.5);
+        { float ku = uf(uint(i), ctr) * kindCDF[pc.nKinds - 1];
+          for (int kk = 0; kk < pc.nKinds; kk++) if (ku < kindCDF[kk]) { kind = int(kinds[kk] + 0.5); break; } }
+        scand[b + 0] = float(kind);
+        if (kind == 1) {
+            float hw = 1.0 + uf(uint(i), ctr) * (localR - 1.0);
+            float u2 = uf(uint(i), ctr);
+            float hh = (aspect > 1.0) ? max(0.5, hw / (1.0 + u2 * (aspect - 1.0))) : 1.0 + u2 * (localR - 1.0);
+            scand[b + 1] = jx; scand[b + 2] = jy; scand[b + 3] = hw; scand[b + 4] = hh; scand[b + 5] = theta; scand[b + 6] = 0.0;
+            if (pc.canvasPad > 0.0) { float a = hw, bb = hh; clampExtents(jx, jy, a, bb, theta, float(pc.W), float(pc.H), padPx); scand[b + 3] = a; scand[b + 4] = bb; }
+        } else if (kind == 2) {
+            float rr = 4.0 + uf(uint(i), ctr) * (localR - 4.0);
+            scand[b + 1] = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            scand[b + 2] = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            scand[b + 3] = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            scand[b + 4] = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            scand[b + 5] = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            scand[b + 6] = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+        } else {
+            float rx = 2.0 + uf(uint(i), ctr) * (localR - 2.0);
+            float u2 = uf(uint(i), ctr);
+            float ry = (aspect > 1.0) ? max(1.0, rx / (1.0 + u2 * (aspect - 1.0))) : 2.0 + u2 * (localR - 2.0);
+            scand[b + 1] = jx; scand[b + 2] = jy; scand[b + 3] = rx; scand[b + 4] = ry; scand[b + 5] = theta; scand[b + 6] = 0.0;
+            if (pc.canvasPad > 0.0) { float a = rx, bb = ry; clampExtents(jx, jy, a, bb, theta, float(pc.W), float(pc.H), padPx); scand[b + 3] = a; scand[b + 4] = bb; }
+        }
+    }
+}

@@ -1,4 +1,4 @@
-//go:build !cuda
+//go:build !cuda && !vulkan && !allgpu
 
 package runner
 

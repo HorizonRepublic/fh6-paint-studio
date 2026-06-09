@@ -1228,89 +1228,13 @@ static double* d_ploss   = nullptr; // scalar loss accumulator
 // greedy is bit-identical, polish varies) — which drowned sub-2% quality A/Bs. We instead
 // stage each block's partial in its OWN slot (no atomic) and sum them in a FIXED order, so
 // polish is now bit-reproducible for a given seed.
-#define PMAXBLK 256                          // max blocks/shape in polishBackwardShape (matches the launch cap)
+#define PMAXBLK 256                          // gridDim.x for polishBackwardReduce (grid-stride covers the rest)
 static double* d_pgrad_partial = nullptr;    // per (shape,block) partial grad, N*PMAXBLK*10
 static double* d_ploss_partial = nullptr;    // per-block partial loss, up to 1024 blocks
+static float* d_pdcsnap = nullptr;           // tiled backward Pass A: dC-as-seen-by-shape, sized == d_pbelow
 static int  g_pN = 0;
 static long g_pbelowCap = 0;
 static int  g_polishSTE = 0; // straight-through: hard forward coverage, soft surrogate gradient
-
-// polishForwardShape composites ONE shape (si) over the current render, snapshotting
-// the color below first. 2D grid over the shape's expanded bbox; pixels independent
-// within a shape (z-order across shapes = launch order). The composite is float32 to
-// mirror polish.go (coverage()/render are float32 there; only the SDF is float64).
-__global__ void polishForwardShape(float* render, float* below, const double* pP,
-                                   const double* pcol, const int* pkind, const int* pbbx,
-                                   const long long* pboff, int si, int W, double tau, int ste) {
-    const int* bb = pbbx + si * 4;
-    int bw = bb[2] - bb[0] + 1;
-    int x = bb[0] + blockIdx.x * blockDim.x + threadIdx.x;
-    int y = bb[1] + blockIdx.y * blockDim.y + threadIdx.y;
-    if (x > bb[2] || y > bb[3]) return;
-    const double* P = pP + (long long)si * 6;
-    const double* col = pcol + (long long)si * 4;
-    int kind = pkind[si];
-    int p = (y * W + x) * 4;
-    long long li = ((long long)(y - bb[1]) * bw + (x - bb[0])) * 4;
-    long long bIdx = pboff[si] + li;
-    below[bIdx + 0] = render[p + 0];
-    below[bIdx + 1] = render[p + 1];
-    below[bIdx + 2] = render[p + 2];
-    below[bIdx + 3] = render[p + 3];
-    double cov;
-    if (polishOptGeo(kind)) {
-        double sdf = polishSDFGrad(kind, P, x + 0.5, y + 0.5, nullptr);
-        cov = ste ? (sdf <= 0.0 ? 1.0 : 0.0) : sigmoidCovD(sdf, tau); // STE: hard forward
-    } else {
-        float fp[6];
-        for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
-        // Gradient kinds: per-pixel falloff (geometry frozen — they are not optGeo). Hard kinds: binary.
-        cov = isGradKind(kind) ? (double)gradCovP(kind, fp, x, y) : (inside(kind, fp, x, y) ? 1.0 : 0.0);
-    }
-    float covf = (float)cov;
-    if (covf > 0.0f) {
-        float A = (float)col[3];
-        float a = A * covf, ia = 1.0f - a;
-        render[p + 0] = render[p + 0] * ia + (float)col[0] * a;
-        render[p + 1] = render[p + 1] * ia + (float)col[1] * a;
-        render[p + 2] = render[p + 2] * ia + (float)col[2] * a;
-        render[p + 3] = render[p + 3] * ia + a;
-    }
-}
-
-// polishHardForwardShape composites ONE shape (si) over render with HARD (binary)
-// coverage for ALL kinds and clamped straight-alpha "over" — the EXACT deliverable
-// render (mirrors polish.go polishHardLoss). No `below` snapshot (no backward needed).
-// Reuses the expanded bbox d_pbbx: hard inside() is false outside the native bbox, so
-// the extra tau-margin pixels contribute nothing -> identical to the CPU native-bbox loop.
-__global__ void polishHardForwardShape(float* render, const double* pP, const double* pcol,
-                                       const int* pkind, const int* pbbx, int si, int W) {
-    const int* bb = pbbx + si * 4;
-    int x = bb[0] + blockIdx.x * blockDim.x + threadIdx.x;
-    int y = bb[1] + blockIdx.y * blockDim.y + threadIdx.y;
-    if (x > bb[2] || y > bb[3]) return;
-    const double* P = pP + (long long)si * 6;
-    const double* col = pcol + (long long)si * 4;
-    int kind = pkind[si];
-    float fp[6];
-    for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
-    float a = (float)col[3];
-    a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a); // CPU clamps alpha to [0,1]
-    // Gradient kinds composite with their per-pixel falloff; hard kinds with binary coverage.
-    if (isGradKind(kind)) {
-        float cov = gradCovP(kind, fp, x, y);
-        if (cov <= 0.0f) return;
-        a *= cov;
-    } else if (!inside(kind, fp, x, y)) {
-        return;
-    }
-    int p = (y * W + x) * 4;
-    float ia = 1.0f - a;
-    render[p + 0] = render[p + 0] * ia + (float)col[0] * a;
-    render[p + 1] = render[p + 1] * ia + (float)col[1] * a;
-    render[p + 2] = render[p + 2] * ia + (float)col[2] * a;
-    render[p + 3] = render[p + 3] * ia + a;
-}
 
 // polishLossReduce sums the weighted 4-channel SSE of render vs the (eval-shared) target,
 // writing each block's partial to lpartial[blockIdx.x] (NO atomic). polishLossFinal then sums
@@ -1356,17 +1280,157 @@ __global__ void polishDCInit(const float* render, const float* target, const flo
         dC[p + c] = (float)(2.0 * wt * ((double)render[p + c] - (double)target[p + c]));
 }
 
-// polishBackwardShape: MULTIPLE blocks per shape (si) — global grid-stride over the shape's
-// bbox pixels (the single-block version was the polish bottleneck: 88% of wall, since large
-// early shapes ran on ONE block). Each block reduces its threads' 10-double gradient and writes
-// it to gpartial[(si*PMAXBLK + blockIdx.x)] (its OWN slot, NO atomic). polishGradReduceAll then
-// sums each shape's PMAXBLK partials in fixed block order -> pgrad[si] — DETERMINISTIC (the old
-// cross-block atomicAdd jittered the sum order and the Adam trajectory ~1.5%/run). The dC
-// writeback is per-pixel (each pixel handled by exactly one global thread) so it's race-free
-// across blocks; z-order across shapes is still the sequential reverse launch order on the stream.
-__global__ void polishBackwardShape(const float* below, float* dC, const double* pP,
-                                    const double* pcol, const int* pkind, const int* pbbx,
-                                    const long long* pboff, int si, int W, double tau, double* gpartial, int ste) {
+// polishGradReduceAll sums each shape's PMAXBLK partial gradients in FIXED block order into
+// pgrad[si] (one block per shape, 10 threads = one per gradient component). Unused block slots
+// are zeroed by the cudaMemset in fp_polish_backward, so the fixed-stride sum is exact.
+__global__ void polishGradReduceAll(const double* gpartial, double* pgrad) {
+    int si = blockIdx.x;
+    int i = threadIdx.x; // 0..9
+    if (i >= 10) return;
+    const double* base = gpartial + (long long)si * PMAXBLK * 10;
+    double s = 0.0;
+    for (int b = 0; b < PMAXBLK; b++) s += base[(long long)b * 10 + i];
+    pgrad[(long long)si * 10 + i] = s;
+}
+
+// ===== TILED polish: one thread per PIXEL walks ALL shapes in a register loop (forward/hard)
+// or reverse (backward dC), replacing the N sequential per-shape kernel launches with O(1)
+// launches. Mirrors the per-shape kernels above byte-for-byte (incl. gradient kinds). =====
+
+// polishForwardTiled — render = base then composite every shape in order (one dispatch).
+__global__ void polishForwardTiled(const float* base, float* render, float* below,
+                                   const double* pP, const double* pcol, const int* pkind,
+                                   const int* pbbx, const long long* pboff, int n, int W, int H,
+                                   double tau, int ste) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long long)W * H) return;
+    int x = (int)(idx % W), y = (int)(idx / W);
+    long long p = idx * 4;
+    float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
+        const double* P = pP + (long long)si * 6;
+        const double* col = pcol + (long long)si * 4;
+        int kind = pkind[si];
+        int bw = bb[2] - bb[0] + 1;
+        long long bIdx = pboff[si] + ((long long)(y - bb[1]) * bw + (x - bb[0])) * 4;
+        below[bIdx + 0] = ar; below[bIdx + 1] = ag; below[bIdx + 2] = ab; below[bIdx + 3] = aa;
+        double cov;
+        if (polishOptGeo(kind)) {
+            double sdf = polishSDFGrad(kind, P, x + 0.5, y + 0.5, nullptr);
+            cov = ste ? (sdf <= 0.0 ? 1.0 : 0.0) : sigmoidCovD(sdf, tau);
+        } else {
+            float fp[6]; for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
+            cov = isGradKind(kind) ? (double)gradCovP(kind, fp, x, y) : (inside(kind, fp, x, y) ? 1.0 : 0.0);
+        }
+        float covf = (float)cov;
+        if (covf > 0.0f) {
+            float A = (float)col[3];
+            float a = A * covf, ia = 1.0f - a;
+            ar = ar * ia + (float)col[0] * a;
+            ag = ag * ia + (float)col[1] * a;
+            ab = ab * ia + (float)col[2] * a;
+            aa = aa * ia + a;
+        }
+    }
+    render[p + 0] = ar; render[p + 1] = ag; render[p + 2] = ab; render[p + 3] = aa;
+}
+
+// polishHardTiled — HARD-coverage deliverable render (no below snapshot), one dispatch.
+__global__ void polishHardTiled(const float* base, float* render, const double* pP,
+                                const double* pcol, const int* pkind, const int* pbbx,
+                                int n, int W, int H) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long long)W * H) return;
+    int x = (int)(idx % W), y = (int)(idx / W);
+    long long p = idx * 4;
+    float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
+        const double* P = pP + (long long)si * 6;
+        const double* col = pcol + (long long)si * 4;
+        int kind = pkind[si];
+        float fp[6]; for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
+        float a = (float)col[3];
+        a = a < 0.0f ? 0.0f : (a > 1.0f ? 1.0f : a);
+        if (isGradKind(kind)) {
+            float cov = gradCovP(kind, fp, x, y);
+            if (cov <= 0.0f) continue;
+            a *= cov;
+        } else if (!inside(kind, fp, x, y)) {
+            continue;
+        }
+        float ia = 1.0f - a;
+        ar = ar * ia + (float)col[0] * a;
+        ag = ag * ia + (float)col[1] * a;
+        ab = ab * ia + (float)col[2] * a;
+        aa = aa * ia + a;
+    }
+    render[p + 0] = ar; render[p + 1] = ag; render[p + 2] = ab; render[p + 3] = aa;
+}
+
+// polishDCWalk — backward Pass A: one thread per PIXEL walks shapes in REVERSE, snapshotting
+// the upstream gradient dC AS SEEN BY each shape into dcsnap (below-layout) and propagating
+// dC *= 1-a in a register. The sequential top->bottom dC dependency becomes a per-pixel
+// register loop -> the N sequential per-shape launches collapse to ONE. covEff/geoActive are
+// computed identically to polishBackwardReduce (same coverage fns) so their snapshot/skip
+// conditions match exactly (else Pass B could read an unwritten dcsnap slot).
+__global__ void polishDCWalk(const float* dC, float* dcsnap, const double* pP, const double* pcol,
+                             const int* pkind, const int* pbbx, const long long* pboff, int n,
+                             int W, int H, double tau, int ste) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (long long)W * H) return;
+    int x = (int)(idx % W), y = (int)(idx / W);
+    long long p = idx * 4;
+    float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
+    for (int si = n - 1; si >= 0; si--) {
+        const int* bb = pbbx + si * 4;
+        if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
+        const double* P = pP + (long long)si * 6;
+        const double* col = pcol + (long long)si * 4;
+        int kind = pkind[si];
+        double covEff = 0.0; bool geoActive = false;
+        if (isGradKind(kind)) {
+            float fp[6]; for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
+            double gg[6];
+            double cov = gaussianCovGradD(kind, fp, x, y, gg); // same cov source as Pass B
+            covEff = cov;
+            if (kind == 4) geoActive = cov > 1e-9;
+        } else if (polishOptGeo(kind)) {
+            double sdf = polishSDFGrad(kind, P, x + 0.5, y + 0.5, nullptr);
+            double covS = sigmoidCovD(sdf, tau);
+            if (ste) { if (sdf <= 0.0) covEff = 1.0; geoActive = covS > 1e-12; }
+            else { covEff = covS; geoActive = covS > 0.0; }
+        } else {
+            float fp[6]; for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
+            covEff = inside(kind, fp, x, y) ? 1.0 : 0.0;
+        }
+        bool colorActive = covEff > 0.0;
+        if (!geoActive && !colorActive) continue;
+        int bw = bb[2] - bb[0] + 1;
+        long long bIdx = pboff[si] + ((long long)(y - bb[1]) * bw + (x - bb[0])) * 4;
+        dcsnap[bIdx + 0] = d0; dcsnap[bIdx + 1] = d1; dcsnap[bIdx + 2] = d2; dcsnap[bIdx + 3] = d3;
+        if (colorActive) {
+            double a = col[3] * covEff, ia = 1.0 - a;
+            d0 = (float)(d0 * ia); d1 = (float)(d1 * ia); d2 = (float)(d2 * ia); d3 = (float)(d3 * ia);
+        }
+    }
+}
+
+// polishBackwardReduce — backward Pass B: 2D grid (blockIdx.y=shape, blockIdx.x=block-in-shape,
+// gridDim.x=PMAXBLK). Each block grid-strides its shape's bbox reading dcsnap (NOT dC — Pass A
+// already propagated) and accumulates the 10-double gradient, writing its OWN gpartial slot.
+// All shapes run in ONE launch (no dC dependency between them now). The per-block pixel chunks
+// are IDENTICAL to the old adaptive per-shape launch (grid-stride with PMAXBLK extra-but-empty
+// blocks), so polishGradReduceAll sums the same partials -> bit-exact gradient.
+__global__ void polishBackwardReduce(const float* below, const float* dcsnap, const double* pP,
+                                     const double* pcol, const int* pkind, const int* pbbx,
+                                     const long long* pboff, int n, int W, double tau,
+                                     double* gpartial, int ste) {
+    int si = blockIdx.y;
+    if (si >= n) return;
     const int* bb = pbbx + si * 4;
     int xMin = bb[0], yMin = bb[1], xMax = bb[2], yMax = bb[3];
     int bw = xMax - xMin + 1, bh = yMax - yMin + 1;
@@ -1377,78 +1441,43 @@ __global__ void polishBackwardShape(const float* below, float* dC, const double*
     bool opt = polishOptGeo(kind);
     double R = col[0], G = col[1], B = col[2], A = col[3];
     long long off = pboff[si];
-    float fp[6];
-    for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
-
-    double L[10];
-    for (int i = 0; i < 10; i++) L[i] = 0.0; // gP0..5, gR,gG,gB,gA
+    float fp[6]; for (int i = 0; i < 6; i++) fp[i] = (float)P[i];
+    double L[10]; for (int i = 0; i < 10; i++) L[i] = 0.0;
     long long gtid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     long long gstride = (long long)gridDim.x * blockDim.x;
     for (long long tt = gtid; tt < total; tt += gstride) {
         int x = xMin + (int)(tt % bw);
         int y = yMin + (int)(tt / bw);
-        int p = (y * W + x) * 4;
         long long li = tt * 4;
-        // SPLIT GUARD (mirrors polish.go): geometry grad flows over the whole outer soft
-        // band (covS>0) even when the hard forward covered nothing there (covEff=0); the
-        // color/alpha/dC block runs only where the shape actually composited (covEff>0).
-        // Soft mode (g_polishSTE=0): covEff==covS so both collapse to the old single guard.
         double covEff = 0.0, covS = 0.0, dcovdsdf = 0.0, sdfg[6];
         bool geoActive = false;
         if (isGradKind(kind)) {
-            // Gaussian/disk: coverage IS the radial falloff (checked FIRST, mirrors polish.go). A
-            // TRAINABLE glow (kind 4) routes its analytic ∂cov/∂param through the geometry-grad block
-            // by carrying it in sdfg with dcovdsdf=1 (so L[0..4] += dcov·∂cov/∂param); disk (kind 5)
-            // has a flat core → frozen geometry, only the colour/alpha refit composites its falloff.
             double gg[6];
             double cov = gaussianCovGradD(kind, fp, x, y, gg);
             covEff = cov;
-            if (kind == 4) {
-                covS = cov;
-                for (int i = 0; i < 6; i++) sdfg[i] = gg[i];
-                dcovdsdf = 1.0;
-                geoActive = cov > 1e-9;
-            }
+            if (kind == 4) { covS = cov; for (int i = 0; i < 6; i++) sdfg[i] = gg[i]; dcovdsdf = 1.0; geoActive = cov > 1e-9; }
         } else if (opt) {
             double sdf = polishSDFGrad(kind, P, x + 0.5, y + 0.5, sdfg);
             covS = sigmoidCovD(sdf, tau);
-            dcovdsdf = -covS * (1.0 - covS) / tau; // soft surrogate (STE gradient)
-            if (ste) {
-                if (sdf <= 0.0) covEff = 1.0;
-                geoActive = covS > 1e-12;
-            } else {
-                covEff = covS;
-                geoActive = covS > 0.0;
-            }
+            dcovdsdf = -covS * (1.0 - covS) / tau;
+            if (ste) { if (sdf <= 0.0) covEff = 1.0; geoActive = covS > 1e-12; }
+            else { covEff = covS; geoActive = covS > 0.0; }
         } else {
             covEff = inside(kind, fp, x, y) ? 1.0 : 0.0;
         }
         bool colorActive = covEff > 0.0;
         if (!geoActive && !colorActive) continue;
-        double d0 = dC[p + 0], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
+        double d0 = dcsnap[off + li + 0], d1 = dcsnap[off + li + 1], d2 = dcsnap[off + li + 2], d3 = dcsnap[off + li + 3];
         double cb0 = below[off + li + 0], cb1 = below[off + li + 1], cb2 = below[off + li + 2], cb3 = below[off + li + 3];
         double da = d0 * (R - cb0) + d1 * (G - cb1) + d2 * (B - cb2) + d3 * (1.0 - cb3);
         if (colorActive) {
             double a = A * covEff;
-            L[6] += d0 * a; // gR
-            L[7] += d1 * a; // gG
-            L[8] += d2 * a; // gB
-            L[9] += da * covEff; // gA
-            double ia = 1.0 - a;
-            dC[p + 0] = (float)(d0 * ia);
-            dC[p + 1] = (float)(d1 * ia);
-            dC[p + 2] = (float)(d2 * ia);
-            dC[p + 3] = (float)(d3 * ia);
+            L[6] += d0 * a; L[7] += d1 * a; L[8] += d2 * a; L[9] += da * covEff;
         }
         if (geoActive) {
-            double dcov = da * A;
-            double dsdf = dcov * dcovdsdf;
-            L[0] += dsdf * sdfg[0];
-            L[1] += dsdf * sdfg[1];
-            L[2] += dsdf * sdfg[2];
-            L[3] += dsdf * sdfg[3];
-            L[4] += dsdf * sdfg[4];
-            L[5] += dsdf * sdfg[5];
+            double dsdf = (da * A) * dcovdsdf;
+            L[0] += dsdf * sdfg[0]; L[1] += dsdf * sdfg[1]; L[2] += dsdf * sdfg[2];
+            L[3] += dsdf * sdfg[3]; L[4] += dsdf * sdfg[4]; L[5] += dsdf * sdfg[5];
         }
     }
     __shared__ double sh[BLOCK * 10];
@@ -1463,19 +1492,6 @@ __global__ void polishBackwardShape(const float* below, float* dC, const double*
         long long base = ((long long)si * PMAXBLK + blockIdx.x) * 10;
         for (int i = 0; i < 10; i++) gpartial[base + i] = sh[i];
     }
-}
-
-// polishGradReduceAll sums each shape's PMAXBLK partial gradients in FIXED block order into
-// pgrad[si] (one block per shape, 10 threads = one per gradient component). Unused block slots
-// are zeroed by the cudaMemset in fp_polish_backward, so the fixed-stride sum is exact.
-__global__ void polishGradReduceAll(const double* gpartial, double* pgrad) {
-    int si = blockIdx.x;
-    int i = threadIdx.x; // 0..9
-    if (i >= 10) return;
-    const double* base = gpartial + (long long)si * PMAXBLK * 10;
-    double s = 0.0;
-    for (int b = 0; b < PMAXBLK; b++) s += base[(long long)b * 10 + i];
-    pgrad[(long long)si * 10 + i] = s;
 }
 
 // ---- extern C API ----
@@ -1762,22 +1778,20 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
     if (belowTotal > g_pbelowCap) {
         cudaFree(d_pbelow);
         cudaMalloc(&d_pbelow, (size_t)belowTotal * sizeof(float));
+        cudaFree(d_pdcsnap);
+        cudaMalloc(&d_pdcsnap, (size_t)belowTotal * sizeof(float)); // tiled backward Pass A snapshot
         g_pbelowCap = belowTotal;
     }
 }
 
+// fp_polish_forward — ONE tiled dispatch (thread-per-pixel walks all shapes). The kernel inits
+// render=base per pixel, so no base->render copy and no N per-shape launches.
 API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
+    (void)bbxHost; // bbx is on-device (d_pbbx)
     double tau = tauPtr[0];
-    size_t npix = (size_t)g_w * g_h;
-    cudaMemcpy(d_prender, d_pbase, npix * 4 * sizeof(float), cudaMemcpyDeviceToDevice);
-    dim3 blk(16, 16);
-    for (int si = 0; si < g_pN; si++) {
-        int x0 = bbxHost[si * 4 + 0], y0 = bbxHost[si * 4 + 1];
-        int x1 = bbxHost[si * 4 + 2], y1 = bbxHost[si * 4 + 3];
-        if (x1 < x0 || y1 < y0) continue;
-        dim3 grd((x1 - x0) / 16 + 1, (y1 - y0) / 16 + 1);
-        polishForwardShape<<<grd, blk>>>(d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, si, g_w, tau, g_polishSTE);
-    }
+    long long npix = (long long)g_w * g_h;
+    int blocks = (int)((npix + BLOCK - 1) / BLOCK);
+    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
 }
 
 API void fp_polish_loss(double* out) {
@@ -1795,16 +1809,10 @@ API void fp_polish_loss(double* out) {
 // params first so d_pP/d_pcol/d_pbbx match. Clobbers d_prender (the next forward rebuilds
 // it from d_pbase, and this is only called after backward, so the soft chain is unaffected).
 API void fp_polish_hard_loss(const int* bbxHost, double* out) {
-    size_t npix = (size_t)g_w * g_h;
-    cudaMemcpy(d_prender, d_pbase, npix * 4 * sizeof(float), cudaMemcpyDeviceToDevice);
-    dim3 blk(16, 16);
-    for (int si = 0; si < g_pN; si++) {
-        int x0 = bbxHost[si * 4 + 0], y0 = bbxHost[si * 4 + 1];
-        int x1 = bbxHost[si * 4 + 2], y1 = bbxHost[si * 4 + 3];
-        if (x1 < x0 || y1 < y0) continue;
-        dim3 grd((x1 - x0) / 16 + 1, (y1 - y0) / 16 + 1);
-        polishHardForwardShape<<<grd, blk>>>(d_prender, d_pP, d_pcol, d_pkind, d_pbbx, si, g_w);
-    }
+    (void)bbxHost; // bbx is on-device (d_pbbx)
+    long long npix = (long long)g_w * g_h;
+    int hblocks = (int)((npix + BLOCK - 1) / BLOCK);
+    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h);
     int npx = g_w * g_h;
     int blocks = (npx + BLOCK - 1) / BLOCK;
     if (blocks > 1024) blocks = 1024;
@@ -1813,24 +1821,23 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
+// fp_polish_backward — dcinit + Pass A (per-pixel reverse dC walk -> dcsnap) + Pass B (per-shape
+// gradient reduce, ALL shapes in one 2D launch) + the fixed-order grad reduce. The N sequential
+// per-shape backward launches (stream-ordered for the dC chain) collapse to ONE walk + ONE reduce.
 API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
+    (void)bbxHost; // bbx is on-device (d_pbbx)
     double tau = tauPtr[0];
     int npix = g_w * g_h;
-    // Zero the partial buffer: each shape's reduce sums ALL PMAXBLK slots, so unused block slots
-    // (shapes with < PMAXBLK blocks) must read 0. Then each block writes its OWN slot (no atomic).
+    // gradient partials default to 0 (empty (shape,block) slots write 0 themselves, but keep the
+    // memset defensive for degenerate shapes / the fixed-order sum).
     cudaMemset(d_pgrad_partial, 0, (size_t)g_pN * PMAXBLK * 10 * sizeof(double));
     polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC);
-    for (int si = g_pN - 1; si >= 0; si--) {
-        int x0 = bbxHost[si * 4 + 0], y0 = bbxHost[si * 4 + 1];
-        int x1 = bbxHost[si * 4 + 2], y1 = bbxHost[si * 4 + 3];
-        if (x1 < x0 || y1 < y0) continue;
-        long long total = (long long)(x1 - x0 + 1) * (y1 - y0 + 1);
-        int blocks = (int)((total + BLOCK - 1) / BLOCK);
-        if (blocks > PMAXBLK) blocks = PMAXBLK; // grid-stride covers the rest; bounds the partial buffer
-        if (blocks < 1) blocks = 1;
-        // sequential per-shape launches on the default stream keep the dC chain correct.
-        polishBackwardShape<<<blocks, BLOCK>>>(d_pbelow, d_pdC, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, si, g_w, tau, d_pgrad_partial, g_polishSTE);
-    }
+    // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
+    int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
+    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    // Pass B: 2D grid (x=block-in-shape up to PMAXBLK, y=shape) — all shapes' gradients at once.
+    dim3 grd(PMAXBLK, g_pN);
+    polishBackwardReduce<<<grd, BLOCK>>>(d_pbelow, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, tau, d_pgrad_partial, g_polishSTE);
     // Deterministic reduction: sum each shape's PMAXBLK partials in fixed block order -> pgrad.
     polishGradReduceAll<<<g_pN, 10>>>(d_pgrad_partial, d_pgrad);
 }
@@ -1851,10 +1858,10 @@ API void fp_polish_free() {
     cudaFree(d_pbase); cudaFree(d_prender); cudaFree(d_pdC); cudaFree(d_pbelow);
     cudaFree(d_pP); cudaFree(d_pcol); cudaFree(d_pkind); cudaFree(d_pbbx);
     cudaFree(d_pboff); cudaFree(d_pgrad); cudaFree(d_ploss);
-    cudaFree(d_pgrad_partial); cudaFree(d_ploss_partial);
+    cudaFree(d_pgrad_partial); cudaFree(d_ploss_partial); cudaFree(d_pdcsnap);
     d_pbase = d_prender = d_pdC = d_pbelow = nullptr;
     d_pP = d_pcol = d_pgrad = d_ploss = nullptr;
-    d_pgrad_partial = d_ploss_partial = nullptr;
+    d_pgrad_partial = d_ploss_partial = nullptr; d_pdcsnap = nullptr;
     d_pkind = nullptr; d_pbbx = nullptr; d_pboff = nullptr;
     g_pN = 0; g_pbelowCap = 0;
 }

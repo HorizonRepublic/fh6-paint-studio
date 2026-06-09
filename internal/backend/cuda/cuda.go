@@ -1,4 +1,4 @@
-//go:build cuda
+//go:build cuda || allgpu
 
 // Package cuda is the GPU backend: a second implementation of backend.Backend
 // that mirrors the CPU reference (internal/backend/cpu). It drives fh6cuda.dll
