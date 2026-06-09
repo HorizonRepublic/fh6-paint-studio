@@ -138,4 +138,3 @@ func TestListMissingRoot(t *testing.T) {
 		t.Fatalf("List on missing root = %v, %v (want nil,nil)", l, err)
 	}
 }
-

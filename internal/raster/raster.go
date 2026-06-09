@@ -6,7 +6,7 @@ import (
 	"fh6-paint-studio/internal/model"
 )
 
-const deg2rad = math.Pi / 180 // degrees -> radians conversion factor
+const deg2rad = math.Pi / 180
 
 func clampI(v, lo, hi int) int {
 	if v < lo {

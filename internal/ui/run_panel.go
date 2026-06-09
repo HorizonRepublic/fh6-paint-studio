@@ -17,8 +17,7 @@ import (
 func spacerW(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 0)} }
 
 // runPanel is the right column: the Activity card (state-driven progress with a phase stepper). The
-// log moved to the shared bottom console, so this column is a single, purposeful progress panel — not
-// the old progress-bar-plus-porridge stack.
+// log lives in the shared bottom console, so this column is a single progress panel.
 func (s *AppState) runPanel(gtx C) D {
 	th := s.Th
 	gtx.Constraints.Min = gtx.Constraints.Max // fill the column height
@@ -36,8 +35,7 @@ func (s *AppState) activityCard(gtx C) D {
 	)
 }
 
-// activityBody is the state machine the research calls for: distinct idle / running / success / error
-// states, each styled differently (NN/g: every progress flow needs those four states).
+// activityBody picks the distinct idle / running / success / error state, each styled differently.
 func (s *AppState) activityBody(gtx C) D {
 	switch s.Phase {
 	case PhaseError:

@@ -57,7 +57,6 @@ func FalloffDisk(t float64) float64 {
 	return 1 - (3*u*u - 2*u*u*u)         // 1 - smoothstep(u)
 }
 
-// IsGradient reports whether a kind uses a per-pixel falloff (vs a binary fill).
 // IsGradient reports whether a kind uses a per-pixel SOFT coverage (vs a binary fill): the radial
 // gradients (KindGlow/KindDisk) and the captured mask words. Every soft-coverage call site keys off
 // this (RenderFH6 isGrad, cpu evalGradient/applyGradient, polish coverage, engine opaqueShape). Mask

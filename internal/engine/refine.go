@@ -48,7 +48,6 @@ func shapeContributions(shapes []model.Shape, target, weight []float32, w, h int
 		}
 	}
 
-	// Precompute each shape's RGB color in 0..1.
 	cr := make([]float64, n)
 	cg := make([]float64, n)
 	cb := make([]float64, n)

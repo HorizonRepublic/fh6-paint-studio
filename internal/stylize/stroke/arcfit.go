@@ -120,7 +120,6 @@ func pickArc(cat []arcWord, sweep float64) (arcWord, bool) {
 	return cat[best], true
 }
 
-// runSweep is the magnitude of the total turning along the run i..j (the swept angle of its arc).
 // runSweep is the swept central angle of the run i..j about its fitted circle (the true arc angle).
 // Falls back to interior turning if the points are collinear.
 func runSweep(P [][2]float64, i, j int) float64 {

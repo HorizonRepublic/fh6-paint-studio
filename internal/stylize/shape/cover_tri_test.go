@@ -29,7 +29,7 @@ func TestEarClipSquare(t *testing.T) {
 }
 
 func TestEarClipConcave(t *testing.T) {
-	// L-shape (concave), area = 100 - 25 = ... actually a 10x10 with a 5x5 bite: area 75.
+	// L-shape (concave): a 10x10 with a 5x5 bite → area 75.
 	l := [][2]float64{{0, 0}, {10, 0}, {10, 5}, {5, 5}, {5, 10}, {0, 10}}
 	tris := earClip(l)
 	if len(tris) != len(l)-2 {

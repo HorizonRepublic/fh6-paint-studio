@@ -211,7 +211,6 @@ func (s *AppState) artistBlock(gtx C) D {
 				)
 			}),
 			layout.Rigid(GapV(6).Layout),
-			// Footnote: spell out the jargon — "ink/lines" is not obvious to a first-time user.
 			layout.Rigid(func(gtx C) D {
 				l := material.Label(th.M, 11, "“Ink” = clean black outline lines (the manga / line-art look) drawn on TOP of the colour fill. Slide left for more paint, right for a bolder outline.")
 				l.Color = th.TextDim

@@ -14,8 +14,6 @@ import (
 	"gioui.org/widget/material"
 )
 
-// ---- fills -----------------------------------------------------------------
-
 // fillRRect fills a rounded rect of size sz at the origin with col.
 func fillRRect(gtx C, col color.NRGBA, sz image.Point, radius int) {
 	rr := clip.UniformRRect(image.Rectangle{Max: sz}, radius)
@@ -29,8 +27,6 @@ func borderRRect(gtx C, border, inner color.NRGBA, sz image.Point, radius, width
 	in := clip.UniformRRect(image.Rect(width, width, sz.X-width, sz.Y-width), radius)
 	paint.FillShape(gtx.Ops, inner, in.Op(gtx.Ops))
 }
-
-// ---- card ------------------------------------------------------------------
 
 // Card draws a rounded, hairline-bordered surface panel wrapping w (with inner Pad).
 func (t *Theme) Card(gtx C, w layout.Widget) D {
@@ -55,8 +51,6 @@ func (t *Theme) CardBg(gtx C, bg color.NRGBA, pad unit.Dp, w layout.Widget) D {
 	)
 }
 
-// ---- text ------------------------------------------------------------------
-
 // Lbl is a colored label at a given size.
 func (t *Theme) Lbl(gtx C, size unit.Sp, txt string, col color.NRGBA) D {
 	l := material.Label(t.M, size, txt)
@@ -75,8 +69,6 @@ func (t *Theme) Title(gtx C, txt string) D {
 // Body is normal primary text; Dim is muted secondary text.
 func (t *Theme) Body(gtx C, txt string) D { return t.Lbl(gtx, 14, txt, t.Text) }
 func (t *Theme) Dim(gtx C, txt string) D  { return t.Lbl(gtx, 13, txt, t.TextDim) }
-
-// ---- buttons ---------------------------------------------------------------
 
 // PrimaryButton is the teal CTA; dimmed when !enabled.
 func (t *Theme) PrimaryButton(gtx C, btn *widget.Clickable, label string, enabled bool) D {
@@ -167,8 +159,6 @@ func (t *Theme) BusyPill(gtx C, label string) D {
 	)
 }
 
-// ---- progress --------------------------------------------------------------
-
 // Progress is a rounded progress bar filling frac (0..1) of the available width.
 func (t *Theme) Progress(gtx C, frac float64) D {
 	if frac < 0 {
@@ -220,15 +210,12 @@ func (t *Theme) ProgressIndeterminate(gtx C, phase float64) D {
 	return D{Size: image.Pt(w, h)}
 }
 
-// ---- sparkline -------------------------------------------------------------
-
 // Sparkline draws data as an accent polyline over a faint baseline, full available width.
 func (t *Theme) Sparkline(gtx C, data []float64, height unit.Dp) D {
 	w := gtx.Constraints.Max.X
 	h := gtx.Dp(height)
 	sz := image.Pt(w, h)
 
-	// faint baseline
 	base := clip.Rect(image.Rect(0, h-1, w, h))
 	paint.FillShape(gtx.Ops, t.Border, base.Op())
 
@@ -263,8 +250,6 @@ func (t *Theme) Sparkline(gtx C, data []float64, height unit.Dp) D {
 	}
 	return D{Size: sz}
 }
-
-// ---- misc ------------------------------------------------------------------
 
 // Divider is a 1px horizontal rule.
 func (t *Theme) Divider(gtx C) D {

@@ -871,7 +871,6 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 				}
 			}
 		}
-		// stash gradients in the shape's separate grad buffer for the Adam step.
 		s.grad = [10]float64{gP[0], gP[1], gP[2], gP[3], gP[4], gP[5], gR, gG, gB, gA}
 	}
 }
