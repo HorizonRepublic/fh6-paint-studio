@@ -1,4 +1,4 @@
-//go:build !cuda
+//go:build !cuda && !vulkan && !allgpu
 
 package runner
 
@@ -15,3 +15,6 @@ func newBackend(pixels, weight []float32, w, h, grid int) (backend.Backend, stri
 	}
 	return be, "CPU", nil
 }
+
+// AvailableBackends reports the backends offered by this (CPU-only) build.
+func AvailableBackends() []string { return []string{"CPU"} }

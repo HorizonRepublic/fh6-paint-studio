@@ -34,6 +34,7 @@ type Theme struct {
 	Accent    color.NRGBA // teal — CTA, progress, active
 	AccentDim color.NRGBA // disabled/!pressed accent
 	Good      color.NRGBA // success / error-going-down
+	Warn      color.NRGBA // warning (amber)
 	Bad       color.NRGBA // error / failure
 	OnAccent  color.NRGBA // text on an accent fill
 
@@ -62,6 +63,7 @@ func NewTheme() *Theme {
 		Accent:    rgb(0x2DD4BF),
 		AccentDim: rgb(0x1B8C81),
 		Good:      rgb(0x3DD68C),
+		Warn:      rgb(0xE0A53B),
 		Bad:       rgb(0xF06A6A),
 		OnAccent:  rgb(0x0B0E12),
 		Pad:       14,

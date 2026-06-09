@@ -1,0 +1,37 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// polish_loss.comp — weighted SSE of render vs target, reduced in double. Each of the
+// G workgroups strides its share of pixels (fixed-order, deterministic), writes one
+// partial; the host sums the G partials. Mirrors engine.polishLoss.
+
+layout(local_size_x = 128) in;
+layout(std430, binding = 3) readonly  buffer Rb { float render[]; };
+layout(std430, binding = 7) writeonly buffer Lb { double partials[]; };
+layout(std430, binding = 8) readonly  buffer Tb { float target[]; };
+layout(std430, binding = 9) readonly  buffer Wb { float weightb[]; };
+layout(push_constant) uniform PC {
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau;
+} pc;
+
+shared double sh[128];
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    int stride = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    double acc = 0.0LF;
+    for (int idx = int(gl_GlobalInvocationID.x); idx < pc.npix; idx += stride) {
+        double wt = double(weightb[idx]);
+        int p = idx * 4;
+        for (int c = 0; c < 4; c++) {
+            double d = double(render[p + c]) - double(target[p + c]);
+            acc += wt * d * d;
+        }
+    }
+    sh[lid] = acc;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1) {
+        if (lid < s) sh[lid] += sh[lid + s];
+        barrier();
+    }
+    if (lid == 0u) partials[gl_WorkGroupID.x] = sh[0];
+}

@@ -1,0 +1,52 @@
+#version 450
+// prepadj.comp — selection-adjusted score: penalise very large shapes when -compact is on
+// (cleaner coarse stage). Mirrors shim.cu prepAdj. adj[] feeds the argmin.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer So { float sout[]; };
+layout(std430, binding = 1) readonly  buffer Sc { float scand[]; };
+layout(std430, binding = 2) writeonly buffer Ad { float adj[]; };
+layout(push_constant) uniform PC { int n, compact, shapeCount, W, H; } pc;
+
+const float DEG2RAD = 0.017453292519943295;
+const float REJECTED = 3.4028235e38;
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void bboxSpan(int kind, float P[6], int W, int H, out int dw, out int dh) {
+    int xMin, yMin, xMax, yMax;
+    if (kind == 2) {
+        xMin = clampi(int(floor(min(P[0], min(P[2], P[4])))), 0, W - 1);
+        xMax = clampi(int(ceil(max(P[0], max(P[2], P[4])))), 0, W - 1);
+        yMin = clampi(int(floor(min(P[1], min(P[3], P[5])))), 0, H - 1);
+        yMax = clampi(int(ceil(max(P[1], max(P[3], P[5])))), 0, H - 1);
+    } else {
+        float cx = P[0], cy = P[1], ex, ey;
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        if (kind == 1) {
+            float hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+            ex = abs(hw * c) + abs(hh * s); ey = abs(hw * s) + abs(hh * c);
+        } else {
+            float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+            ex = sqrt(rx * rx * c * c + ry * ry * s * s); ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+        }
+        xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
+        yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
+    }
+    dw = xMax - xMin; dh = yMax - yMin;
+}
+
+void main() {
+    int stride = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    for (int i = int(gl_GlobalInvocationID.x); i < pc.n; i += stride) {
+        float sc = sout[i * 5];
+        if (pc.compact != 0 && sc < REJECTED) {
+            int b = i * 11;
+            int kind = int(scand[b] + 0.5);
+            float P[6] = float[6](scand[b + 1], scand[b + 2], scand[b + 3], scand[b + 4], scand[b + 5], scand[b + 6]);
+            int dw, dh; bboxSpan(kind, P, pc.W, pc.H, dw, dh);
+            float hs = float(max(dw, dh)) * 0.5;
+            if (hs >= 96.0) sc += (pc.shapeCount < 8) ? hs * hs * 0.1 : hs * 0.05;
+        }
+        adj[i] = sc;
+    }
+}

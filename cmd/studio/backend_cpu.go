@@ -1,5 +1,5 @@
-//go:build !cuda
+//go:build !cuda && !vulkan && !allgpu
 
 package main
 
-const backendName = "CPU"
+func backendOptions() []string { return []string{"CPU"} }

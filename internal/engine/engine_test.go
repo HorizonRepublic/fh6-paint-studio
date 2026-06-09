@@ -21,7 +21,7 @@ func bgFromTarget(target []float32, w, h int) model.RGBA {
 // stopIndex feeds an error sequence to a fresh detector and returns the 1-based shape
 // count at which it fires (or -1 if it never fires).
 func stopIndex(tol float64, errs []float64) int {
-	k := newKneeDetector(tol)
+	k := newKneeDetector(tol, 0, 0) // floor off → legacy pure-relative behaviour
 	for i, e := range errs {
 		if k.push(e) {
 			return i + 1

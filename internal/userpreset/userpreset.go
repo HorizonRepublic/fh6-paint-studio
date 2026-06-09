@@ -47,6 +47,36 @@ func DefaultRoot() (string, error) {
 
 func (s *Store) path(id string) string { return filepath.Join(s.Root, id+".json") }
 
+// validID reports whether id is a safe single-segment name (no separators/traversal/absolute path),
+// so s.path(id) resolves strictly inside Root.
+func validID(id string) bool {
+	return id != "" && id != "." && id != ".." &&
+		!filepath.IsAbs(id) && id == filepath.Base(id) && !strings.ContainsAny(id, `/\`)
+}
+
+// atomicWrite writes b to a temp file beside path then renames it over path (no torn file on crash).
+func atomicWrite(path string, b []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(b)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(name)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
+
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 func slug(name string) string {
@@ -78,11 +108,14 @@ func (s *Store) Save(p Preset) (Preset, error) {
 		}
 		p.ID = id
 	}
+	if !validID(p.ID) {
+		return Preset{}, fmt.Errorf("userpreset: invalid id %q", p.ID)
+	}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return Preset{}, err
 	}
-	return p, os.WriteFile(s.path(p.ID), b, 0o644)
+	return p, atomicWrite(s.path(p.ID), b)
 }
 
 // List scans Root and returns presets newest-first. Unparsable files are skipped; a missing Root
@@ -117,7 +150,7 @@ func (s *Store) List() ([]Preset, error) {
 
 // Delete removes a preset file. The id must be a bare name (no path separators).
 func (s *Store) Delete(id string) error {
-	if id == "" || strings.ContainsAny(id, `/\`) {
+	if !validID(id) {
 		return fmt.Errorf("userpreset: invalid id %q", id)
 	}
 	return os.Remove(s.path(id))

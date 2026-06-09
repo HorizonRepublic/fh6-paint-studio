@@ -6,6 +6,7 @@ import (
 	"image/png"
 	"math"
 	"os"
+	"path/filepath"
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -16,7 +17,27 @@ func WriteGeometry(path string, g model.Geometry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// Atomic: temp file + rename, so a crash / full disk leaves either the old geometry or the
+	// complete new one — never a torn JSON that fails to parse on reload.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".geom-*")
+	if err != nil {
+		return os.WriteFile(path, b, 0o644) // dir not writable for a temp -> best-effort direct write
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(b)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(name)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // ReadGeometry loads an importer-compatible geometry JSON ({"shapes":[...]}). Used
@@ -66,6 +87,12 @@ func LoadRGBAFloat(path string) ([]float32, int, int, error) {
 // scaleParams scales a shape's raster parameters by ss for SSAA rendering. Position
 // and size scale; the rotation angle (slot 4 for ellipse/rectangle) does not.
 func scaleParams(kind model.ShapeKind, p [6]float32, ss float32) [6]float32 {
+	if model.IsMask(kind) {
+		// mask: [cx, cy, Hx, Hy, rotDeg, skew] — position + screen extents scale with SSAA; the
+		// rotation and skew are dimensionless and pass through unchanged (the default branch would
+		// zero slot 5 and kill the skew).
+		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4], p[5]}
+	}
 	switch kind {
 	case model.KindTriangle:
 		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4] * ss, p[5] * ss}
@@ -154,7 +181,15 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 					}
 				}
 				o := (oy*w + ox) * 4
-				lin[o+0], lin[o+1], lin[o+2], lin[o+3] = r*inv, g*inv, b*inv, a*inv
+				// The composite buffer holds PREMULTIPLIED colour over a transparent background
+				// (canvas = canvas*ia + cr*aEff, bg starts 0). Un-premultiply on downsample —
+				// divide the summed colour by the summed alpha — so antialiased edge pixels keep
+				// full-saturation colour at fractional alpha instead of darkening. Reduces to a plain
+				// box-average over an opaque bg (alpha is 1 everywhere there).
+				if a > 0 {
+					lin[o+0], lin[o+1], lin[o+2] = r/a, g/a, b/a
+				}
+				lin[o+3] = a * inv
 			}
 		}
 	}

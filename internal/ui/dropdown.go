@@ -30,8 +30,13 @@ func NewDropdown(options []string, sel int) *Dropdown {
 	return &Dropdown{options: options, sel: sel, builtin: len(options), items: make([]widget.Clickable, len(options))}
 }
 
-// Value returns the currently selected option string.
-func (d *Dropdown) Value() string { return d.options[d.sel] }
+// Value returns the currently selected option string ("" if there are no options).
+func (d *Dropdown) Value() string {
+	if d.sel < 0 || d.sel >= len(d.options) {
+		return ""
+	}
+	return d.options[d.sel]
+}
 
 // Set selects the option matching value (a no-op if it is not an option). It does NOT raise the
 // changed flag — it is for programmatic restore (e.g. the persisted preference), not a user action.
@@ -90,7 +95,7 @@ func (d *Dropdown) Layout(gtx C, th *Theme) D {
 		}
 	}
 
-	dims := ddBox(gtx, th, &d.btn, d.options[d.sel])
+	dims := ddBox(gtx, th, &d.btn, d.Value())
 	if d.open {
 		macro := op.Record(gtx.Ops)
 		off := op.Offset(image.Pt(0, dims.Size.Y+4)).Push(gtx.Ops)

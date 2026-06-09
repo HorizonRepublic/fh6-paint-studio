@@ -1,0 +1,52 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+// polish_dcwalk_tiled.comp — TILED backward Pass A: one thread per PIXEL walks ALL shapes in
+// REVERSE order, snapshotting the upstream gradient dC AS SEEN BY each shape (into dcsnap,
+// below-style layout) and propagating dC down (dC *= 1-a) through the composite. The
+// sequential top->bottom dC dependency becomes a per-pixel register loop -> ZERO barriers.
+// dC starts from the dcinit buffer (2*weight*(render-target)). The per-shape gradient
+// REDUCTION over these snapshots is the separate, barrier-free Pass B (polish_backward_reduce).
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Pb { double Pbuf[]; };
+layout(std430, binding = 1) readonly  buffer Cb { double Cbuf[]; };
+layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
+layout(std430, binding = 3) readonly  buffer Db { float  dC[]; };      // dcinit seed (read-only)
+layout(std430, binding = 5) writeonly buffer Sb { float  dcsnap[]; };
+layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
+layout(std430, binding = 8) readonly  buffer Ob { int    boff[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+#include "polish_common.glsl"
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.w * pc.h) return;
+    int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
+    float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
+    for (int si = pc.n - 1; si >= 0; si--) {
+        int bx0 = bbx[si * 4], by0 = bbx[si * 4 + 1], bx1 = bbx[si * 4 + 2], by1 = bbx[si * 4 + 3];
+        if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
+        int kind = Kbuf[si];
+        float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
+        float covEff = 0.0; bool geoActive = false;
+        if (optGeoKind(kind)) {
+            float g[6];
+            float sdf = sdfGradKind(kind, P, float(x) + 0.5, float(y) + 0.5, g);
+            float covS = sigmoidCov(sdf, pc.tau);
+            if (pc.ste != 0) { covEff = (sdf <= 0.0) ? 1.0 : 0.0; geoActive = covS > 1e-12; }
+            else            { covEff = covS;                      geoActive = covS > 0.0; }
+        } else if (insideShape(kind, P, x, y)) {
+            covEff = 1.0;
+        }
+        bool colorActive = covEff > 0.0;
+        if (!geoActive && !colorActive) continue; // matches the reference's skip: no snapshot, no propagate
+        int bw = bx1 - bx0 + 1;
+        int bi = boff[si] + ((y - by0) * bw + (x - bx0)) * 4;
+        dcsnap[bi + 0] = d0; dcsnap[bi + 1] = d1; dcsnap[bi + 2] = d2; dcsnap[bi + 3] = d3;
+        if (colorActive) {
+            float a = float(Cbuf[si * 4 + 3]) * covEff, ia = 1.0 - a;
+            d0 *= ia; d1 *= ia; d2 *= ia; d3 *= ia;
+        }
+    }
+}

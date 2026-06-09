@@ -1,0 +1,43 @@
+#version 450
+// argmin.comp — single-workgroup argmin over adj[], then gather the winner's geometry +
+// eval'd colour/RAW-score into best[12] = [score,kind,p0..p5,oR,oG,oB,alpha]. Mirrors
+// shim.cu argminPass + gatherBest fused. Ties resolve to the lowest index.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Ad { float adj[]; };
+layout(std430, binding = 1) readonly  buffer Sc { float scand[]; };
+layout(std430, binding = 2) readonly  buffer So { float sout[]; };
+layout(std430, binding = 3) writeonly buffer Bt { float best[]; };
+layout(push_constant) uniform PC { int n; } pc;
+
+const float REJECTED = 3.4028235e38;
+shared float sv[256];
+shared int si[256];
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    float bv = REJECTED; int bi = -1;
+    for (int i = int(t); i < pc.n; i += 256) {
+        float v = adj[i];
+        if (v < bv || (v == bv && i < bi)) { bv = v; bi = i; }
+    }
+    sv[t] = bv; si[t] = bi;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (t < s) {
+            float ov = sv[t + s]; int oi = si[t + s];
+            if (ov < sv[t] || (ov == sv[t] && oi >= 0 && (si[t] < 0 || oi < si[t]))) { sv[t] = ov; si[t] = oi; }
+        }
+        barrier();
+    }
+    if (t != 0u) return;
+    int b = si[0];
+    if (b < 0) { best[0] = REJECTED; for (int k = 1; k < 12; k++) best[k] = 0.0; return; }
+    int cc = b * 11, o = b * 5;
+    best[0] = sout[o + 0];
+    best[1] = scand[cc + 0];
+    best[2] = scand[cc + 1]; best[3] = scand[cc + 2]; best[4] = scand[cc + 3];
+    best[5] = scand[cc + 4]; best[6] = scand[cc + 5]; best[7] = scand[cc + 6];
+    best[8] = sout[o + 1]; best[9] = sout[o + 2]; best[10] = sout[o + 3];
+    best[11] = sout[o + 4];
+}

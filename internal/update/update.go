@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,7 +66,9 @@ func (c *Checker) Latest(ctx context.Context) (rel Release, ok bool, err error) 
 	}
 
 	var g ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+	// Cap the body: the Client timeout bounds wall time, not memory, so a hostile/buggy endpoint
+	// can't stream an unbounded response into the decoder. A release JSON is a few KB.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&g); err != nil {
 		return Release{}, false, err
 	}
 	core, _ := splitCore(g.TagName)

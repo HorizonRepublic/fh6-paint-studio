@@ -6,9 +6,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 
 	"fh6-paint-studio/internal/model"
 )
+
+// writeSafeProcess reports whether a matched process is the game the FH6 layer offsets were
+// calibrated against. The reverse-engineered field/table offsets must NEVER be applied as WRITES
+// to Forza Horizon 5 (a different struct layout); FH5 stays in the process list for read-only
+// diagnostics only.
+func writeSafeProcess(name string) bool {
+	return strings.Contains(strings.ToLower(name), "horizon6")
+}
 
 // run performs the live injection: find the process, locate the layer table, write each
 // supported shape into a consecutive template slot (compacting over skipped lines), then blank
@@ -19,6 +28,9 @@ func (f *FH6) run(shapes []model.Shape, cm CanvasMap) error {
 		return err
 	}
 	f.logf("found %s (pid %d)", name, pid)
+	if !writeSafeProcess(name) {
+		return fmt.Errorf("refusing to inject into %q — these layer offsets are reverse-engineered for Forza Horizon 6 only; FH5 has a different struct layout (read-only diagnostics are still allowed)", name)
+	}
 
 	p, err := openProc(pid, true)
 	if err != nil {
@@ -44,8 +56,12 @@ func (f *FH6) run(shapes []model.Shape, cm CanvasMap) error {
 			break
 		}
 		ptr, ok := p.readU64(table + uintptr(written)*8)
-		if !ok || !isUserPointer(ptr) {
-			return fmt.Errorf("layer slot %d resolved to a null/invalid pointer (stale table — re-open the group and auto-locate)", written+1)
+		// Re-assert private+writable per slot immediately before writing (not just a range check):
+		// the editor heap can move/free a layer between locate-time validation and this write (add/
+		// delete/undo/close-group), so a stale slot that still passes the range check must NOT be
+		// written. Abort the whole inject — a partial write is worse than none.
+		if !ok || !p.isPrivateWritable(ptr) {
+			return fmt.Errorf("layer slot %d resolved to a null/invalid/non-writable pointer (stale table — re-open the group and auto-locate)", written+1)
 		}
 		for _, fw := range lw.Writes(f.Profile) {
 			if err := p.write(ptr+uintptr(fw.Offset), fw.Data); err != nil {

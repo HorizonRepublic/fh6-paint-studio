@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -103,7 +104,9 @@ func (p *proc) read(addr uintptr, n int) ([]byte, error) {
 		return nil, err
 	}
 	if int(nread) != n {
-		return buf[:nread], fmt.Errorf("short read at 0x%x: %d/%d", addr, nread, n)
+		// Return nil (not the partial buffer) so a caller that ignores the error can't index a
+		// short read; every reader here checks err, but nil is the safe contract.
+		return nil, fmt.Errorf("short read at 0x%x: %d/%d", addr, nread, n)
 	}
 	return buf, nil
 }
@@ -152,6 +155,7 @@ func (p *proc) readFloatPair(addr uintptr) ([2]float32, bool) {
 func (p *proc) query(addr uintptr) (memBasicInfo, bool) {
 	var mbi memBasicInfo
 	ret, _, _ := procVirtualQueryEx.Call(uintptr(p.h), addr, uintptr(unsafe.Pointer(&mbi)), unsafe.Sizeof(mbi))
+	runtime.KeepAlive(&mbi) // &mbi is passed as a uintptr through .Call; keep it live across the syscall
 	return mbi, ret != 0
 }
 

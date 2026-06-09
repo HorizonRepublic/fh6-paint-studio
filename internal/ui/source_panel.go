@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"image"
 	"path/filepath"
 
@@ -8,6 +9,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/preset"
 )
 
 // sourcePanel is the left column: a scrollable Source + Settings stack with the primary
@@ -71,7 +74,38 @@ func (s *AppState) sourceCard(gtx C) D {
 			}
 			return th.Dim(gtx, name)
 		}),
+		layout.Rigid(s.recentList),
 	)
+}
+
+// recentList shows the recently-opened images as clickable filenames (click to reopen). The clicks are
+// handled in the main loop (RecentBtns parallel to Recent). Hidden when empty.
+func (s *AppState) recentList(gtx C) D {
+	th := s.Th
+	if len(s.Recent) == 0 {
+		return D{}
+	}
+	children := []layout.FlexChild{
+		layout.Rigid(GapV(10).Layout),
+		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, "RECENT", th.TextDim) }),
+		layout.Rigid(GapV(4).Layout),
+	}
+	for i := range s.Recent {
+		if i >= len(s.RecentBtns) || i >= 6 {
+			break
+		}
+		i := i
+		name := filepath.Base(s.Recent[i])
+		children = append(children, layout.Rigid(func(gtx C) D {
+			return material.Clickable(gtx, &s.RecentBtns[i], func(gtx C) D {
+				return layout.Inset{Top: 2, Bottom: 2}.Layout(gtx, func(gtx C) D {
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return th.Lbl(gtx, 13, name, th.Text)
+				})
+			})
+		}))
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 // thumbnail draws the loaded source fit inside a rounded surface box, or a placeholder.
@@ -92,33 +126,116 @@ func (s *AppState) thumbnail(gtx C) D {
 }
 
 func (s *AppState) settingsCard(gtx C) D {
-	th := s.Th
 	s.syncSettings()
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return th.Title(gtx, "Settings") }),
-		layout.Rigid(GapV(12).Layout),
+		// Step 1 — pick the content style (the only required choice).
+		layout.Rigid(func(gtx C) D { return s.stepHeader(gtx, "1", "What are you making?") }),
+		layout.Rigid(GapV(10).Layout),
+		layout.Rigid(s.presetCardsSection),
+		layout.Rigid(GapV(16).Layout),
+		// Step 2 — the two creative dials (detail amount + line/fill for hybrids).
+		layout.Rigid(func(gtx C) D { return s.stepHeader(gtx, "2", "Adjust") }),
+		layout.Rigid(GapV(10).Layout),
 		layout.Rigid(s.budgetRow),
 		layout.Rigid(GapV(10).Layout),
 		layout.Rigid(func(gtx C) D {
-			return s.fieldHint(gtx, "Preset", &s.ModeHint, "The content preset (pick to match your image): ANIME/illustration, PHOTO/realistic, or FLAT/logo/poster. Each one is benchmark-tuned — it sets the shape mix, transparency, edge sharpening and polish that suit that content. Transparency is detected automatically.", func(gtx C) D { return s.Mode.Layout(gtx, th) })
+			return s.toggleRow(gtx, &s.Mono, "Single colour (logo / decal)", &s.MonoHint,
+				"For a FLAT single-colour brand logo or decal. Forces every shape to ONE solid colour (auto-detected from the logo) on a clean cutout, so there are no grey antialiased-edge shapes and no background box — just the crisp single-colour silhouette. Pairs with a low shape budget. Leave OFF for normal multi-colour images.")
 		}),
-		layout.Rigid(GapV(12).Layout),
+		layout.Rigid(func(gtx C) D {
+			if !preset.IsHybridMode(s.baseMode) { // the Artist line/fill dial only applies to the hybrids
+				return D{}
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(GapV(12).Layout),
+				layout.Rigid(s.artistBlock),
+			)
+		}),
+		layout.Rigid(GapV(16).Layout),
+		// Everything technical, behind one disclosure.
 		layout.Rigid(s.advancedSection),
 	)
 }
 
+// stepHeader is a numbered section heading (accent chip + title) — the visual 1·2 spine that walks a
+// first-time user down the panel.
+func (s *AppState) stepHeader(gtx C, num, title string) D {
+	th := s.Th
+	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx C) D {
+			return layout.Background{}.Layout(gtx,
+				func(gtx C) D { fillRRect(gtx, th.Accent, gtx.Constraints.Min, 5); return D{Size: gtx.Constraints.Min} },
+				func(gtx C) D {
+					return layout.Inset{Top: 1, Bottom: 1, Left: 6, Right: 6}.Layout(gtx, func(gtx C) D {
+						return th.Lbl(gtx, 13, num, th.OnAccent)
+					})
+				},
+			)
+		}),
+		layout.Rigid(GapH(8).Layout),
+		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 15, title, th.Text) }),
+	)
+}
+
+// artistBlock is the semi-expert "Artist" tier shown for the hybrid presets: ONE friendly knob for the
+// line/fill balance (the single artistic decision), set apart from the technical Expert panel. The total
+// shape budget above is split into FDoG ink lines + geometrize fill by this ratio.
+func (s *AppState) artistBlock(gtx C) D {
+	th := s.Th
+	pct := int(s.InkRatioValue()*100 + 0.5)
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	return th.CardBg(gtx, th.SurfaceHi, 10, func(gtx C) D {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 13, "Artist", th.Accent) }),
+					layout.Rigid(GapH(6).Layout),
+					layout.Rigid(func(gtx C) D {
+						return s.InkHint.Layout(gtx, th, "How much outline vs paint. Left = more colour fill (alive shading, gradient eyes); right = a bolder ink outline. Set it to match your drawing — manga / line-art wants more line, painted art wants more fill. The shape budget above is split into ink lines + colour fill by this.")
+					}),
+					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 0)} }),
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, fmt.Sprintf("%d%% lines", pct)) }),
+				)
+			}),
+			layout.Rigid(GapV(6).Layout),
+			layout.Rigid(func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Fill") }),
+					layout.Flexed(1, func(gtx C) D {
+						sl := material.Slider(th.M, &s.InkRatio)
+						sl.Color = th.Accent
+						return layout.UniformInset(6).Layout(gtx, sl.Layout)
+					}),
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Lines") }),
+				)
+			}),
+			layout.Rigid(GapV(6).Layout),
+			layout.Rigid(func(gtx C) D {
+				l := material.Label(th.M, 11, "“Ink” = clean black outline lines (the manga / line-art look) drawn on TOP of the colour fill. Slide left for more paint, right for a bolder outline.")
+				l.Color = th.TextDim
+				return l.Layout(gtx)
+			}),
+		)
+	})
+}
+
+// advancedSection is the single "Advanced settings" disclosure — the one place every technical control
+// lives (the old "Custom (advanced)" + "Expert mode" two-step is collapsed into it). Opening it engages
+// the expert overrides; collapsed, the chosen preset's tuned defaults are used as-is.
 func (s *AppState) advancedSection(gtx C) D {
 	th := s.Th
 	// Gaussian is a NICHE mode that bypasses the greedy entirely (soft glows trained jointly), so none
-	// of the greedy/polish toggles below apply to it — show a short explanation instead of dead controls.
+	// of the greedy/polish toggles apply to it — show a short explanation instead of dead controls.
 	if s.baseMode == "gaussian" || s.Mode.Value() == "gaussian" {
-		l := material.Label(th.M, 12, "Gaussian mode trains soft glow splats jointly — no greedy options apply. Budget = number of glows; more glows + the automatic training give a closer (but always smooth) result. Best for SMOOTH / gradient / painterly images — it can't render crisp fine detail, so use Anime/Photo/Flat for sharp or cel content. Slower than the others (it trains; the bar shows training progress).")
+		l := material.Label(th.M, 12, "Soft-glow mode trains glow splats jointly — no greedy options apply. Detail = number of glows; more glows + the automatic training give a closer (but always smooth) result. Best for SMOOTH / gradient / painterly images — it can't render crisp fine detail, so use Drawing/Photo/Logo for sharp or cel content. Slower than the others (it trains; the bar shows training progress).")
 		l.Color = th.TextDim
 		return l.Layout(gtx)
 	}
 	if s.AdvClick.Clicked(gtx) {
 		s.AdvOpen = !s.AdvOpen
 	}
+	s.Expert.Value = s.AdvOpen // opening Advanced engages the expert overrides; closed = preset defaults
 	arrow := "▸"
 	if s.AdvOpen {
 		arrow = "▾"
@@ -126,31 +243,27 @@ func (s *AppState) advancedSection(gtx C) D {
 	head := func(gtx C) D {
 		return material.Clickable(gtx, &s.AdvClick, func(gtx C) D {
 			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return th.Lbl(gtx, 13, arrow+"  Custom (advanced)", th.TextDim)
+			return th.Lbl(gtx, 13, arrow+"  Advanced settings", th.TextDim)
 		})
 	}
 	if !s.AdvOpen {
 		return head(gtx)
 	}
-	tog := func(b *widget.Bool, label string, h *Hint, help string) layout.FlexChild {
-		return layout.Rigid(func(gtx C) D { return s.toggleRow(gtx, b, label, h, help) })
-	}
-	children := []layout.FlexChild{
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(head),
 		layout.Rigid(GapV(10).Layout),
-		tog(&s.KeepInside, "Keep shapes inside image", &s.KeepInsideHint,
-			"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture, with no circles or rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean. Turn off only for the legacy behaviour."),
-		layout.Rigid(GapV(10).Layout),
-		tog(&s.Expert, "Expert mode", &s.ExpertHint,
-			"Unlocks every generator knob, each shown with its concrete value for the selected preset. The presets above stay the simple path, so leave this off unless you want manual control. Any control here can move both render time and quality, in either direction. The shown defaults are computed for the loaded image; for flat art the polish counts depend on its palette, and the keep-inside frame can marginally shift that classification."),
-	}
-	if s.Expert.Value {
-		children = append(children,
-			layout.Rigid(GapV(12).Layout),
-			layout.Rigid(s.expertBlock),
-		)
-	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.KeepInside, "Keep shapes inside image", &s.KeepInsideHint,
+				"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture, with no circles or rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean. Turn off only for the legacy behaviour.")
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.Economy, "Economy mode (slower, better at low budgets)", &s.EconomyHint,
+				"OFF by default. At low shape counts (≲1500) this co-adapts the shapes — it keeps re-fitting ALL of them together as it builds, for a cleaner result with fewer shapes. The catch: it's MUCH slower (it re-polishes the whole set repeatedly), so turn it on only when you want maximum quality on a tight budget and don't mind the wait. No effect on Logo/Flat or above ~1500 shapes.")
+		}),
+		layout.Rigid(GapV(12).Layout),
+		layout.Rigid(s.expertBlock),
+	)
 }
 
 // budgetRow is the shape-budget control: a label + manual number entry over a full-width slider.
@@ -159,10 +272,10 @@ func (s *AppState) budgetRow(gtx C) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx C) D {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Budget (shapes)") }),
+				layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Detail") }),
 				layout.Rigid(GapH(6).Layout),
 				layout.Rigid(func(gtx C) D {
-					return s.BudgetHint.Layout(gtx, th, "How many shapes to draw (1-3000). More = finer detail but slower. FH6 allows up to 3000 layers per group (~1000 for a bumper).")
+					return s.BudgetHint.Layout(gtx, th, "How much detail — the number of shapes to draw (1-3000). Right = finer detail but slower; left = simpler and faster. FH6 allows up to 3000 layers per group (~1000 for a bumper).")
 				}),
 				layout.Flexed(1, func(gtx C) D { return D{} }),
 				layout.Rigid(func(gtx C) D {
@@ -177,6 +290,13 @@ func (s *AppState) budgetRow(gtx C) D {
 			sl := material.Slider(th.M, &s.Budget)
 			sl.Color = th.Accent
 			return sl.Layout(gtx)
+		}),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{}.Layout(gtx,
+				layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, "simpler", th.TextDim) }),
+				layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Min.X, 0)} }),
+				layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, "more detail", th.TextDim) }),
+			)
 		}),
 	)
 }

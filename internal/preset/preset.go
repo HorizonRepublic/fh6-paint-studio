@@ -21,21 +21,28 @@ import (
 // MaxShapes is the FH6 per-group layer ceiling; Resolve clamps Shapes to it.
 const MaxShapes = 3000
 
+// MaxInkRatio caps the hybrid Lines<->Fill knob: at most half the budget goes to FDoG ink, so the
+// geometrize fill (the colour/detail that renders alive eyes) always keeps the majority of the shapes.
+const MaxInkRatio = 0.5
+
 // Choices is the high-level configuration the UI exposes. Curated fields drive the
 // common path; the advanced fields default to the quality preset / content mode unless
 // set. Tri-state toggles use *bool (nil = mode default). Float "auto" sentinels: Aspect
 // and WeightStrength use -1; PolishTau0/Tau1 use 0; Overdraw uses 0/1 for off.
 
 type Choices struct {
-	Shapes   int    // budget; clamped to [1, MaxShapes]
-	Mode     string // anime|photo|flat (3 manual presets; legacy names collapse via presetMode; "" -> anime)
-	Quality  string // fast|balanced|max|quality|ultra ("" -> balanced)
-	Alpha    *bool  // nil = mode default; set = override (forced off for cutouts)
-	Seed     int64
-	Polish   *bool // nil = on
-	Backfit  *bool // nil = mode default (auto for flat/logo/line/cutout)
-	Boundary *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
-	SS       int   // preview supersample factor (UI-side; carried through Resolved.SS)
+	Shapes    int     // budget; clamped to [1, MaxShapes]
+	Mode      string  // anime|photo|flat (3 manual presets; legacy names collapse via presetMode; "" -> anime)
+	MonoColor string  // MONO single-colour logo/decal: "" = off; "auto" = the logo's dominant ink colour; "#RRGGBB" = exact. Forces a flat single-colour cutout (every shape one solid colour, no grey edges). Orthogonal to Mode — implies flat.
+	InkRatio  float64 // hybrid family only: fraction of the budget spent on FDoG ink lines (0..MaxInkRatio); fill gets the rest. 0 = no lines / non-hybrid.
+	Quality   string  // fast|balanced|max|quality|ultra ("" -> balanced)
+	Alpha     *bool   // nil = mode default; set = override (forced off for cutouts)
+	Seed      int64
+	Polish    *bool // nil = on
+	Backfit   *bool // nil = mode default (auto for flat/logo/line/cutout)
+	Boundary  *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
+	Economy   bool  // OPT-IN (default off): the low-budget global-search schedule (LIVE co-adaptation / anneal at ≤~1500 shapes). Lifts quality but re-polishes ALL shapes per batch (~4x slower), so it's off by default and enabled only when the user asks for it.
+	SS        int   // preview supersample factor (UI-side; carried through Resolved.SS)
 
 	// Advanced (zero = preset/mode default, except Aspect/WeightStrength/AlphaMin = -1)
 	Random, Mutated, SampleBudget, MaxNoImprove int
@@ -72,6 +79,10 @@ type Resolved struct {
 	Mode    string
 	SS      int
 	Summary []string
+	// Target is the working-space pixel buffer the backend should fit — usually the loaded pixels,
+	// but the MONO path replaces it with a binarized single-colour copy. The runner uses this so the
+	// target is binarized ONCE (here) instead of again at backend-build time.
+	Target []float32
 }
 
 // Resolve maps Choices + the loaded image to a Resolved run configuration.
@@ -95,6 +106,19 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 	}
 	flatMode := resolved == "flat"
 	transparent := prep.HasTransparency && !prep.PaddedOpaque // padded-opaque keeps content tuning; spill penalty still fires
+
+	// MONO single-colour logo/decal (c.MonoColor): binarize the target to a clean single-colour cutout
+	// (no grey antialiased-edge shapes) and snap every shape to that exact colour at the end of the run.
+	// Implies flat + opaque cutout. Work on a COPY so the loaded source is never mutated (studio re-runs
+	// + the source thumbnail share prep.Pixels); the colour is sampled from the ORIGINAL pixels.
+	var monoLock *model.RGBA
+	if lc, ok := engine.ParseLockColor(c.MonoColor, prep.Pixels, w, h, prep.HasTransparency); ok {
+		binar := append([]float32(nil), prep.Pixels...)
+		engine.BinarizeForLock(binar, w, h, lc, prep.HasTransparency)
+		prep.Pixels = binar // local copy only — md/sp/weight below now fit the clean mono mask
+		prep.HasTransparency = true
+		monoLock, transparent, resolved, flatMode = &lc, true, "flat", true
+	}
 
 	// All benchmark-hardwired per-mode constants come from ModeDefaultsFor (the single source of truth
 	// shared with the CLI). The override logic (explicit Choices fields) stays here.
@@ -129,6 +153,15 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		qual = "balanced"
 	}
 
+	// Economy schedule (OPT-IN, c.Economy): at low-mid budgets a co-adapted LIVE base (or anneal at the
+	// tightest budgets) lifts quality — fewer shapes on the structural base so the greedy detail builds
+	// on a better foundation. It re-polishes ALL shapes per batch (~4x slower), so it is OFF by default
+	// and only applied when the user enables it. Still off for flat (the knee handles it) and >economyLiveMax.
+	var ecoLB, ecoBase, ecoAnneal int
+	if c.Economy {
+		ecoLB, ecoBase, ecoAnneal = EconomyParams(resolved, shapes)
+	}
+
 	opt := engine.Options{
 		Width: w, Height: h, Background: prep.Background,
 		StopAt: shapes, RandomSamples: random, MutatedSamples: mutated, Seed: c.Seed,
@@ -143,6 +176,10 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		// boundary-straddling fur/contour slivers instead of replacing it with a muddy weighted mean.
 		RecolorVarSkip: 0.03,
 		MaxNoImprove:   maxNI,
+		// Auto-shape-count knee — per-content (md): flat/line-art trims the white-background ghost-facet
+		// over-fill (3000→~600 on img_2, EYE-equal); 0/off for anime/photo to protect detail/eyes.
+		ShapeKneeTol:   md.KneeTol,
+		ShapeKneeFloor: md.KneeFloor,
 		SampleBudget:   sampleBudget,
 		CompactPenalty: compact && !transparent,
 		OnDeviceSearch: true, // CUDA build uses it; CPU ignores
@@ -177,6 +214,10 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
+		LiveBatch:         ecoLB,
+		LiveBase:          ecoBase,
+		AnnealIters:       ecoAnneal,
+		LockColor:         monoLock,
 		StandoutTol:       c.StandoutTol,
 		// Boundary-aware radius: opt-in (caller toggle). A real win on smooth photo/anime character
 		// content but a regression on text/flat, with no clean way to gate automatically — so it is
@@ -197,7 +238,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		fmt.Sprintf("random=%d  mutated=%d  sample-budget=%d  grid=%d", random, mutated, sampleBudget, grid),
 	}
 
-	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, Summary: summary}
+	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, Summary: summary, Target: prep.Pixels}
 }
 
 // clampShapes constrains the budget to [1, MaxShapes] — the FH6 per-group layer ceiling.
@@ -416,6 +457,8 @@ type ModeDefaults struct {
 	PolishTau1  float64   // final polish edge softness
 	Boundary    bool      // boundary-aware radius
 	Backfit     bool      // post-polish back-fitting
+	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
+	KneeFloor   float64   // knee absolute floor (frac of initialErr) so it trips on near-SOLVED flat content
 }
 
 // ModeDefaultsFor returns the tuned defaults for a resolved preset (anime|photo|flat). palette is the
@@ -443,6 +486,17 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 	if flat {
 		d.AspectMax = 8
 		d.PolishTau1 = 0.06
+		// Auto-shape-count knee (flat/line-art only): large uniform regions (white bg) saturate fast,
+		// after which the greedy wastes budget on imperceptible ghost facets ("квашня"). The floor lets
+		// the knee trip on near-SOLVED flats (where the ÷currentErr rate blows up and never stops).
+		// SELF-ADAPTIVE per image — validated on the bank: img_2 (sparse face on white) 3000→982 shapes
+		// (−67%, SSIM ≥ base, LOWER banding); img_17 (dense brush-art) 3000→2354 (−22%, EYE-EQUAL at 3×
+		// zoom — the −0.012 SSIM is below the perceptual threshold); img_18 (dense sketch) untouched (3000).
+		// floor 0.003 (vs the more aggressive 0.005) is the eye-confirmed-safe value: still a big win on
+		// sparse line-art, no visible loss on dense. OFF for anime/photo so genuine detail/eyes keep the
+		// full budget. Later: a perceptual ΔE/JND gate (research #2) can make the cut fully surgical.
+		d.KneeTol = 2e-4
+		d.KneeFloor = 0.003
 		if palette < 80 { // VECTOR logo (few colours): rect-rich + keep refining edges to 600
 			d.KindWeights = []float32{0.8, 0.05, 0.15}
 			d.PolishIters = 600
@@ -451,6 +505,42 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		}
 	}
 	return d
+}
+
+// Economy auto-schedule thresholds (the low-budget global-search regime, validated on the bank). The
+// co-adapted LIVE base lifts quality most at low-mid budgets; below ~80 the discrete anneal relocation wins;
+// above ~1500 the gain is marginal vs the ~4x cost, so it's off. Off for flat (the knee already trims it).
+const (
+	economyAnnealMax   = 80   // budgets ≤ this use the basin-hopping anneal (tightest budget: discrete relocation beats co-adaptation)
+	economyAnnealIters = 25   // anneal outer iterations at the tightest budgets
+	economyLiveMax     = 1500 // budgets ≤ this (and > economyAnnealMax) use the two-phase LIVE base
+	economyBaseCap     = 400  // LIVE base size cap (base ≈ budget/4, capped here)
+	economyBatch       = 6    // LIVE batch size
+)
+
+// EconomyParams returns the AUTO low-budget global-search schedule for a content mode + shape budget — the
+// economy "efficient base → detail budget" win. Returns engine.Options' LiveBatch / LiveBase / AnnealIters.
+// Off (0,0,0) for flat/line-art (the knee handles those) and for budgets above economyLiveMax (marginal vs
+// the ~4x cost). Single source of truth shared by the studio (Resolve) and the CLI so they can't drift.
+func EconomyParams(resolvedMode string, shapes int) (liveBatch, liveBase, annealIters int) {
+	if PresetMode(resolvedMode) == "flat" || shapes <= 0 {
+		return 0, 0, 0
+	}
+	switch {
+	case shapes <= economyAnnealMax:
+		return 0, 0, economyAnnealIters
+	case shapes <= economyLiveMax:
+		base := shapes / 4
+		if base > economyBaseCap {
+			base = economyBaseCap
+		}
+		if base >= shapes {
+			return 0, 0, 0
+		}
+		return economyBatch, base, 0
+	default:
+		return 0, 0, 0
+	}
 }
 
 // ModeKnobDefaults returns the CONCRETE knob values a built-in content preset resolves to for the
@@ -511,11 +601,56 @@ func PresetMode(mode string) string {
 		return "photo"
 	case "flat", "logo", "line", "cutout":
 		return "flat"
+	case "lineart", "line-art":
+		return "flat" // hybrid line-art: OPAQUE flat fill (a white background stays clean — no semi-transparent casts) + FDoG ink lines on top
 	case "gaussian", "gauss", "smooth", "gradient":
 		return "gaussian" // NICHE: soft-glow reconstruction for smooth/gradient content (engine.GenerateGaussian)
-	default: // "", "auto", "anime", "shaded", "illustration", anything else
-		return "anime"
+	default: // "", "auto", "anime", "anime-ink", "hybrid", "shaded", "illustration", anything else
+		return "anime" // hybrid anime-ink/hybrid: semi-transparent fill (alive eyes/gradients) + FDoG ink on top
 	}
+}
+
+// IsHybridMode reports whether mode is a hybrid-family preset (geometrize fill + FDoG ink lines on top):
+// "lineart" (opaque flat fill) or "anime-ink" (semi-transparent fill). The caller reserves InkBudget of
+// the shapes for the ink and appends the lines after the fill; non-hybrid modes draw the fill only.
+func IsHybridMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "lineart", "line-art", "anime-ink", "anime-hybrid", "hybrid":
+		return true
+	}
+	return false
+}
+
+// DefaultInkRatio is a hybrid preset's starting Lines<->Fill split (fraction of budget for ink): line-art
+// is line-led (the lines ARE the content), anime-ink is fill-led (colour dominates, fewer major contours).
+// The studio's Artist slider seeds from this; 0 for non-hybrid modes.
+func DefaultInkRatio(mode string) float64 {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "lineart", "line-art":
+		return 0.40
+	case "anime-ink", "anime-hybrid", "hybrid":
+		return 0.20
+	}
+	return 0
+}
+
+// InkBudget splits a total shape budget into the FDoG ink count for a Lines<->Fill ratio, always leaving
+// at least one fill shape. ratio is clamped to [0, MaxInkRatio]; the geometrize fill gets shapes-ink.
+func InkBudget(ratio float64, shapes int) int {
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > MaxInkRatio {
+		ratio = MaxInkRatio
+	}
+	ink := int(ratio*float64(shapes) + 0.5)
+	if ink >= shapes {
+		ink = shapes - 1
+	}
+	if ink < 0 {
+		ink = 0
+	}
+	return ink
 }
 
 // PresetCounts returns the (random, mutated, sampleBudget, maxNoImprove) base for a quality

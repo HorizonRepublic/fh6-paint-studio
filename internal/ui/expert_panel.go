@@ -243,7 +243,7 @@ func (s *AppState) presetSaveRow(gtx C) D {
 // expertDisclaimer is the as-is banner at the top of the expert panel.
 func (s *AppState) expertDisclaimer(gtx C) D {
 	th := s.Th
-	l := material.Label(th.M, 11, "Expert mode is unlocked as-is. Every control can change render time and quality, in either direction. For a good result without fuss, use the presets above and leave this off.")
+	l := material.Label(th.M, 11, "Advanced controls, as-is. Every one can change render time and quality, in either direction — the preset above already picks good values, so only touch these if you know what you want. While this is open, these values are used; collapse it to fall back to the preset's tuned defaults.")
 	l.Color = th.TextDim
 	return l.Layout(gtx)
 }

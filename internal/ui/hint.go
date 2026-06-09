@@ -17,7 +17,6 @@ type Hint struct {
 
 // Layout draws the icon and, while hovered, a deferred tooltip card with help text.
 func (h *Hint) Layout(gtx C, th *Theme, help string) D {
-	// Drain hover events queued since the last frame.
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: h, Kinds: pointer.Enter | pointer.Leave})
 		if !ok {
@@ -35,7 +34,6 @@ func (h *Hint) Layout(gtx C, th *Theme, help string) D {
 
 	dims := th.Lbl(gtx, 13, "(?)", th.TextDim)
 
-	// Register the icon's bounds as a hover target.
 	area := clip.Rect{Max: dims.Size}.Push(gtx.Ops)
 	event.Op(gtx.Ops, h)
 	area.Pop()

@@ -1,0 +1,50 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
+// polish_forward_tiled.comp — TILED soft (or STE-hard) forward. One thread per PIXEL;
+// each pixel walks ALL shapes in order keeping a local running composite, snapshotting the
+// colour below every shape whose bbox it falls in. Mirrors engine.polishForward, but in ONE
+// dispatch with ZERO barriers (the sequential over-composite is a per-pixel register loop).
+// bbx/boff live on-device; render+below are full-image.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Pb { double Pbuf[]; };
+layout(std430, binding = 1) readonly  buffer Cb { double Cbuf[]; };
+layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
+layout(std430, binding = 3) writeonly buffer Rb { float  render[]; };
+layout(std430, binding = 4) writeonly buffer Bb { float  belowb[]; };
+layout(std430, binding = 5) readonly  buffer Xb { int    bbx[]; };   // n*4: xMin,yMin,xMax,yMax
+layout(std430, binding = 6) readonly  buffer Ob { int    boff[]; };  // n: below float-offset
+layout(std430, binding = 7) readonly  buffer Ab { float  base[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+#include "polish_common.glsl"
+
+void main() {
+    int idx = int(gl_GlobalInvocationID.x);
+    if (idx >= pc.w * pc.h) return;
+    int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
+    float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
+    for (int si = 0; si < pc.n; si++) {
+        int bx0 = bbx[si * 4], by0 = bbx[si * 4 + 1], bx1 = bbx[si * 4 + 2], by1 = bbx[si * 4 + 3];
+        if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
+        int bw = bx1 - bx0 + 1;
+        int li = boff[si] + ((y - by0) * bw + (x - bx0)) * 4;
+        belowb[li] = ar; belowb[li + 1] = ag; belowb[li + 2] = ab; belowb[li + 3] = aa;
+        int kind = Kbuf[si];
+        float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
+        float cov;
+        if (optGeoKind(kind)) {
+            float g[6];
+            float sdf = sdfGradKind(kind, P, float(x) + 0.5, float(y) + 0.5, g);
+            cov = (pc.ste != 0) ? (sdf <= 0.0 ? 1.0 : 0.0) : sigmoidCov(sdf, pc.tau);
+        } else {
+            cov = insideShape(kind, P, x, y) ? 1.0 : 0.0;
+        }
+        if (cov > 0.0) {
+            float A = float(Cbuf[si * 4 + 3]), a = A * cov, ia = 1.0 - a;
+            float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]);
+            ar = ar * ia + R * a; ag = ag * ia + G * a; ab = ab * ia + B * a; aa = aa * ia + a;
+        }
+    }
+    render[p] = ar; render[p + 1] = ag; render[p + 2] = ab; render[p + 3] = aa;
+}

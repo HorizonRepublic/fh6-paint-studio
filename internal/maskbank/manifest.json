@@ -1,0 +1,329 @@
+{
+ "res": 256,
+ "shapes": [
+  {
+   "word": 109,
+   "label": "half-disk_006d",
+   "native_w": 130.3,
+   "native_h": 66.1,
+   "alpha_w": 128.4,
+   "alpha_h": 64.2,
+   "file": "m_006d.png"
+  },
+  {
+   "word": 129,
+   "label": "comma1_0081",
+   "native_w": 129.9,
+   "native_h": 129.9,
+   "alpha_w": 128.0,
+   "alpha_h": 128.0,
+   "file": "m_0081.png"
+  },
+  {
+   "word": 138,
+   "label": "quarter-disk_008a",
+   "native_w": 129.18,
+   "native_h": 129.18,
+   "alpha_w": 127.3,
+   "alpha_h": 127.3,
+   "file": "m_008a.png"
+  },
+  {
+   "word": 127,
+   "label": "crescent-blade_007f",
+   "native_w": 87.2,
+   "native_h": 129.6,
+   "alpha_w": 85.3,
+   "alpha_h": 127.7,
+   "file": "m_007f.png"
+  },
+  {
+   "word": 112,
+   "label": "ring-sm_0070",
+   "native_w": 129.9,
+   "native_h": 129.9,
+   "alpha_w": 128.0,
+   "alpha_h": 128.0,
+   "file": "m_0070.png"
+  },
+  {
+   "word": 120,
+   "label": "capsule_0078",
+   "native_w": 65.9,
+   "native_h": 129.9,
+   "alpha_w": 64.0,
+   "alpha_h": 128.0,
+   "file": "m_0078.png"
+  },
+  {
+   "word": 128,
+   "label": "teardrop1_0080",
+   "native_w": 86.58,
+   "native_h": 128.98,
+   "alpha_w": 84.7,
+   "alpha_h": 127.1,
+   "file": "m_0080.png"
+  },
+  {
+   "word": 132,
+   "label": "crescent-C_0084",
+   "native_w": 65.9,
+   "native_h": 129.9,
+   "alpha_w": 64.0,
+   "alpha_h": 128.0,
+   "file": "m_0084.png"
+  },
+  {
+   "word": 2103,
+   "label": "boomerang_0837",
+   "native_w": 151.26,
+   "native_h": 175.66,
+   "alpha_w": 148.7,
+   "alpha_h": 173.1,
+   "file": "m_0837.png"
+  },
+  {
+   "word": 2119,
+   "label": "crescent-thin_0847",
+   "native_w": 33.45,
+   "native_h": 126.35,
+   "alpha_w": 31.6,
+   "alpha_h": 124.5,
+   "file": "m_0847.png"
+  },
+  {
+   "word": 2135,
+   "label": "comma2_0857",
+   "native_w": 45.86,
+   "native_h": 120.66,
+   "alpha_w": 44.1,
+   "alpha_h": 118.9,
+   "file": "m_0857.png"
+  },
+  {
+   "word": 2117,
+   "label": "lens_0845",
+   "native_w": 129.6,
+   "native_h": 80.6,
+   "alpha_w": 127.7,
+   "alpha_h": 78.7,
+   "file": "m_0845.png"
+  },
+  {
+   "word": 2108,
+   "label": "teardrop2_083c",
+   "native_w": 82.7,
+   "native_h": 130.6,
+   "alpha_w": 80.8,
+   "alpha_h": 128.7,
+   "file": "m_083c.png"
+  },
+  {
+   "word": 2131,
+   "label": "gentlearc1_0853",
+   "native_w": 129.4,
+   "native_h": 20.4,
+   "alpha_w": 127.5,
+   "alpha_h": 18.5,
+   "file": "m_0853.png"
+  },
+  {
+   "word": 2112,
+   "label": "banana_0840",
+   "native_w": 44.55,
+   "native_h": 126.55,
+   "alpha_w": 42.7,
+   "alpha_h": 124.7,
+   "file": "m_0840.png"
+  },
+  {
+   "word": 2128,
+   "label": "gentlearc2_0850",
+   "native_w": 130.1,
+   "native_h": 129.7,
+   "alpha_w": 128.2,
+   "alpha_h": 127.8,
+   "file": "m_0850.png"
+  },
+  {
+   "word": 2201,
+   "label": "ring2_0899",
+   "native_w": 108.18,
+   "native_h": 108.59,
+   "alpha_w": 106.4,
+   "alpha_h": 106.7,
+   "file": "m_0899.png"
+  },
+  {
+   "word": 2231,
+   "label": "arc-shallow_08b7",
+   "native_w": 127.21,
+   "native_h": 16.61,
+   "alpha_w": 125.4,
+   "alpha_h": 14.8,
+   "file": "m_08b7.png"
+  },
+  {
+   "word": 2202,
+   "label": "arc-dome_089a",
+   "native_w": 108.18,
+   "native_h": 54.98,
+   "alpha_w": 106.4,
+   "alpha_h": 53.2,
+   "file": "m_089a.png"
+  },
+  {
+   "word": 2203,
+   "label": "arc-90_089b",
+   "native_w": 54.19,
+   "native_h": 54.19,
+   "alpha_w": 53.3,
+   "alpha_h": 53.3,
+   "file": "m_089b.png"
+  },
+  {
+   "word": 2222,
+   "label": "arc-sweep_08ae",
+   "native_w": 71.08,
+   "native_h": 121.18,
+   "alpha_w": 69.3,
+   "alpha_h": 119.4,
+   "file": "m_08ae.png"
+  },
+  {
+   "word": 2215,
+   "label": "arc-180_08a7",
+   "native_w": 125.24,
+   "native_h": 48.64,
+   "alpha_w": 123.4,
+   "alpha_h": 46.8,
+   "file": "m_08a7.png"
+  },
+  {
+   "word": 2204,
+   "label": "straight-thin_089c",
+   "native_w": 10.01,
+   "native_h": 129.9,
+   "alpha_w": 8.1,
+   "alpha_h": 128.0,
+   "file": "m_089c.png"
+  },
+  {
+   "word": 2214,
+   "label": "arc-J1_08a6",
+   "native_w": 49.01,
+   "native_h": 123.81,
+   "alpha_w": 47.2,
+   "alpha_h": 122.0,
+   "file": "m_08a6.png"
+  },
+  {
+   "word": 2232,
+   "label": "openC_08b8",
+   "native_w": 126.08,
+   "native_h": 128.68,
+   "alpha_w": 124.2,
+   "alpha_h": 126.8,
+   "file": "m_08b8.png"
+  },
+  {
+   "word": 2301,
+   "label": "checkmark_08fd",
+   "native_w": 131.72,
+   "native_h": 132.03,
+   "alpha_w": 129.8,
+   "alpha_h": 130.1,
+   "file": "m_08fd.png"
+  },
+  {
+   "word": 201,
+   "label": "gradbar_00c9",
+   "native_w": 354.6,
+   "native_h": 132.5,
+   "alpha_w": 349.4,
+   "alpha_h": 127.3,
+   "file": "m_00c9.png"
+  },
+  {
+   "word": 301,
+   "label": "dashed_012d",
+   "native_w": 215.34,
+   "native_h": 17.23,
+   "alpha_w": 212.2,
+   "alpha_h": 14.1,
+   "file": "m_012d.png"
+  },
+  {
+   "word": 321,
+   "label": "straight-bar_0141",
+   "native_w": 569.83,
+   "native_h": 137.54,
+   "alpha_w": 561.5,
+   "alpha_h": 129.2,
+   "file": "m_0141.png"
+  },
+  {
+   "word": 325,
+   "label": "arc-J2_0145",
+   "native_w": 86.73,
+   "native_h": 213.33,
+   "alpha_w": 83.6,
+   "alpha_h": 210.2,
+   "file": "m_0145.png"
+  },
+  {
+   "word": 322,
+   "label": "wave_0142",
+   "native_w": 214.96,
+   "native_h": 99.55,
+   "alpha_w": 211.8,
+   "alpha_h": 96.4,
+   "file": "m_0142.png"
+  },
+  {
+   "word": 326,
+   "label": "swoosh_0146",
+   "native_w": 216.67,
+   "native_h": 63.37,
+   "alpha_w": 213.5,
+   "alpha_h": 60.2,
+   "file": "m_0146.png"
+  },
+  {
+   "word": 401,
+   "label": "break_0191",
+   "native_w": 221.04,
+   "native_h": 75.84,
+   "alpha_w": 217.8,
+   "alpha_h": 72.6,
+   "file": "m_0191.png"
+  },
+  {
+   "word": 102,
+   "label": "circle_0066",
+   "native_w": 130.0,
+   "native_h": 129.9,
+   "alpha_w": 128.1,
+   "alpha_h": 128.0,
+   "file": "m_0066.png"
+  },
+  {
+   "word": 101,
+   "label": "square_0065",
+   "native_w": 129.9,
+   "native_h": 129.9,
+   "alpha_w": 128.0,
+   "alpha_h": 128.0,
+   "file": "m_0065.png"
+  },
+  {
+   "word": 104,
+   "label": "triangle_0068",
+   "native_w": 129.7,
+   "native_h": 129.7,
+   "alpha_w": 127.8,
+   "alpha_h": 127.8,
+   "file": "m_0068.png"
+  }
+ ]
+}

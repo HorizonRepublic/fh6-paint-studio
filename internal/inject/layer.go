@@ -92,6 +92,14 @@ func ShapeToLayer(s model.Shape, cm CanvasMap) (LayerWrite, bool) {
 	}
 
 	lw.Color = colorBytes(s.Color)
+	if s.Type >= 0 && s.Type <= 0xFFFF { // KindMask dictionary arc: Type is the word, Data = [cx,cy,Hx,Hy,rot,skew]
+		if k, ok := model.MaskKind(uint16(s.Type)); ok {
+			nw, nh, _ := model.MaskNative(k)
+			lw.placeMask(cm, p[0], p[1], p[2], p[3], p[4], p[5], nw, nh)
+			lw.Word = uint16(s.Type)
+			return lw, true
+		}
+	}
 	switch s.Type {
 	case model.TypeRectangle: // background / corner rect: [x, y, w, h] -> centre + half-extent
 		lw.place(cm, p[0]+p[2]/2, p[1]+p[3]/2, p[2]/2, p[3]/2, 0)
@@ -142,6 +150,11 @@ func wordForType(t int, p [6]float32) (uint16, bool) {
 	case model.TypeGradDisk:
 		return WordGradDisk, true
 	}
+	if t >= 0 && t <= 0xFFFF { // KindMask: Type is the dictionary word itself
+		if _, ok := model.MaskKind(uint16(t)); ok {
+			return uint16(t), true
+		}
+	}
 	return 0, false
 }
 
@@ -155,6 +168,22 @@ func (lw *LayerWrite) place(cm CanvasMap, cx, cy, hx, hy, deg float32) {
 		base = ScaleBase
 	}
 	lw.placeBase(cm, cx, cy, hx, hy, deg, base)
+}
+
+// placeMask maps a KindMask word: the full image-px extents Hx,Hy normalised by the word's native size
+// (nativeW,nativeH editor units at scale 1), preserving skew. A negative Hx (renderer mirror) passes
+// through as a negative SX — verify the mirror in-game.
+func (lw *LayerWrite) placeMask(cm CanvasMap, cx, cy, hx, hy, deg, skew, nativeW, nativeH float32) {
+	lw.X = (cx - cm.W/2) * cm.K
+	lw.Y = (cm.H/2 - cy) * cm.K // editor Y is up
+	if nativeW != 0 {
+		lw.SX = hx * cm.K / nativeW
+	}
+	if nativeH != 0 {
+		lw.SY = hy * cm.K / nativeH
+	}
+	lw.Rotation = -deg
+	lw.Skew = skew
 }
 
 // placeBase is place with an explicit scale base, so the radial gradients can use their own

@@ -26,6 +26,7 @@ import (
 	"gioui.org/widget"
 
 	"fh6-paint-studio/internal/applog"
+	"fh6-paint-studio/internal/hybrid"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/inject"
 	"fh6-paint-studio/internal/library"
@@ -85,13 +86,16 @@ func loop(w *app.Window) error {
 	th := ui.NewTheme()
 	st := ui.NewAppState(th)
 	st.Version = version
-	st.BackendLabel = "shape engine · " + backendName
+	backends := backendOptions()
+	st.SetBackends(backends)               // a picker when >1 GPU backend works (allgpu build), else a static label
+	runner.BackendPreference = backends[0] // default to the system's preferred (CUDA where present, else Vulkan)
 	st.UpdateCheckEnabled = updateCheckEnabled
 	st.Elevated = inject.Elevated()
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
 	st.LastSeen = prefs.LastSeenVersion
+	st.SetRecent(prefs.Recent) // restore the recently-opened images
 
 	// Warm the shell file-dialog infrastructure in the background so the first Open shows the native
 	// dialog without a cold-start delay.
@@ -135,6 +139,7 @@ func loop(w *app.Window) error {
 
 	var curPrep *imageio.Prepared // engine input for the loaded image (always decoded in linear light)
 	var curGen *imageio.Prepared  // engine input for the ACTIVE run — curPrep, or a crop of it
+	var hybridInk int             // hybrid mode: FDoG ink budget reserved this run, appended in Done
 	// viewAbs is the absolute source rect (raw-file coords) that the current working image covers — the
 	// original's auto-crop rect after Open/Reset, or the composed crop rect after Apply crop. It is the
 	// base a new crop selection composes against, so repeated crops re-decode the original at full res.
@@ -144,6 +149,7 @@ func loop(w *app.Window) error {
 	// size (TranslateShapes/UnpadCanvas) — a clean, frame-free result. runPadPx==0 means no surround.
 	var runPadPx, runOrigW, runOrigH int
 	var cancelRun func()
+	var runCancelled bool        // set when the user cancels; the engine still emits Done, so the Done handler must not treat a cancelled run as a finished one
 	var lastShapes []model.Shape // final base geometry, for export
 	var lastW, lastH int
 
@@ -177,17 +183,34 @@ func loop(w *app.Window) error {
 
 	// savePrefs persists the UI preferences (window size + sound) to studio.json — called on exit and
 	// whenever a persisted toggle changes, so a preference survives even an unclean shutdown.
+	recent := append([]string(nil), prefs.Recent...) // recently-opened images, newest first
 	savePrefs := func() {
 		on := st.SoundOn.Value
 		keep := st.KeepInside.Value
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
 			KeepInside: &keep, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
-			LastSeenVersion: st.LastSeen}
+			LastSeenVersion: st.LastSeen, Recent: recent}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
 		}
 		saveConfig(c)
+	}
+	// pushRecent moves a freshly-opened image to the front of the recent list (deduped, capped) and
+	// persists it, so it survives a restart and shows in the Source card.
+	pushRecent := func(p string) {
+		if p == "" {
+			return
+		}
+		out := []string{p}
+		for _, q := range recent {
+			if q != p && len(out) < 8 {
+				out = append(out, q)
+			}
+		}
+		recent = out
+		st.SetRecent(recent)
+		savePrefs()
 	}
 
 	post := func(e runner.Event) { q.push(e); w.Invalidate() }
@@ -249,6 +272,7 @@ func loop(w *app.Window) error {
 					st.RandomEd.SetText("600") // fast demo via custom override (quality is auto now)
 					st.MutatedEd.SetText("400")
 					st.Phase = ui.PhaseRunning
+					runCancelled = false
 					runStart = time.Now()
 					curGen = curPrep
 					r := preset.Resolve(*curPrep, st.Choices())
@@ -281,6 +305,33 @@ func loop(w *app.Window) error {
 					st.SetPreview(img)
 				case runner.Done:
 					shapes, canvas := ev.Result.Shapes, ev.Canvas
+					if hybridInk > 0 && curGen != nil { // hybrid: lay the FDoG designed outline ON TOP of the fill
+						if lines := hybrid.Ink(curGen, hybridInk); len(lines) > 0 {
+							shapes = append(shapes, lines...)
+							buf := imageio.RenderFH6(shapes, curGen.HasTransparency, curGen.W, curGen.H, 2)
+							img := image.NewNRGBA(image.Rect(0, 0, curGen.W, curGen.H))
+							for i, v := range buf {
+								if v < 0 {
+									v = 0
+								} else if v > 1 {
+									v = 1
+								}
+								img.Pix[i] = uint8(v*255 + 0.5)
+							}
+							canvas = img
+							st.AppendLog(fmt.Sprintf("hybrid: +%d FDoG lines on top of the fill", len(lines)))
+						}
+						hybridInk = 0
+					}
+					// Perceptual quality of the finished render vs the source (still at the run dims, before
+					// the keep-inside unpad) — shown as a friendly badge in the Activity panel.
+					if curGen != nil && canvas != nil && canvas.Bounds().Dx() == curGen.W && canvas.Bounds().Dy() == curGen.H {
+						src := imageio.EncodeForDisplay(curGen.Pixels)
+						de, _ := metric.DeltaE76(src, nrgbaToFloat(canvas), curGen.W, curGen.H)
+						ss := metric.SSIM(src, nrgbaToFloat(canvas), curGen.W, curGen.H)
+						st.SetQuality(de, ss)
+						st.AppendLog(fmt.Sprintf("quality: ΔE76 %.2f · SSIM %.3f", de, ss))
+					}
 					if curGen != nil { // crop run -> crop dims; whole-image run -> full dims
 						lastW, lastH = curGen.W, curGen.H
 					}
@@ -296,18 +347,30 @@ func loop(w *app.Window) error {
 					st.Stats.Err = ev.Result.FinalError
 					st.Stats.ETA = 0
 					lastShapes = shapes
-					st.AppendLog(fmt.Sprintf("done: %d shapes, error %.1f in %s",
-						st.Stats.Shapes, ev.Result.FinalError, fmtSecs(st.Stats.Elapsed)))
 					cancelRun = nil
-					st.Phase = ui.PhaseDone
 					st.Stats.Stage = ""
 					tb.clear()
-					flashWindow(winHWND) // nudge the taskbar button if the user is in another window (e.g. FH6)
-					if st.SoundOn.Value {
-						playDoneSound()
+					if runCancelled {
+						// The engine emits Done even on a cooperative cancel (it keeps the partial result).
+						// Treat it honestly: show the partial preview, but DON'T announce success, label it
+						// "optimal", save it to the library, or chime — none of that is true for a cancel.
+						st.AppendLog(fmt.Sprintf("cancelled at %d shapes — partial result kept (not saved)", st.Stats.Shapes))
+						st.Phase = ui.PhaseIdle
+					} else {
+						doneMsg := fmt.Sprintf("done: %d shapes, error %.1f in %s",
+							st.Stats.Shapes, ev.Result.FinalError, fmtSecs(st.Stats.Elapsed))
+						if st.Stats.Cap > 0 && st.Stats.Shapes < st.Stats.Cap*9/10 {
+							doneMsg += fmt.Sprintf(" — auto-trimmed from %d (optimal for this image)", st.Stats.Cap)
+						}
+						st.AppendLog(doneMsg)
+						st.Phase = ui.PhaseDone
+						flashWindow(winHWND) // nudge the taskbar button if the user is in another window (e.g. FH6)
+						if st.SoundOn.Value {
+							playDoneSound()
+						}
+						savePrefs() // persist the preset + budget that just produced a result
+						saveDecalToLibrary(st, store, lastShapes, lastW, lastH)
 					}
-					savePrefs() // persist the preset + budget that just produced a result
-					saveDecalToLibrary(st, store, lastShapes, lastW, lastH)
 				case runner.Failed:
 					st.Phase = ui.PhaseError
 					st.Stats.Stage = ""
@@ -330,6 +393,7 @@ func loop(w *app.Window) error {
 					st.SetSource(res.img, res.path)
 					st.Toast = ""
 					st.Log = nil
+					pushRecent(res.path)
 				}
 			}
 
@@ -348,6 +412,12 @@ func loop(w *app.Window) error {
 				// Gio's main thread would make the modal SendMessage to that thread and deadlock.
 				picking = true
 				go func() { openPick.put(pickFile(0)); w.Invalidate() }()
+			}
+			// Reopen a recently-used image (clicked in the Source card).
+			for i := range st.RecentBtns {
+				if st.RecentBtns[i].Clicked(gtx) && !opening && !picking && i < len(st.Recent) {
+					beginOpen(st.Recent[i])
+				}
 			}
 			if p, ok := openPick.take(); ok {
 				picking = false
@@ -405,14 +475,30 @@ func loop(w *app.Window) error {
 				}
 				curGen = genPrep
 				st.Phase = ui.PhaseRunning
+				runCancelled = false
 				runStart = time.Now()
 				tb.indeterminate() // instant taskbar feedback until the first progress tick
-				r := preset.Resolve(*genPrep, st.Choices())
+				ch := st.Choices()
+				r := preset.Resolve(*genPrep, ch)
+				hybridInk = 0
+				if preset.IsHybridMode(ch.Mode) { // reserve part of the budget for the FDoG ink (appended in Done)
+					hybridInk = preset.InkBudget(ch.InkRatio, ch.Shapes)
+					if hybridInk > 0 {
+						r.Options.StopAt = ch.Shapes - hybridInk
+						if r.Options.StopAt < 1 {
+							r.Options.StopAt = 1
+						}
+					}
+					st.AppendLog(fmt.Sprintf("%s: %d ink lines + %d fill (%.0f%% lines)", ch.Mode, hybridInk, r.Options.StopAt, ch.InkRatio*100))
+				}
+				st.ClearQuality() // drop the previous run's quality badge
 				st.Stats = ui.RunStats{Total: r.Options.StopAt}
+				st.Stats.Cap = ch.Shapes // remember the requested cap so Done can show the auto-picked optimal count
 				cancelRun = runner.RunAsync(*genPrep, r, post)
 			}
 			if st.CancelBtn.Clicked(gtx) && cancelRun != nil {
 				cancelRun()
+				runCancelled = true
 				tb.clear()
 				st.AppendLog("cancelling…")
 			}
@@ -423,6 +509,7 @@ func loop(w *app.Window) error {
 			if st.LibraryTab.Clicked(gtx) {
 				st.View = ui.ViewLibrary
 				reloadLibrary(st, store) // pick up anything saved since
+				prefillInjectLayers(st)  // seed the FH6-template field so it isn't a blank footgun
 			}
 			if st.OpenFolderBtn.Clicked(gtx) && store != nil {
 				openInExplorer(store.Root)
@@ -600,16 +687,19 @@ func loop(w *app.Window) error {
 					}
 				}
 				if r.ThumbBtn.Clicked(gtx) && store != nil { // open the full preview in the lightbox
-					if img, err := loadPreviewImage(store, r.Entry.ID); err == nil {
+					if st.LightboxOn {
+						// A click while the preview is open dismisses it. Gio only re-resolves the pointer
+						// hit-target on a MOVE, so a click that doesn't move the cursor lands back on the
+						// thumb that opened it (not the scrim) — handle that here so it closes on first click.
+						st.HideLightbox()
+					} else if img, err := loadPreviewImage(store, r.Entry.ID); err == nil {
 						st.ShowLightbox(img)
 					} else {
 						st.Toast = "Preview unavailable: " + err.Error()
 					}
 				}
 			}
-			if st.LightboxClose.Clicked(gtx) { // click anywhere on the overlay to dismiss
-				st.HideLightbox()
-			}
+			// (the lightbox now dismisses itself via its own pointer capture in lightboxOverlay)
 			if needReload {
 				reloadLibrary(st, store)
 			}
@@ -626,8 +716,11 @@ func loop(w *app.Window) error {
 				st.FinishInject(o.id, o.err == nil, gtx.Now.Add(6*time.Second))
 				if o.err != nil {
 					st.Toast = "Inject failed: " + o.err.Error()
+					st.AppendLogLvl(ui.LogErr, "inject failed: "+o.err.Error())
+					st.ConsoleOpen = true // surface the failure — the Library view has no Activity card
 				} else {
 					st.Toast = "Injected — now Save & reload the vinyl in FH6 to apply"
+					st.AppendLogLvl(ui.LogGood, "injected OK — Save & reload the vinyl in FH6 to apply")
 				}
 			}
 
@@ -667,6 +760,10 @@ func loop(w *app.Window) error {
 				lastTitle = title
 			}
 			st.Layout(gtx)
+			if st.Backend != nil && st.Backend.Changed() { // engine picker -> bias the next run's backend
+				runner.BackendPreference = st.Backend.Value()
+				st.BackendLabel = "shape engine · " + st.Backend.Value()
+			}
 			e.Frame(gtx.Ops)
 		}
 	}
@@ -718,6 +815,42 @@ func loadPreviewImage(store *library.Store, id string) (image.Image, error) {
 	defer f.Close()
 	img, _, err := image.Decode(f)
 	return img, err
+}
+
+// nrgbaToFloat converts an sRGB NRGBA image to the packed []float32 RGBA (0..1) the metric package
+// expects, honouring the row stride.
+func nrgbaToFloat(img *image.NRGBA) []float32 {
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	out := make([]float32, w*h*4)
+	for y := 0; y < h; y++ {
+		row := img.Pix[y*img.Stride : y*img.Stride+w*4]
+		for x := 0; x < w*4; x++ {
+			out[y*w*4+x] = float32(row[x]) / 255
+		}
+	}
+	return out
+}
+
+// prefillInjectLayers seeds the FH6-template count (when blank) from the largest generation, capped to
+// the per-group ceiling — a safe default that fits every entry, which the per-row fit badge then
+// confirms. The user lowers it to match their real in-game template; the badges update to show drops.
+func prefillInjectLayers(st *ui.AppState) {
+	if strings.TrimSpace(st.InjectLayers.Text()) != "" {
+		return
+	}
+	max := 0
+	for i := range st.LibRows {
+		if n := st.LibRows[i].Entry.Shapes; n > max {
+			max = n
+		}
+	}
+	if max <= 0 {
+		return
+	}
+	if max > preset.MaxShapes {
+		max = preset.MaxShapes
+	}
+	st.InjectLayers.SetText(strconv.Itoa(max))
 }
 
 // reloadLibrary refreshes the UI library rows from the store (newest first, thumbs decoded on the UI
@@ -800,7 +933,7 @@ func exportLibraryEntry(store *library.Store, id, dst string) string {
 	}
 	if src, err := os.Open(store.PreviewPath(id)); err == nil {
 		defer src.Close()
-		if out, err := os.Create(strings.TrimSuffix(dst, ".json") + ".png"); err == nil {
+		if out, err := os.Create(strings.TrimSuffix(dst, filepath.Ext(dst)) + ".png"); err == nil {
 			_, _ = io.Copy(out, src)
 			out.Close()
 		}

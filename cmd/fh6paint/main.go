@@ -3,17 +3,23 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/engine"
+	"fh6-paint-studio/internal/hybrid"
 	"fh6-paint-studio/internal/imageio"
+	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 	presetpkg "fh6-paint-studio/internal/preset"
+	"fh6-paint-studio/internal/stylize"
+	_ "fh6-paint-studio/internal/stylize/presets" // register stylizer engines + presets
 )
 
 func main() {
@@ -48,11 +54,14 @@ func main() {
 	standout := flag.Float64("standout", 0, "post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. 0=off. ~0.005 = conservative. The metric will NOT show the win — judge by eye; the gate only bounds the loss.")
 	alphaMinFlag := flag.Float64("alpha-min", -1, "lower bound for candidate alpha when -alpha is on (candidates draw alpha~U(alpha-min,1)). -1 = content-mode default (photo 0.3, anime 0.55). HIGHER = crisper/more-opaque shapes (less soft muddying of detail like eyes/lips), at the cost of needing more shapes for smooth gradients; test 0.7-0.85 on detailed faces.")
 	shapeTol := flag.Float64("shape-tol", 0, "auto-shape-count: stop placing shapes when the relative marginal improvement rate r=ΔErr/(window·currentErr) per shape stays below this (0=off, fill -shapes budget). Adapts the count per image: saturated flat/logo stop early (~175-400), detailed photo/anime/cartoon fill the budget. -shapes is the ceiling. Recommended auto value: 0.0002 (conservative; trims only genuinely-saturated content). 0.0005 = aggressive/draft.")
+	kneeFloor := flag.Float64("knee-floor", 0, "with -shape-tol: floor the knee denominator at this fraction of the INITIAL error so the same tol also trips on near-SOLVED content (clean line-art / fully-filled flats) where ÷currentErr blows up and never stops. 0=off (pure relative). ~0.02 = treat <2% residual as solved. Detailed photos (currentErr ≫ floor) are unaffected.")
+	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (−score/area) is below this — a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small — try ~1e-4..1e-3.")
 	compact := flag.Bool("compact", true, "bias the per-shape pick toward compact shapes (cleaner coarse stage)")
 	mode := flag.String("mode", "anime", "content PRESET (3 manual): anime | photo | flat. Legacy names (logo/line/illustration/cutout/auto) collapse to one of the 3 via preset.PresetMode. anime/photo = semi-transparent + triangle-rich + STE; flat = opaque + rect/triangle by palette + boundary + backfit. Transparency is auto-detected (forces opaque). Explicit flags override.")
 	weightV2 := flag.Bool("weight-v2", false, "force the richer dilated ink-aware saliency map (WeightMapV2) on/off; default is auto (on for flat/logo/line/cutout, off for photo/anime). V2 protects 1-2px black contours from being smeared by flat-fill shapes.")
 	preprocess := flag.String("preprocess", "auto", "target preprocessing: none|luma_bands. luma_bands = edge-weighted luminance banding (cleans contours/flat fills for the generator). auto = none (kept as a manual opt-in for noisy sources).")
 	posterize := flag.Int("posterize", 0, "quantize each target RGB channel to N levels before fitting (0=off; ~32-96 for flat/logo to snap broad color regions to exact constants). Applied after -preprocess.")
+	lockColorFlag := flag.String("lock-color", "", "MONO logo mode: force ALL shapes to ONE colour for a flat single-colour brand logo / decal. \"\"=off; \"auto\"=the logo's dominant ink colour; \"#RRGGBB\"=an exact colour. Binarizes the target to a clean single-colour cutout (no grey antialiased-edge shapes) and snaps every output shape to that colour. Output is always a transparent-background cutout.")
 	aspect := flag.Float64("aspect", -1, "max aspect ratio for ellipse/rect candidates: minor=major/U(1,aspect) makes thin slivers along the edge orientation (traces sharp contours). -1=auto (flat 8, organic 6). <=1 = round axes.")
 	ssaa := flag.Int("ss", 1, "preview supersampling factor (1=off): render the output shapes at ss× then box-downsample for ANTI-ALIASED edges. Our raster uses hard binary coverage, so contours are 1px steps while the source images have soft ~1-2px ramps — that mismatch is where nearly all residual image-space error sits. ss=3-4 closes it. Affects the preview/comparison render only (the game rasterizes the geometry itself).")
 	gpuSearch := flag.Bool("gpu-search", true, "CUDA build only: run each shape's random-candidate phase on-device (generate+score+argmin in one launch) — the throughput unlock for high candidate volume. Ignored by the CPU backend (host path).")
@@ -79,15 +88,26 @@ func main() {
 	backfit := flag.Bool("backfit", false, "back-fitting: remove the lowest-contribution shapes and RE-GREEDY them against the completed-canvas residual (breaks the greedy plateau — each shape was optimal WHEN placed, but later shapes changed the canvas). Gated END-TO-END: polish(greedy) vs polish(backfit(greedy)), keep the winner, so it NEVER regresses. AUTO-ON for flat/logo/line + cutout (where the greedy plateau bites hardest); opt-in elsewhere since it costs ~one extra polish for a smaller gain.")
 	backfitPasses := flag.Int("backfit-passes", 2, "number of back-fitting passes (each removes+regrows -backfit-frac of the shapes); passes stop early once one stops improving")
 	backfitFrac := flag.Float64("backfit-frac", 0.1, "fraction of shapes removed+regrown per back-fitting pass (0.1 = the weakest 10%)")
+	live := flag.Int("live", 0, "EXPERIMENTAL LIVE-style component-init scheduler (0=off, REPLACES greedy when >0): add shapes in batches of this size seeded from the largest residual components (big regions first) + re-polish ALL jointly after every batch. The proven low-primitive-count win (5 paths vs 256). For the low-budget economy regime; ~6-10 batch. Use at low -shapes with -polish.")
+	liveBase := flag.Int("live-base", 0, "with -live: run the LIVE co-adaptation only for the first this-many shapes (the structural BASE), then greedy for the rest of -shapes (the detail). 0 = LIVE all the way. The two-phase economy: cheap co-adapted base frees budget for detail; affordable at full -shapes since LIVE runs only on the base.")
+	anneal := flag.Int("anneal", 0, "EXPERIMENTAL basin-hopping / iterated local search (0=off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget economy regime (50-300 shapes); ~20-40 iters. Costly (re-polishes each iter) — use only at low -shapes.")
+	economy := flag.Bool("economy", false, "opt-in to the auto economy schedule (LIVE co-adaptation / anneal at ≤~1500 shapes): better quality at low budgets but ~4x slower (re-polishes all shapes per batch). Off by default. Explicit -live/-anneal override it regardless.")
 	scoreJSON := flag.String("score-json", "", "comparison mode: render an existing geometry JSON through our backend, score it (unweighted SSE + per-pixel) vs -input, save -preview, then exit. Set -max-res to the JSON's canvas size for alignment.")
 	polishJSON := flag.String("polish-json", "", "polish-harness mode: load a saved greedy geometry JSON, run ONLY the gated joint polish on it (current -polish-* opts) against -input, save polished -output + -preview, then exit. The greedy input is FIXED, so any final-error delta is purely the polish change — an isolated harness for tuning polish (faster than a full run). Set -max-res to the JSON canvas size.")
 	imgVs := flag.String("img-vs", "", "image-space comparison: compare the -input PNG against this PNG pixel-for-pixel (must be same size), report SSE + per-pixel, save a difference heatmap to -preview, then exit. Convention-free (no rendering).")
 	imgBlur := flag.Int("img-blur", 0, "with -img-vs: box-blur the compared (-img-vs) image by this radius before diffing — tests the anti-aliasing hypothesis (does softening our hard edges match an AA target?).")
 	linear := flag.Bool("linear", true, "composite in LINEAR light — the space the editor renders in (gamma ~2.2). DEFAULT-ON (matches the studio): the engine optimises the linear composite so the in-game result matches the target and semi-transparent shapes stop 'popping'; output colours are sRGB-encoded; opaque content is unaffected. Use -linear=false for an sRGB comparison. Measure with -fh6-score.")
 	fh6Score := flag.String("fh6-score", "", "comparison mode: render a geometry JSON the way the GAME composites it (LINEAR light) and report SSE vs -input (sRGB), then exit. Measures real in-game fidelity (the semi-transparent pop). Set -max-res to the JSON canvas size; -ss for AA; saves the in-game render to -preview.")
+	stylizeMode := flag.String("stylize", "", "STYLIZER mode: run a stylizer preset (auto|anime|poster|ink) instead of the geometrize engine, writing injectable geometry to -output (+ -preview). 'auto' analyses the image's style (line-art/cel/hatched/busy) and picks the line+fill+smooth knobs per content. Uses -max-res as the working resolution and -shapes as the budget.")
+	stylizeLibrary := flag.Bool("stylize-library", false, "with -stylize: also save the result as a Studio library entry (~/FH6PaintStudio/library) so it injects from the studio's Library tab via the normal word-only path — no GUI run needed.")
+	hybridInk := flag.Int("hybrid-ink", 0, "HYBRID: after the geometrize run, lay up to N clean FDoG ink lines (stylizer) ON TOP — the optimized colour/detail fill (alive eyes) + the designed anime outline. N>0: -shapes is the fill budget, total = -shapes + N. N=-1: AUTO — split -shapes by content (photo→no lines; line-art→line-heavy 35%; cel→fill-heavy 12%; else 20%). 0=off.")
+	saveLib := flag.Bool("library", false, "save the final geometry as a Studio library entry (~/FH6PaintStudio/library) for one-click word-only in-game inject from the Library tab (works for the geometrize + hybrid path).")
+	metrics := flag.Bool("metrics", false, "print perceptual quality of the final render vs the source (ΔE76 mean/p95, SSIM, banding) — the offline quality harness; the WYSIWYG render is in-game-faithful so these correlate with the eye.")
+	perceptualLuma := flag.Bool("perceptual-luma", false, "EXPERIMENT (default off): compute WeightMapV2's luma in sRGB space so its darkness/highlight pivots land correctly in the linear pipeline. A/B only — validate by eye end-to-end (REVIEW M4).")
 	flag.Parse()
 
 	model.LinearLight = *linear
+	metric.PerceptualLuma = *perceptualLuma
 	applyPreset(*preset, randomSamples, mutated, sampleBudget, maxNoImprove)
 
 	logPath := applog.Init("fh6paint.log")
@@ -127,6 +147,13 @@ func main() {
 	// score it against the sRGB target — quantifies the semi-transparent "pop" and whether -linear fixes it.
 	if *fh6Score != "" {
 		scoreFH6(*fh6Score, *in, *maxRes, *ssaa, *preview)
+		return
+	}
+
+	// STYLIZER pipeline (the second engine): flat fills + dictionary-arc outlines written as injectable
+	// geometry. Bypasses the geometrize loading/backend entirely.
+	if *stylizeMode != "" {
+		runStylize(*stylizeMode, *in, *out, *preview, *maxRes, *shapes, *ssaa, *stylizeLibrary)
 		return
 	}
 
@@ -173,6 +200,25 @@ func main() {
 	// presets). "auto"/""/unknown -> anime.
 	resolvedMode := presetpkg.PresetMode(*mode)
 	flatMode := resolvedMode == "flat"
+	// Hybrid: generate the FDoG ink lines FIRST (from the source) so we know their ACTUAL count — then give
+	// the fill the rest of the budget, so nothing is wasted when FDoG self-limits below its ceiling.
+	// -hybrid-ink<0 = AUTO: pick the ink ceiling by content (photo→0, line-art→35%, cel→12%, else 20%) and
+	// split the -shapes total. -hybrid-ink N>0 = fixed ceiling N, added on top (total = -shapes + actual).
+	inkCeiling := *hybridInk
+	if *hybridInk < 0 {
+		inkCeiling = hybrid.AutoInkCeiling(prep, *shapes, resolvedMode)
+	}
+	var inkShapes []model.Shape
+	if inkCeiling > 0 {
+		inkShapes = hybrid.Ink(prep, inkCeiling)
+	}
+	fillBudget := *shapes
+	if *hybridInk < 0 { // auto: ink + fill share the -shapes total (no overflow, no waste)
+		fillBudget = *shapes - len(inkShapes)
+		if fillBudget < 1 {
+			fillBudget = 1
+		}
+	}
 	// All per-mode constants come from presetpkg.ModeDefaultsFor — the SINGLE source of truth shared
 	// with the studio (preset.Resolve), so the CLI and GUI can never drift. The CLI keeps its
 	// flag/userSet override plumbing; only the constant VALUES are sourced from md.
@@ -181,6 +227,20 @@ func main() {
 	// Boundary-aware radius default (md.Boundary: on anime/character, off flat/photo). -boundary overrides.
 	if !userSet["boundary"] {
 		*boundary = md.Boundary
+	}
+	// Auto-shape-count knee default (md: flat/line-art trims the white-bg ghost-facet over-fill; off for
+	// anime/photo). -shape-tol / -knee-floor override. Same source of truth as the studio (ModeDefaultsFor).
+	if !userSet["shape-tol"] {
+		*shapeTol = md.KneeTol
+	}
+	if !userSet["knee-floor"] {
+		*kneeFloor = md.KneeFloor
+	}
+	// Economy schedule (OPT-IN via -economy; same source of truth as the studio): a co-adapted LIVE base /
+	// anneal at low-mid budgets lifts quality but is ~4x slower, so it is off unless asked for. Explicit
+	// -live / -live-base / -anneal override regardless.
+	if *economy && !userSet["live"] && !userSet["live-base"] && !userSet["anneal"] {
+		*live, *liveBase, *anneal = presetpkg.EconomyParams(resolvedMode, fillBudget)
 	}
 	// Alpha + kind mix (md): organic = semi-transparent, alphaMin 0.40, triangle-rich; flat = OPAQUE,
 	// rect-rich for VECTOR logos (few colours), triangle-rich for TEXTURED flat.
@@ -271,6 +331,26 @@ func main() {
 	}
 	if *posterize >= 2 {
 		prep.Pixels = metric.Posterize(prep.Pixels, prep.W, prep.H, *posterize)
+	}
+
+	// MONO single-colour logo mode (-lock-color): binarize the target to a clean single-colour
+	// cutout so no grey antialiased-edge shapes appear, and tell the engine to snap every shape to
+	// that exact colour. Forces opaque cutout-style placement regardless of the content mode.
+	var lockColor *model.RGBA
+	// Mono only applies to the main geometrize run (it snaps the shapes Run produces). Skip it for the
+	// score-json / polish-json / gaussian modes, where it would silently binarize the target with no snap.
+	if *lockColorFlag != "" && *scoreJSON == "" && *polishJSON == "" && !*gaussian {
+		lc, ok := engine.ParseLockColor(*lockColorFlag, prep.Pixels, prep.W, prep.H, prep.HasTransparency)
+		if !ok {
+			must(fmt.Errorf("invalid -lock-color %q (use \"auto\" or \"#RRGGBB\")", *lockColorFlag))
+		}
+		engine.BinarizeForLock(prep.Pixels, prep.W, prep.H, lc, prep.HasTransparency)
+		lockColor = &lc
+		prep.HasTransparency = true // mono output is a single-colour cutout decal
+		cutout = true               // opaque, crisp-silhouette placement (useV2, no compact bias)
+		allowAlpha = false
+		applog.Printf("mono lock-colour #%02X%02X%02X — binarized target to a single-colour cutout",
+			model.EncByte(lc.R), model.EncByte(lc.G), model.EncByte(lc.B))
 	}
 
 	// Saliency map: flat/line-art/cutout default to the richer WeightMapV2 (absolute,
@@ -402,7 +482,7 @@ func main() {
 	}
 	o := engine.Options{
 		Width: prep.W, Height: prep.H, Background: prep.Background,
-		StopAt: *shapes, RandomSamples: *randomSamples, MutatedSamples: *mutated, Seed: *seed,
+		StopAt: fillBudget, RandomSamples: *randomSamples, MutatedSamples: *mutated, Seed: *seed,
 		Kinds:               presetpkg.ParseKinds(*kindsCSV),
 		KindWeights:         kindWeights,
 		TransparentBG:       prep.HasTransparency,
@@ -412,6 +492,8 @@ func main() {
 		AspectMax:           aspectMax,
 		MaxNoImprove:        *maxNoImprove,
 		ShapeKneeTol:        *shapeTol,
+		ShapeKneeFloor:      *kneeFloor,
+		MinShapeGain:        *minGain,
 		RecolorVarSkip:      *recolorVar,
 		SampleBudget:        *sampleBudget,
 		DetailStrength:      float32(*detailStrength),
@@ -439,9 +521,13 @@ func main() {
 		BackFit:           *backfit,
 		BackFitPasses:     *backfitPasses,
 		BackFitFrac:       *backfitFrac,
+		AnnealIters:       *anneal,
+		LiveBatch:         *live,
+		LiveBase:          *liveBase,
+		LockColor:         lockColor,
 		Progress: func(n int, e float64) {
 			if n%25 == 0 {
-				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, *shapes, e, time.Since(start).Seconds())
+				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, fillBudget, e, time.Since(start).Seconds())
 			}
 		},
 	}
@@ -449,6 +535,14 @@ func main() {
 	applog.Printf("done: %d shapes, error %.1f -> %.1f in %.1fs",
 		len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
 	logTimings(res.Timings)
+
+	// HYBRID: lay clean FDoG ink lines (the stylizer's designed anime outline) ON TOP of the geometrize
+	// colour/detail fill — the optimized engine renders alive eyes + smooth shading that flat cells can't,
+	// and the crisp lines give the designed look. Built from prep.Pixels so the ink shares the exact canvas.
+	if len(inkShapes) > 0 {
+		res.Shapes = append(res.Shapes, inkShapes...) // designed FDoG outline, composited ON TOP of the fill
+		applog.Printf("hybrid-ink: +%d FDoG lines on top of %d fill shapes", len(inkShapes), len(res.Shapes)-len(inkShapes)-1)
+	}
 
 	// Map a transparent-surround run back to the original size: the shapes are all inside the content
 	// rectangle, so shifting them by -padPx yields a clean origin-0 reconstruction at the original dims.
@@ -461,15 +555,103 @@ func main() {
 
 	must(ensureDir(*out))
 	must(imageio.WriteGeometry(*out, model.Geometry{Shapes: res.Shapes}))
+	var canvas []float32
+	if *preview != "" || *saveLib || *metrics {
+		// WYSIWYG render: the way the GAME composites — LINEAR light — so semi-transparent shapes show
+		// their TRUE in-game appearance instead of an sRGB-blend preview that under-states the "pop". For
+		// opaque content this equals a plain preview (no blending). ss>1 supersamples for anti-aliased edges.
+		canvas = imageio.RenderFH6(res.Shapes, prep.HasTransparency, outW, outH, *ssaa)
+	}
+	if *metrics && padPx == 0 && outW == prep.W && outH == prep.H {
+		// canvas (RenderFH6) is sRGB; prep.Pixels is LINEAR in -linear mode — encode it to sRGB so the
+		// perceptual metrics (which expect sRGB) compare like-for-like.
+		srcSRGB := imageio.EncodeForDisplay(prep.Pixels)
+		de, p95 := metric.DeltaE76(srcSRGB, canvas, outW, outH)
+		ss := metric.SSIM(srcSRGB, canvas, outW, outH)
+		band := metric.FalseEdges(srcSRGB, canvas, outW, outH, 0.02)
+		fmt.Printf("[metrics] shapes=%d ΔE76 mean=%.2f p95=%.2f  SSIM=%.4f  band=%.2f\n", len(res.Shapes)-1, de, p95, ss, band)
+	}
 	if *preview != "" {
 		must(ensureDir(*preview))
-		// WYSIWYG preview: render the way the GAME composites — LINEAR light — so semi-transparent
-		// shapes show their TRUE in-game appearance instead of an sRGB-blend preview that under-states
-		// the "pop". For opaque content this equals a plain preview (no blending). ss>1 supersamples
-		// for anti-aliased edges.
-		canvas := imageio.RenderFH6(res.Shapes, prep.HasTransparency, outW, outH, *ssaa)
 		must(imageio.SavePreview(*preview, canvas, outW, outH))
 		applog.Printf("wrote WYSIWYG preview %s (ssaa=%d, linear-light composite)", *preview, *ssaa)
 	}
+	if *saveLib {
+		root, rerr := library.DefaultRoot()
+		must(rerr)
+		st := library.Open(root)
+		name := strings.TrimSuffix(filepath.Base(*in), filepath.Ext(*in))
+		preset := *mode
+		if len(inkShapes) > 0 {
+			preset = "hybrid"
+		}
+		ent, serr := st.Save(res.Shapes, floatToNRGBA(canvas, outW, outH), library.Entry{
+			Name: name, Source: *in, Preset: preset, Width: outW, Height: outH,
+			Budget: len(res.Shapes) - 1, InjectScale: 1.0, Created: time.Now(),
+		})
+		must(serr)
+		applog.Printf("library: saved %q -> %s (inject from the studio Library tab)", ent.ID, st.Dir(ent.ID))
+		fmt.Printf("library: saved %q (inject from the studio Library tab)\n", ent.ID)
+	}
 	applog.Printf("wrote %s", *out)
+}
+
+// runStylize runs a stylizer preset and writes injectable geometry (+ optional preview) — the second
+// pipeline's CLI entry. Coordinates are at the working resolution (src.W×src.H), so inject at that
+// canvas size (printed below).
+func runStylize(preset, in, out, preview string, maxRes, budget, ss int, lib bool) {
+	src, err := stylize.Load(in, maxRes)
+	must(err)
+	geo, err := stylize.Run(src, preset, budget)
+	must(err)
+	must(ensureDir(out))
+	must(imageio.WriteGeometry(out, geo))
+	msg := fmt.Sprintf("stylize: preset=%s %dx%d %d shapes -> %s (inject at canvas %dx%d)",
+		preset, src.W, src.H, len(geo.Shapes)-1, out, src.W, src.H)
+	applog.Printf("%s", msg)
+	fmt.Println(msg)
+
+	var canvas []float32
+	if preview != "" || lib {
+		canvas = imageio.RenderFH6(geo.Shapes, false, src.W, src.H, ss)
+	}
+	if preview != "" {
+		must(ensureDir(preview))
+		must(imageio.SavePreview(preview, canvas, src.W, src.H))
+	}
+	if lib {
+		root, rerr := library.DefaultRoot()
+		must(rerr)
+		st := library.Open(root)
+		name := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
+		ent, serr := st.Save(geo.Shapes, floatToNRGBA(canvas, src.W, src.H), library.Entry{
+			Name: name, Source: in, Preset: preset, Width: src.W, Height: src.H,
+			Budget: budget, InjectScale: 1.0, Created: time.Now(),
+		})
+		must(serr)
+		m := fmt.Sprintf("library: saved %q -> %s (inject it from the studio Library tab)", ent.ID, st.Dir(ent.ID))
+		applog.Printf("%s", m)
+		fmt.Println(m)
+	}
+}
+
+// floatToNRGBA packs a sRGB float canvas (RenderFH6 output) into an *image.NRGBA for the library.
+func floatToNRGBA(buf []float32, w, h int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	cl := func(v float32) uint8 {
+		if v < 0 {
+			v = 0
+		}
+		if v > 1 {
+			v = 1
+		}
+		return uint8(v*255 + 0.5)
+	}
+	for i := 0; i < w*h; i++ {
+		img.Pix[i*4+0] = cl(buf[i*4+0])
+		img.Pix[i*4+1] = cl(buf[i*4+1])
+		img.Pix[i*4+2] = cl(buf[i*4+2])
+		img.Pix[i*4+3] = cl(buf[i*4+3])
+	}
+	return img
 }

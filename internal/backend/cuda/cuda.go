@@ -1,4 +1,4 @@
-//go:build cuda
+//go:build cuda || allgpu
 
 // Package cuda is the GPU backend: a second implementation of backend.Backend
 // that mirrors the CPU reference (internal/backend/cpu). It drives fh6cuda.dll
@@ -51,6 +51,7 @@ type CUDA struct {
 	procReset      *windows.Proc
 	procFree       *windows.Proc
 	procSampleBud  *windows.Proc // optional: fp_set_sample_budget (nil on older DLLs)
+	procLastError  *windows.Proc // optional: fp_last_error (surface a device fault; nil on older DLLs)
 	procWarpEval   *windows.Proc // optional: fp_set_warp_eval
 	procGradients  *windows.Proc // optional: fp_set_gradients (route gradient kinds to the block eval kernel)
 	procCoarse     *windows.Proc // optional: fp_set_coarse (coarse-to-fine search)
@@ -112,6 +113,9 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	// SetSampleBudget is a no-op and scoring uses the kernel's built-in 4000 default.
 	if p, perr := dll.FindProc("fp_set_sample_budget"); perr == nil {
 		g.procSampleBud = p
+	}
+	if p, perr := dll.FindProc("fp_last_error"); perr == nil {
+		g.procLastError = p
 	}
 	// On-device search exports (build "B1"). Optional-resolved so a DLL built before
 	// them still loads; the engine falls back to the host gen/pick path if absent.
@@ -181,6 +185,12 @@ func (g *CUDA) Evaluate(cands []model.Candidate) ([]backend.EvalResult, error) {
 		}
 		g.evalChunk(cands[lo:hi], out[lo:hi])
 	}
+	// Surface a device fault (kernel launch/exec error) instead of returning silently-garbage scores.
+	if g.procLastError != nil {
+		if r, _, _ := g.procLastError.Call(); r != 0 {
+			return out, fmt.Errorf("cuda Evaluate: device error %d (kernel launch/exec fault)", r)
+		}
+	}
 	return out, nil
 }
 
@@ -201,6 +211,14 @@ func (g *CUDA) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
+		// The CUDA kernel has no mask geometry (task #74): its inside/bbox switches fall through to
+		// ELLIPSE for kind >= KindMaskBase, so it would silently mis-score a mask as an ellipse and
+		// could pick it. Reject mask candidates here (fail-loud, never selected) until the real kernel
+		// + golden-diff case land. The on-device generator never emits masks, so this is currently inert.
+		if cands[i].Kind >= model.KindMaskBase {
+			out[i] = backend.EvalResult{Score: maskRejected}
+			continue
+		}
 		b := g.outBuf[i*resStride:]
 		out[i] = backend.EvalResult{
 			Score: b[0],
@@ -208,6 +226,10 @@ func (g *CUDA) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 		}
 	}
 }
+
+// maskRejected is a large positive ΔSSE sentinel: a mask candidate can never be the
+// per-shape argmin (the engine only accepts a score < 0), so it is effectively dropped.
+const maskRejected = float32(3.0e38)
 
 func (g *CUDA) Apply(c model.Candidate) error {
 	if cap(g.candBuf) < candStride {
@@ -228,12 +250,18 @@ func (g *CUDA) ErrorGrid() ([]float32, int, int, error) {
 }
 
 func (g *CUDA) ReadCanvas(dst []float32) error {
+	if need := g.w * g.h * 4; len(dst) < need {
+		return fmt.Errorf("cuda ReadCanvas: dst len %d < %d (the DLL writes %dx%dx4 floats)", len(dst), need, g.w, g.h)
+	}
 	g.procReadCanv.Call(fptr(dst))
 	runtime.KeepAlive(dst)
 	return nil
 }
 
 func (g *CUDA) Reset(canvas []float32) error {
+	if need := g.w * g.h * 4; len(canvas) < need {
+		return fmt.Errorf("cuda Reset: canvas len %d < %d (the DLL reads %dx%dx4 floats)", len(canvas), need, g.w, g.h)
+	}
 	g.procReset.Call(fptr(canvas))
 	runtime.KeepAlive(canvas)
 	return nil

@@ -273,19 +273,49 @@ func (s *AppState) emptyStateOpen(gtx C) D {
 				return D{Size: sz}
 			}),
 			layout.Stacked(func(gtx C) D {
-				gtx.Constraints.Min.X = gtx.Dp(300)
+				gtx.Constraints.Min.X = gtx.Dp(320)
 				return layout.UniformInset(30).Layout(gtx, func(gtx C) D {
 					return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 34, "+", th.Accent) }),
-						layout.Rigid(GapV(6).Layout),
-						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 15, "Open an image", th.Text) }),
+						layout.Rigid(GapV(8).Layout),
+						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, "Open an image", th.Text) }),
 						layout.Rigid(GapV(4).Layout),
-						layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Click here to choose a file") }),
+						layout.Rigid(func(gtx C) D { return th.Dim(gtx, "turn any photo or drawing into FH6 vinyl shapes") }),
+						layout.Rigid(GapV(18).Layout),
+						layout.Rigid(s.miniStep("1", "Open your image")),
+						layout.Rigid(GapV(8).Layout),
+						layout.Rigid(s.miniStep("2", "Pick a style on the left")),
+						layout.Rigid(GapV(8).Layout),
+						layout.Rigid(s.miniStep("3", "Hit Generate")),
 					)
 				})
 			}),
 		)
 	})
+}
+
+// miniStep is one row of the empty-state roadmap: a small accent number chip + a dim label.
+func (s *AppState) miniStep(num, text string) layout.Widget {
+	th := s.Th
+	return func(gtx C) D {
+		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx C) D {
+				return layout.Background{}.Layout(gtx,
+					func(gtx C) D {
+						fillRRect(gtx, th.SurfaceHi, gtx.Constraints.Min, 4)
+						return D{Size: gtx.Constraints.Min}
+					},
+					func(gtx C) D {
+						return layout.Inset{Top: 1, Bottom: 1, Left: 6, Right: 6}.Layout(gtx, func(gtx C) D {
+							return th.Lbl(gtx, 12, num, th.Accent)
+						})
+					},
+				)
+			}),
+			layout.Rigid(GapH(8).Layout),
+			layout.Rigid(func(gtx C) D { return th.Dim(gtx, text) }),
+		)
+	}
 }
 
 // cropBar is the crop toolbar under the preview. State-dependent: while editing a selection it shows

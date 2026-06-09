@@ -13,6 +13,11 @@ import (
 	"fh6-paint-studio/internal/preset"
 )
 
+// BackendPreference biases newBackend toward a named GPU backend ("CUDA"/"Vulkan") on allgpu builds
+// where both are compiled in. Empty = the build's default order (CUDA first). Single-backend builds
+// ignore it. Set by the studio's engine picker.
+var BackendPreference string
+
 // RunAsync builds the backend from the resolved run config and runs engine.Run in a worker
 // goroutine. onEvent is called FROM THAT GOROUTINE for every event (Log/Progress/Frame and a
 // terminal Done/Failed) — the UI is responsible for marshalling these onto its own loop
@@ -32,7 +37,15 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		w, h := prep.W, prep.H
 		onEvent(Log{Line: fmt.Sprintf("loaded image %dx%d", w, h)})
 
-		be, name, err := newBackend(prep.Pixels, r.Weight, w, h, r.Grid)
+		// Resolve already produced the exact target the backend should fit (the loaded pixels, or — for
+		// MONO mode — a binarized single-colour copy that never mutates the shared source). Reuse it so
+		// the target is binarized ONCE, never twice.
+		target := r.Target
+		if target == nil {
+			target = prep.Pixels
+		}
+
+		be, name, err := newBackend(target, r.Weight, w, h, r.Grid)
 		if err != nil {
 			onEvent(Failed{Err: err})
 			return

@@ -6,7 +6,7 @@ import (
 	"fh6-paint-studio/internal/model"
 )
 
-const deg2rad = math.Pi / 180 // degrees -> radians conversion factor
+const deg2rad = math.Pi / 180
 
 func clampI(v, lo, hi int) int {
 	if v < lo {
@@ -57,6 +57,14 @@ func Inside(kind model.ShapeKind, p [6]float32, x, y int) bool {
 	case model.KindLine:
 		return LineInside(p, x, y)
 	default:
+		if model.IsMask(kind) {
+			// Soft coverage has no binary edge; treat ≥half-covered pixels as inside (membership only —
+			// the real per-pixel alpha is in Coverage).
+			if m := maskByKind(kind); m != nil {
+				return maskCoverage(m, p, x, y) >= 0.5
+			}
+			return false
+		}
 		// Ellipse + the radial gradients (KindGlow/KindDisk) share the elliptical footprint; their
 		// per-pixel falloff is in Coverage, but Inside (footprint membership) is the ellipse test.
 		return EllipseInside(p, x, y)
@@ -73,6 +81,9 @@ func BBox(kind model.ShapeKind, p [6]float32, w, h int) (xMin, yMin, xMax, yMax 
 	case model.KindLine:
 		return LineBBox(p, w, h)
 	default:
+		if model.IsMask(kind) {
+			return maskBBox(p, w, h)
+		}
 		return EllipseBBox(p, w, h)
 	}
 }

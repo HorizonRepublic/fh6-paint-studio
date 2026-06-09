@@ -37,6 +37,7 @@ const (
 // RunStats is the live telemetry shown in the run panel.
 type RunStats struct {
 	Shapes, Total int
+	Cap           int // the shape budget the user REQUESTED (the slider). The auto-knee may finish below it; Shapes < Cap then means the app auto-picked the optimal count.
 	Err, Err0     float64
 	Elapsed, ETA  time.Duration
 	History       []float64 // error per progress tick, for the sparkline
@@ -51,9 +52,6 @@ type RunStats struct {
 }
 
 // UpdateETA refreshes ETA from a recent-rate EMA of seconds/shape, called once per progress tick.
-// The per-shape cost is heavily front-loaded (big early shapes are far slower than late detail), so
-// a linear elapsed/frac estimate overestimates early; the EMA tracks the speed-up onto cheap late
-// shapes, so the displayed estimate falls realistically instead of staying inflated.
 func (s *RunStats) UpdateETA(shapes, total int, elapsed time.Duration) {
 	if shapes > s.etaLastShapes {
 		dt := (elapsed - s.etaLastElapsed).Seconds()
@@ -82,14 +80,15 @@ type UpdateInfo struct {
 	URL     string
 }
 
-// AppState holds every widget state plus the loaded image and run telemetry. The panel
-// Layout methods read and mutate it; the main loop feeds runner events into it.
+// AppState holds every widget state plus the loaded image and run telemetry. The panel Layout methods
+// read and mutate it; the main loop feeds runner events into it.
 type AppState struct {
 	Th *Theme
 
 	// app identity (set by main)
 	Version      string
 	BackendLabel string
+	Backend      *Dropdown // engine picker (CUDA/Vulkan); nil when only one backend works (no choice to make)
 
 	// loaded image
 	ImgPath   string
@@ -101,26 +100,49 @@ type AppState struct {
 	// run
 	Phase Phase
 	Stats RunStats
-	Log   []string
+	Log   []LogEntry
 	Toast string
+
+	// activity console (shared bottom drawer): a one-line status strip, expandable to the full feed.
+	ConsoleOpen     bool
+	ConsoleToggle   widget.Clickable
+	OpenLogBtn      widget.Clickable // "Open log" affordance shown in the Activity error state
+	LogFilterErrors bool             // console feed shows only warnings + errors
+	LogClearBtn     widget.Clickable
+	LogCopyBtn      widget.Clickable
+	LogFilterBtn    widget.Clickable
+
+	// Quality is the perceptual score of the last finished generation (shown as a friendly badge).
+	Quality QualityInfo
 
 	// settings widgets
 	Budget     widget.Float
 	BudgetEd   widget.Editor // manual shape-count entry, two-way synced with Budget
 	lastBudget int
 	Mode       *Dropdown
-	Alpha      widget.Bool
-	Backfit    widget.Bool
-	Boundary   widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
-	KeepInside widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
-	Seed       widget.Editor
+	InkRatio   widget.Float // hybrid Artist knob: fraction of the budget for FDoG ink lines (slider 0..1 -> ratio 0..MaxInkRatio); the rest is the geometrize fill
+
+	// step-1 preset picker: the built-in modes and the saved presets are rendered as selectable cards
+	// (recognition over a text dropdown). Click targets parallel builtinCards / Presets respectively.
+	BuiltinCards []widget.Clickable
+	PresetCards  []widget.Clickable
+	Alpha        widget.Bool
+	Backfit      widget.Bool
+	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
+	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	Mono         widget.Bool // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
+	Economy      widget.Bool // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
+	Seed         widget.Editor
 
 	AlphaHint      Hint
 	BackfitHint    Hint
 	BoundaryHint   Hint
 	KeepInsideHint Hint
+	MonoHint       Hint
+	EconomyHint    Hint
 	BudgetHint     Hint
 	ModeHint       Hint
+	InkHint        Hint
 	SeedHint       Hint
 
 	// advanced
@@ -192,17 +214,24 @@ type AppState struct {
 	ExpGroups       [4]expertGroup // collapse state of the expert sub-sections
 
 	// actions
-	OpenBtn         widget.Clickable
-	PreviewOpen     widget.Clickable // the empty-state preview area doubles as an Open button
-	GenBtn          widget.Clickable
-	CancelBtn       widget.Clickable
-	InjectLayers    widget.Editor // exact FH6 template layer count for injection (library inject controls)
-	InjectLayersErr bool          // the FH6-layers field was empty/invalid on an Inject click — draw it red until a valid count is entered
-	InjectScale     widget.Editor // uniform scale of the injected art on the decal (1.0 = fit the canvas; <1 shrinks toward centre so it fits a zoomed-in editor view)
-	ElevateBtn      widget.Clickable
-	Elevated        bool        // process is running as administrator (set by main at startup)
-	Shield          image.Image // system UAC shield icon (nil if unavailable)
-	ShieldOp        paint.ImageOp
+	OpenBtn          widget.Clickable
+	PreviewOpen      widget.Clickable // the empty-state preview area doubles as an Open button
+	Recent           []string         // recently opened image paths (newest first); rendered in the Source card
+	RecentBtns       []widget.Clickable
+	escTag           int // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
+	lightboxTag      int // pointer tag for the lightbox scrim — captures clicks so they dismiss it (and don't fall through to the gallery thumbs behind)
+	GenBtn           widget.Clickable
+	CancelBtn        widget.Clickable
+	InjectLayers     widget.Editor // exact FH6 template layer count for injection (library inject controls)
+	InjectLayersErr  bool          // the FH6-layers field was empty/invalid on an Inject click — draw it red until a valid count is entered
+	InjectScale      widget.Editor // uniform scale of the injected art on the decal (1.0 = fit the canvas; <1 shrinks toward centre so it fits a zoomed-in editor view)
+	InjectHint       Hint          // explains the FH6-template-layers field (the inject footgun)
+	InjectGuideClick widget.Clickable
+	InjectGuideOpen  bool // the "How injecting works" steps are expanded
+	ElevateBtn       widget.Clickable
+	Elevated         bool        // process is running as administrator (set by main at startup)
+	Shield           image.Image // system UAC shield icon (nil if unavailable)
+	ShieldOp         paint.ImageOp
 
 	// preview interaction
 	Wipe        widget.Float
@@ -285,7 +314,7 @@ func NewAppState(th *Theme) *AppState {
 		// niche "gaussian" mode (soft-glow reconstruction for SMOOTH / gradient / painterly content —
 		// 8x better than greedy on a gradient, loses on fine detail; no greedy, trains on the GPU).
 		// Default = anime, the best general-purpose preset.
-		Mode: NewDropdown([]string{"anime", "photo", "flat", "gaussian"}, 0),
+		Mode: NewDropdown([]string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}, 0),
 	}
 	s.Budget.Value = shapesToFrac(1000)
 	s.BudgetEd.SingleLine = true
@@ -295,6 +324,8 @@ func NewAppState(th *Theme) *AppState {
 	s.SoundOn.Value = true    // chime on finish by default (overridden by the saved preference)
 	s.Seed.SingleLine = true
 	s.Seed.SetText("1")
+	s.InkRatio.Value = ratioToSlider(preset.DefaultInkRatio("anime-ink")) // sane start; reseeded when a hybrid preset is picked
+	s.BuiltinCards = make([]widget.Clickable, len(builtinCards))
 	s.RandomEd.SingleLine = true
 	s.MutatedEd.SingleLine = true
 	s.SampleEd.SingleLine = true
@@ -332,6 +363,19 @@ func NewAppState(th *Theme) *AppState {
 	s.baseMode = s.Mode.Value()
 	s.applyModeKnobs() // fill the expert knobs with the default mode's concrete values
 	return s
+}
+
+// SetBackends configures the engine label and, when more than one backend works on this machine, a
+// picker dropdown (CUDA/Vulkan). opts[0] is the default/preferred. With a single backend there is no
+// choice to make, so no dropdown is created and the label shows it statically.
+func (s *AppState) SetBackends(opts []string) {
+	if len(opts) == 0 {
+		opts = []string{"CPU"}
+	}
+	s.BackendLabel = "shape engine · " + opts[0]
+	if len(opts) > 1 {
+		s.Backend = NewDropdown(opts, 0)
+	}
 }
 
 // crop drag kinds (cropDragKind): cropHandle0+i selects handle i (0..7 = NW,N,NE,E,SE,S,SW,W).
@@ -404,6 +448,14 @@ func (s *AppState) FinishInject(id string, ok bool, until time.Time) {
 // InjectBusy reports whether any injection is currently in flight (used to block re-entry).
 func (s *AppState) InjectBusy() bool { return s.InjectingID != "" }
 
+// InjectLayersValue is the FH6 template layer count entered in the Library header (0 = unset/invalid).
+func (s *AppState) InjectLayersValue() int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s.InjectLayers.Text())); err == nil && v > 0 {
+		return v
+	}
+	return 0
+}
+
 // MaybeClearInjectResult drops the lingering tick/cross pill once its display window has elapsed.
 func (s *AppState) MaybeClearInjectResult(now time.Time) {
 	if s.InjectResultID != "" && !s.InjectResultUntil.IsZero() && now.After(s.InjectResultUntil) {
@@ -448,9 +500,19 @@ func (s *AppState) SetPreview(img *image.NRGBA) {
 	s.PreviewOp = paint.NewImageOp(img)
 }
 
-// AppendLog adds a line to the execution log (capped to the last 600 lines).
-func (s *AppState) AppendLog(line string) {
-	s.Log = append(s.Log, line)
+// SetRecent stores the recently-opened image paths (newest first) and rebuilds their click targets.
+func (s *AppState) SetRecent(paths []string) {
+	s.Recent = paths
+	s.RecentBtns = make([]widget.Clickable, len(paths))
+}
+
+// AppendLog adds a line to the activity feed, inferring its severity from the text (capped to 600).
+func (s *AppState) AppendLog(line string) { s.AppendLogLvl(classifyLog(line), line) }
+
+// AppendLogLvl adds a line with an explicit severity (used for the messages that matter most — phase
+// transitions, inject — where content-based classification would be ambiguous).
+func (s *AppState) AppendLogLvl(level LogLevel, line string) {
+	s.Log = append(s.Log, LogEntry{Time: time.Now(), Level: level, Text: line})
 	if len(s.Log) > 600 {
 		s.Log = s.Log[len(s.Log)-600:]
 	}
@@ -488,6 +550,26 @@ func (s *AppState) syncBudget() {
 // SetBudgetShapes positions the budget slider at a given shape count.
 func (s *AppState) SetBudgetShapes(n int) { s.Budget.Value = shapesToFrac(n) }
 
+// InkRatioValue is the current Artist Lines<->Fill split (fraction of budget for ink, 0..MaxInkRatio).
+func (s *AppState) InkRatioValue() float64 { return sliderToRatio(s.InkRatio.Value) }
+
+// SetInkRatio positions the Artist slider at a given ink fraction (clamped to [0, MaxInkRatio]).
+func (s *AppState) SetInkRatio(r float64) { s.InkRatio.Value = ratioToSlider(r) }
+
+// sliderToRatio / ratioToSlider map the Artist slider (0..1) to the ink fraction (0..MaxInkRatio).
+func sliderToRatio(f float32) float64 { return float64(f) * preset.MaxInkRatio }
+
+func ratioToSlider(r float64) float32 {
+	s := float32(r / preset.MaxInkRatio)
+	if s < 0 {
+		s = 0
+	}
+	if s > 1 {
+		s = 1
+	}
+	return s
+}
+
 // RestoreBudget sets the budget from a saved/clamped count, keeping the slider, the manual entry, and
 // the internal sync baseline in agreement so syncBudget does not fight the restore on the first frame.
 func (s *AppState) RestoreBudget(n int) {
@@ -508,11 +590,18 @@ func (s *AppState) RestoreBudget(n int) {
 func (s *AppState) Choices() preset.Choices {
 	c := preset.DefaultChoices()
 	c.Shapes = s.BudgetShapes()
-	c.Mode = s.baseMode   // the engine mode; the dropdown may show a custom preset name instead
-	c.Quality = "quality" // the high-quality knee; expert overrides this and every knob below
+	c.InkRatio = s.InkRatioValue() // the Artist Lines<->Fill split (used only for hybrid modes); non-expert, always set
+	c.Mode = s.baseMode            // the engine mode; the dropdown may show a custom preset name instead
+	c.Quality = "quality"          // the high-quality knee; expert overrides this and every knob below
 	if v, err := strconv.ParseInt(strings.TrimSpace(s.Seed.Text()), 10, 64); err == nil {
 		c.Seed = v
 	}
+	// MONO single-colour logo/decal — a curated toggle (works in any mode; preset.Resolve forces the
+	// flat single-colour cutout). "auto" picks the logo's dominant ink colour.
+	if s.Mono.Value {
+		c.MonoColor = "auto"
+	}
+	c.Economy = s.Economy.Value // opt-in low-budget co-adaptation (slow); curated toggle, applied in both modes
 	if !s.Expert.Value {
 		return c
 	}
@@ -577,8 +666,12 @@ func (s *AppState) Choices() preset.Choices {
 func (s *AppState) ApplyChoices(c preset.Choices) {
 	s.baseMode = c.Mode
 	s.RestoreBudget(c.Shapes)
+	s.SetInkRatio(c.InkRatio)
+	s.Mono.Value = c.MonoColor != ""
+	s.Economy.Value = c.Economy
 	s.Seed.SetText(strconv.FormatInt(c.Seed, 10))
 	s.Expert.Value = true
+	s.AdvOpen = true // a saved preset is a full snapshot — open Advanced so its loaded knobs are visible
 	s.applyKnobs(c)
 }
 
@@ -606,11 +699,14 @@ func (s *AppState) applySelectedMode() {
 	}
 	s.baseMode = v
 	s.applyModeKnobs()
+	if preset.IsHybridMode(v) { // seed the Artist Lines<->Fill slider from the preset's default split
+		s.SetInkRatio(preset.DefaultInkRatio(v))
+	}
 }
 
 func IsBuiltinMode(m string) bool {
 	switch m {
-	case "anime", "photo", "flat", "gaussian":
+	case "anime", "photo", "flat", "lineart", "anime-ink", "gaussian":
 		return true
 	}
 	return false
@@ -627,7 +723,8 @@ func (s *AppState) SelectPreset(value string) {
 // followed by the preset names), preserving the current selection where possible.
 func (s *AppState) SetPresets(ps []userpreset.Preset) {
 	s.Presets = ps
-	builtin := []string{"anime", "photo", "flat", "gaussian"}
+	s.PresetCards = make([]widget.Clickable, len(ps))
+	builtin := []string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}
 	opts := append([]string{}, builtin...)
 	for i := range ps {
 		opts = append(opts, ps[i].Name)

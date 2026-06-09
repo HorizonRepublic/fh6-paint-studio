@@ -19,6 +19,7 @@ func postPasses() []pass {
 		backfitPolishPass{},
 		backfitPass{},
 		polishPass{},
+		annealPass{},
 		standoutPass{},
 	}
 }
@@ -88,6 +89,20 @@ func (polishPass) enabled(opt Options) bool { return opt.Polish && !opt.BackFit 
 func (polishPass) apply(r *run) {
 	r.setStatus("Polishing…")
 	r.shapes, r.finalErr = applyPolish(r.be, r.shapes, r.finalErr, r.initCanvas, r.opt, r.w, r.h, &r.tm)
+}
+
+// annealPass is the EXPERIMENTAL basin-hopping / iterated-local-search pass (opt-in via AnnealIters>0):
+// it wraps the polished result in an outer kick + re-polish + Metropolis-accept loop to escape the greedy
+// local minimum, keeping the best. For the low-budget "economy" regime. Runs AFTER the polish trio so it
+// starts from a fully-polished optimum.
+type annealPass struct{}
+
+func (annealPass) enabled(opt Options) bool { return opt.AnnealIters > 0 }
+
+func (annealPass) apply(r *run) {
+	r.setStatus("Annealing…")
+	r.shapes, r.finalErr = anneal(r.be, r.newBackfitEnv(), r.shapes, r.finalErr,
+		r.initCanvas, r.be.Target(), r.be.Weight(), r.opt, r.w, r.h, &r.tm, r.rng)
 }
 
 // standoutPass is the final perceptual pass: suppress standout shapes whose rim draws an edge the

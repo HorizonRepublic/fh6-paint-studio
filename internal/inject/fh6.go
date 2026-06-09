@@ -38,7 +38,23 @@ func (f *FH6) Inject(shapes []model.Shape, w, h int) error {
 	if f.Canvas != nil {
 		cm = *f.Canvas
 	}
-	return f.run(shapes, cm)
+	return f.run(dropInvisible(shapes), cm)
+}
+
+// dropInvisible removes fully-transparent shapes (alpha byte 0). The editor's transparency floor
+// (~0.78%, see fh6Alpha) would otherwise render an alpha-0 shape as a faint grey haze: a cutout /
+// transparent-background reconstruction's BACKGROUND rectangle is alpha 0 and meant to be invisible, so
+// injecting it draws a grey box around the logo (reported in-game). Opaque backgrounds (alpha 255) and
+// every semi-transparent shape (alpha ≥ alphaMin·255) are kept — only the truly invisible bg is dropped.
+func dropInvisible(shapes []model.Shape) []model.Shape {
+	out := make([]model.Shape, 0, len(shapes))
+	for _, s := range shapes {
+		if len(s.Color) >= 4 && s.Color[3] == 0 {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // Locate finds the FH6 process and the live layer table for the configured layer count WITHOUT
@@ -112,8 +128,9 @@ type CalibLayer struct {
 	Slot     int        `json:"slot"`
 	WantWord uint16     `json:"word"`              // expected current word at the slot (safety gate; 0 = skip the check)
 	Pos      [2]float32 `json:"pos"`               // editor units (origin = canvas centre, +X right, +Y up)
-	Scale    [2]float32 `json:"scale"`             // scale multipliers (circle at 1.0 ≈ radius 80 editor units)
+	Scale    [2]float32 `json:"scale"`             // scale multipliers (circle word 0x66 at 1.0 = radius 64 = ScaleBase; measured 2026-06-04)
 	Rot      float32    `json:"rot"`               // degrees
+	Skew     float32    `json:"skew,omitempty"`    // shear, offset 0x70 (degrees); the 6th transform DOF
 	Color    [4]byte    `json:"color"`             // base colour RGBA (the falloff lives in the mesh, not here)
 	SetWord  uint16     `json:"setword,omitempty"` // if non-zero, ALSO write this shape-word (mesh re-derives only on save+reload). NEVER the resource (0xA8).
 }

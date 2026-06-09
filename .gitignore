@@ -3,6 +3,8 @@
 /bin-temp/
 /release/
 /dist/
+# Portable Vulkan toolchain (glslang + headers + volk + VMA), fetched locally, not published
+/third_party/vulkan/
 cmd/studio/rsrc_windows_amd64.syso
 *.exe
 *.exe~

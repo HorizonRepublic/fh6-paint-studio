@@ -5,39 +5,9 @@ import (
 	"image"
 
 	"gioui.org/layout"
-	"gioui.org/op/clip"
-	"gioui.org/op/paint"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 )
-
-// statusBar is the bottom bar: status text on the left, Export + Inject on the right.
-func (s *AppState) statusBar(gtx C) D {
-	th := s.Th
-	return layout.Background{}.Layout(gtx,
-		func(gtx C) D {
-			sz := gtx.Constraints.Min
-			paint.FillShape(gtx.Ops, th.Surface, clip.Rect{Max: sz}.Op())
-			paint.FillShape(gtx.Ops, th.Border, clip.Rect{Max: image.Pt(sz.X, 1)}.Op())
-			return D{Size: sz}
-		},
-		func(gtx C) D {
-			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return layout.UniformInset(10).Layout(gtx, func(gtx C) D {
-				// Inject / Export / FH6-layers moved into the Library tab; admin moved to the top bar.
-				// The status bar = the status line + the (persisted) "sound on finish" preference.
-				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-					layout.Flexed(1, func(gtx C) D { return th.Dim(gtx, s.statusText()) }),
-					layout.Rigid(func(gtx C) D {
-						cb := material.CheckBox(th.M, &s.SoundOn, "Sound on finish")
-						cb.Color, cb.IconColor, cb.TextSize = th.TextDim, th.Accent, 13
-						return cb.Layout(gtx)
-					}),
-				)
-			})
-		},
-	)
-}
 
 // adminButton is the UAC indicator shown when the app is not elevated; clicking it relaunches
 // the app as administrator (handled in the main loop). FH6 memory injection usually needs admin.

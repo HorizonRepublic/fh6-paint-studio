@@ -134,7 +134,9 @@ func (t *taskbar) set(completed, total uint64) {
 	}
 }
 
-// indeterminate / clear are rare state changes — sent reliably (the worker drains fast).
+// indeterminate / clear are rare state changes (the worker drains fast). Sent non-blocking like
+// set() so a stalled COM call under a Status burst can never block the Gio event loop — a dropped
+// marquee toggle is harmless and the next state change self-corrects.
 func (t *taskbar) indeterminate() { t.send(tbCmd{state: tbpfIndeterminate}) }
 func (t *taskbar) clear()         { t.send(tbCmd{state: tbpfNoProgress}) }
 
@@ -142,7 +144,10 @@ func (t *taskbar) send(c tbCmd) {
 	if t == nil {
 		return
 	}
-	t.cmds <- c
+	select {
+	case t.cmds <- c:
+	default:
+	}
 }
 
 func (t *taskbar) close() {

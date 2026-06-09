@@ -1,0 +1,97 @@
+#version 450
+// apply.comp — Vulkan port of shim.cu applyKernel / cpu.Apply. Composites one shape
+// onto the device canvas at full coverage (step 1, exact). Dispatched with enough
+// workgroups that #threads >= image area, so each covered pixel is written exactly
+// once (race-free, no atomics). Geometry mirrors eval.comp's float32 inside test.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Canvas { float canvasb[]; };
+
+layout(push_constant) uniform PC {
+    int kind;
+    float p0, p1, p2, p3, p4, p5;
+    float cr, cg, cb, ca;
+    int W, H;
+} pc;
+
+const float DEG2RAD = 0.017453292519943295;
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+bool insideShape(int kind, float P[6], int x, int y) {
+    float px = float(x) + 0.5;
+    float py = float(y) + 0.5;
+    if (kind == 2) {
+        float d1 = (px - P[4]) * (P[1] - P[5]) - (P[0] - P[4]) * (py - P[5]);
+        float d2 = (px - P[0]) * (P[3] - P[1]) - (P[2] - P[0]) * (py - P[1]);
+        float d3 = (px - P[2]) * (P[5] - P[3]) - (P[4] - P[2]) * (py - P[3]);
+        bool hasNeg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        bool hasPos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        return !(hasNeg && hasPos);
+    } else if (kind == 3) {
+        float x1 = P[0], y1 = P[1], x2 = P[2], y2 = P[3], hwid = max(0.5, P[4]);
+        float dx = x2 - x1, dy = y2 - y1, l2 = dx * dx + dy * dy, t = 0.0;
+        if (l2 > 0.0) { t = ((px - x1) * dx + (py - y1) * dy) / l2; t = clamp(t, 0.0, 1.0); }
+        float projX = x1 + t * dx, projY = y1 + t * dy;
+        float ddx = px - projX, ddy = py - projY;
+        return ddx * ddx + ddy * ddy <= hwid * hwid;
+    } else if (kind == 1) {
+        float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float dx = px - cx, dy = py - cy;
+        float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        return abs(xr) <= hw && abs(yr) <= hh;
+    } else {
+        float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float dx = px - cx, dy = py - cy;
+        float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        return xr * xr / (rx * rx) + yr * yr / (ry * ry) <= 1.0;
+    }
+}
+
+void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out int xMax, out int yMax) {
+    if (kind == 2) {
+        float minX = min(P[0], min(P[2], P[4])), maxX = max(P[0], max(P[2], P[4]));
+        float minY = min(P[1], min(P[3], P[5])), maxY = max(P[1], max(P[3], P[5]));
+        xMin = clampi(int(floor(minX)), 0, W - 1); xMax = clampi(int(ceil(maxX)), 0, W - 1);
+        yMin = clampi(int(floor(minY)), 0, H - 1); yMax = clampi(int(ceil(maxY)), 0, H - 1);
+    } else if (kind == 3) {
+        float x1 = P[0], y1 = P[1], x2 = P[2], y2 = P[3], hwid = max(0.5, P[4]);
+        xMin = clampi(int(floor(min(x1, x2) - hwid)), 0, W - 1); xMax = clampi(int(ceil(max(x1, x2) + hwid)), 0, W - 1);
+        yMin = clampi(int(floor(min(y1, y2) - hwid)), 0, H - 1); yMax = clampi(int(ceil(max(y1, y2) + hwid)), 0, H - 1);
+    } else if (kind == 1) {
+        float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float ex = abs(hw * c) + abs(hh * s), ey = abs(hw * s) + abs(hh * c);
+        xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
+        yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
+    } else {
+        float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        float ex = sqrt(rx * rx * c * c + ry * ry * s * s), ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+        xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
+        yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
+    }
+}
+
+void main() {
+    if (pc.kind > 3) return; // gradients/masks not handled in this kernel
+    float P[6] = float[6](pc.p0, pc.p1, pc.p2, pc.p3, pc.p4, pc.p5);
+    int xMin, yMin, xMax, yMax;
+    bboxOf(pc.kind, P, pc.W, pc.H, xMin, yMin, xMax, yMax);
+    int cols = xMax - xMin + 1, rows = yMax - yMin + 1, total = cols * rows;
+    if (total <= 0) return;
+    float a = clamp(pc.ca, 0.0, 1.0), invA = 1.0 - a;
+    int threads = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    for (int tt = int(gl_GlobalInvocationID.x); tt < total; tt += threads) {
+        int x = xMin + tt % cols, y = yMin + tt / cols;
+        if (!insideShape(pc.kind, P, x, y)) continue;
+        int p = (y * pc.W + x) * 4;
+        canvasb[p + 0] = canvasb[p + 0] * invA + pc.cr * a;
+        canvasb[p + 1] = canvasb[p + 1] * invA + pc.cg * a;
+        canvasb[p + 2] = canvasb[p + 2] * invA + pc.cb * a;
+        canvasb[p + 3] = canvasb[p + 3] * invA + a;
+    }
+}

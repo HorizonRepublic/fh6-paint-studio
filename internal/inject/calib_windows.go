@@ -16,6 +16,9 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 		return err
 	}
 	f.logf("found %s (pid %d)", name, pid)
+	if !writeSafeProcess(name) {
+		return fmt.Errorf("refusing to calib-write into %q — the FH6 offsets do not apply to FH5 (read-only diagnostics only)", name)
+	}
 	p, err := openProc(pid, true) // read-write
 	if err != nil {
 		return err
@@ -31,8 +34,8 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 			return fmt.Errorf("calib slot %d out of range [0,%d)", cl.Slot, f.Layers)
 		}
 		ptr, ok := p.readU64(table + uintptr(cl.Slot)*8)
-		if !ok || !isUserPointer(ptr) {
-			return fmt.Errorf("calib slot %d: null/invalid layer pointer", cl.Slot)
+		if !ok || !p.isPrivateWritable(ptr) {
+			return fmt.Errorf("calib slot %d: null/invalid/non-writable layer pointer", cl.Slot)
 		}
 		if cl.WantWord != 0 {
 			w, ok := p.readU16(ptr + uintptr(prof.ShapeIDOffset))
@@ -54,6 +57,9 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 		if err := p.write(ptr+uintptr(prof.RotationOffset), f32b(cl.Rot)); err != nil {
 			return fmt.Errorf("calib slot %d rot: %w", cl.Slot, err)
 		}
+		if err := p.write(ptr+uintptr(prof.SkewOffset), f32b(cl.Skew)); err != nil {
+			return fmt.Errorf("calib slot %d skew: %w", cl.Slot, err)
+		}
 		if err := p.write(ptr+uintptr(prof.ColorOffset), cl.Color[:]); err != nil {
 			return fmt.Errorf("calib slot %d color: %w", cl.Slot, err)
 		}
@@ -67,8 +73,8 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 			}
 			wordNote = fmt.Sprintf("word 0x%04x→0x%04x (re-derives on save+reload)", cl.WantWord, cl.SetWord)
 		}
-		f.logf("calib slot %d ← pos(%.0f,%.0f) scale(%.2f,%.2f) rot%.0f col(%d,%d,%d,%d) [%s]",
-			cl.Slot, cl.Pos[0], cl.Pos[1], cl.Scale[0], cl.Scale[1], cl.Rot,
+		f.logf("calib slot %d ← pos(%.0f,%.0f) scale(%.2f,%.2f) rot%.0f skew%.0f col(%d,%d,%d,%d) [%s]",
+			cl.Slot, cl.Pos[0], cl.Pos[1], cl.Scale[0], cl.Scale[1], cl.Rot, cl.Skew,
 			cl.Color[0], cl.Color[1], cl.Color[2], cl.Color[3], wordNote)
 	}
 	f.logf("calib wrote %d slots (transform+colour only; shape-word & resource left untouched)", len(layers))

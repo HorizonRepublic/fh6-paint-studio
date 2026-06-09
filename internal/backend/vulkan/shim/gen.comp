@@ -1,0 +1,114 @@
+#version 450
+// gen.comp — on-device random candidate generator. Faithful port of shim.cu genKernel:
+// the SAME counter-based wanghash RNG (uf), so generated candidates are bit-identical to
+// the CUDA backend (the on-device search is validated by end-to-end SSE, not golden-diff).
+// Writes n candidates to the 11-float wire format. Kinds: 0=ellipse 1=rect 2=triangle.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer Sc { float scand[]; };
+layout(std430, binding = 1) readonly  buffer Kk { float kinds[]; };
+layout(std430, binding = 2) readonly  buffer Kc { float kindCDF[]; };
+layout(std430, binding = 3) readonly  buffer Gc { float gridCDF[]; };
+layout(std430, binding = 4) readonly  buffer Or { float orient[]; };
+layout(std430, binding = 5) readonly  buffer Bd { float boundDist[]; };
+layout(push_constant) uniform PC {
+    uint seedLo, seedHi;
+    int n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound;
+    float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad;
+} pc;
+
+uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float uf(uint i, inout uint ctr) {
+    uint a = pc.seedLo ^ 0x9e3779b9u, b = pc.seedHi;
+    ctr += 1u;
+    uint h = wanghash(a + wanghash(i + 0x85ebca6bu) + wanghash((b ^ ctr) * 0xc2b2ae35u));
+    return float(h >> 8) * (1.0 / 16777216.0);
+}
+float clampf2(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// clampExtentsD: shrink half-extents so the rotated bbox stays within [-pad,W+pad]x[-pad,H+pad].
+void clampExtents(float cx, float cy, inout float a, inout float b, float thetaDeg, float W, float H, float pad) {
+    float th = thetaDeg * 0.017453292519943295;
+    float cs = cos(th), sn = sin(th);
+    float hx = length(vec2(a * cs, b * sn));
+    float hy = length(vec2(a * sn, b * cs));
+    float allowX = max(1.0, min(cx, W - cx) + pad);
+    float allowY = max(1.0, min(cy, H - cy) + pad);
+    float scale = 1.0;
+    if (hx > allowX) scale = min(scale, allowX / hx);
+    if (hy > allowY) scale = min(scale, allowY / hy);
+    if (scale < 1.0) { a *= scale; b *= scale; }
+}
+
+void main() {
+    int stride = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    for (int i = int(gl_GlobalInvocationID.x); i < pc.n; i += stride) {
+        uint ctr = 0u;
+        int base = i * 11;
+        float total = gridCDF[pc.gw * pc.gh - 1];
+        float cx, cy;
+        if (total <= 0.0) {
+            cx = uf(uint(i), ctr) * float(pc.W);
+            cy = uf(uint(i), ctr) * float(pc.H);
+        } else {
+            float u = uf(uint(i), ctr) * total;
+            int lo = 0, hi = pc.gw * pc.gh - 1;
+            while (lo < hi) { int mid = (lo + hi) >> 1; if (gridCDF[mid] < u) lo = mid + 1; else hi = mid; }
+            int gx = lo % pc.gw, gy = lo / pc.gw;
+            int x0 = gx * pc.W / pc.gw, x1 = (gx + 1) * pc.W / pc.gw;
+            int y0 = gy * pc.H / pc.gh, y1 = (gy + 1) * pc.H / pc.gh;
+            if (x1 <= x0) x1 = x0 + 1;
+            if (y1 <= y0) y1 = y0 + 1;
+            cx = float(x0) + uf(uint(i), ctr) * float(x1 - x0);
+            cy = float(y0) + uf(uint(i), ctr) * float(y1 - y0);
+        }
+        cx = clampf2(cx, 0.0, float(pc.W - 1));
+        cy = clampf2(cy, 0.0, float(pc.H - 1));
+        float emaxR = pc.maxR;
+        if (pc.hasBound != 0 && pc.boundMix > 0.0) {
+            int bidx = int(cy) * pc.W + int(cx);
+            if (bidx >= 0 && bidx < pc.W * pc.H) {
+                float lim = boundDist[bidx] + pc.boundPad;
+                if (lim < emaxR) emaxR = emaxR + (lim - emaxR) * pc.boundMix;
+            }
+        }
+        float theta = uf(uint(i), ctr) * 360.0;
+        if (pc.hasOrient != 0) {
+            int idx = int(cy) * pc.W + int(cx);
+            if (idx >= 0 && idx < pc.W * pc.H) theta = orient[idx] + (uf(uint(i), ctr) * 40.0 - 20.0);
+        }
+        float alpha = 1.0;
+        if (pc.allowAlpha != 0) alpha = pc.alphaMin + (1.0 - pc.alphaMin) * uf(uint(i), ctr);
+        int kind = int(kinds[pc.nKinds - 1] + 0.5);
+        {
+            float ku = uf(uint(i), ctr) * kindCDF[pc.nKinds - 1];
+            for (int k = 0; k < pc.nKinds; k++) {
+                if (ku < kindCDF[k]) { kind = int(kinds[k] + 0.5); break; }
+            }
+        }
+        scand[base + 0] = float(kind);
+        scand[base + 7] = 0.0; scand[base + 8] = 0.0; scand[base + 9] = 0.0; scand[base + 10] = alpha;
+        float padPx = pc.canvasPad * min(float(pc.W), float(pc.H));
+        if (kind == 1) {
+            float hw = 1.0 + uf(uint(i), ctr) * (emaxR - 1.0);
+            float u2 = uf(uint(i), ctr);
+            float hh = (pc.aspectMax > 1.0) ? max(0.5, hw / (1.0 + u2 * (pc.aspectMax - 1.0))) : 1.0 + u2 * (emaxR - 1.0);
+            scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 3] = hw; scand[base + 4] = hh; scand[base + 5] = theta; scand[base + 6] = 0.0;
+            if (pc.canvasPad > 0.0) { float a = hw, b = hh; clampExtents(cx, cy, a, b, theta, float(pc.W), float(pc.H), padPx); scand[base + 3] = a; scand[base + 4] = b; }
+        } else if (kind == 2) {
+            float rr = 4.0 + uf(uint(i), ctr) * (emaxR - 4.0);
+            scand[base + 1] = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            scand[base + 2] = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            scand[base + 3] = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            scand[base + 4] = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            scand[base + 5] = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            scand[base + 6] = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+        } else {
+            float rx = 2.0 + uf(uint(i), ctr) * (emaxR - 2.0);
+            float u2 = uf(uint(i), ctr);
+            float ry = (pc.aspectMax > 1.0) ? max(1.0, rx / (1.0 + u2 * (pc.aspectMax - 1.0))) : 2.0 + u2 * (emaxR - 2.0);
+            scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 3] = rx; scand[base + 4] = ry; scand[base + 5] = theta; scand[base + 6] = 0.0;
+            if (pc.canvasPad > 0.0) { float a = rx, b = ry; clampExtents(cx, cy, a, b, theta, float(pc.W), float(pc.H), padPx); scand[base + 3] = a; scand[base + 4] = b; }
+        }
+    }
+}

@@ -122,8 +122,10 @@ func opaqueShape(s model.Shape) bool {
 // for the accept threshold and error accounting — the penalty only biases WHICH
 // shape wins, it must not pollute the accumulated error.
 func pickBest(be backend.Backend, cands []model.Candidate, penalty func(model.Candidate) float32) (model.Candidate, float32) {
-	res, _ := be.Evaluate(cands)
-	if len(res) == 0 {
+	res, err := be.Evaluate(cands)
+	if err != nil || len(res) == 0 {
+		// A backend (device) fault returns garbage scores; treat the batch as "no improving
+		// candidate" so the greedy skips it cleanly instead of accepting corrupt data.
 		return model.Candidate{}, math.MaxFloat32
 	}
 	bi := 0
@@ -165,6 +167,32 @@ func compactPenalty(c model.Candidate, shapeCount, w, h int) float32 {
 		return hs * hs * 0.1
 	}
 	return hs * 0.05
+}
+
+// candidateArea returns the shape's geometric coverage area in px² (the same coverage the
+// progressive-sampling Score extrapolates over via step²), per kind. Used by the low-contrast
+// gate to turn a raw ΔSSE into a per-pixel "contrast" signal. O(1) closed forms; mask/unknown
+// kinds return 0 so the gate is skipped for them (never gate a primitive we can't size).
+func candidateArea(c model.Candidate, w, h int) float64 {
+	switch c.Kind {
+	case model.KindRectangle:
+		hw := math.Max(0.5, float64(c.P[2]))
+		hh := math.Max(0.5, float64(c.P[3]))
+		return 4 * hw * hh
+	case model.KindTriangle:
+		x1, y1, x2, y2, x3, y3 := float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), float64(c.P[4]), float64(c.P[5])
+		return 0.5 * math.Abs((x2-x1)*(y3-y1)-(x3-x1)*(y2-y1))
+	case model.KindLine:
+		length := math.Hypot(float64(c.P[2]-c.P[0]), float64(c.P[3]-c.P[1]))
+		hwid := math.Max(0.5, float64(c.P[4]))
+		return length*2*hwid + math.Pi*hwid*hwid // capsule: rectangle + two end caps
+	case model.KindEllipse, model.KindGlow, model.KindDisk:
+		rx := math.Max(1, float64(c.P[2]))
+		ry := math.Max(1, float64(c.P[3]))
+		return math.Pi * rx * ry
+	default:
+		return 0 // masks / unknown — skip the gate
+	}
 }
 
 func planHillClimb(budget int) (rounds, perRound int) {
@@ -247,15 +275,22 @@ func pruneOccluded(shapes []model.Shape, w, h int) []model.Shape {
 // flat/logo content stops at ~175-400 shapes, detailed photo/anime/cartoon fill the budget.
 // tol 2e-4 = conservative (trims only saturated content), 5e-4 = aggressive/draft.
 // tol<=0 disables (fill the StopAt budget).
+//
+// floor (ShapeKneeFloor) fixes the relative rate's near-zero blow-up: as curErr→0 the ÷curErr
+// rate explodes and the knee never trips, so clean line-art / fully-solved flats keep burning
+// budget on imperceptible shapes. Flooring the denominator at floor·initialErr pins it to a fixed
+// baseline once the recon beats that fraction, so the same tol trips on near-solved content while
+// detailed photos (curErr ≫ floor·init) are unaffected. floor<=0 = pure relative (legacy).
 type kneeDetector struct {
-	tol          float64
+	tol, floor   float64
+	init         float64
 	win, sustain int
 	hist         []float64
 	since        int // shape count when the rate first dropped below tol (-1 = above)
 }
 
-func newKneeDetector(tol float64) *kneeDetector {
-	return &kneeDetector{tol: tol, win: 100, sustain: 200, since: -1}
+func newKneeDetector(tol, floor, initialErr float64) *kneeDetector {
+	return &kneeDetector{tol: tol, floor: floor, init: initialErr, win: 100, sustain: 200, since: -1}
 }
 
 // push records the current total error after placing a shape and reports whether the
@@ -270,7 +305,13 @@ func (k *kneeDetector) push(curErr float64) bool {
 		return false
 	}
 	back := k.hist[n-1-k.win]
-	rate := (back - curErr) / (float64(k.win) * curErr)
+	denom := curErr
+	if k.floor > 0 && k.init > 0 {
+		if f := k.floor * k.init; f > denom {
+			denom = f
+		}
+	}
+	rate := (back - curErr) / (float64(k.win) * denom)
 	if rate < k.tol {
 		if k.since < 0 {
 			k.since = n

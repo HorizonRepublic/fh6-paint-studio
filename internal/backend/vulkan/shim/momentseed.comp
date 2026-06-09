@@ -1,0 +1,83 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// momentseed.comp — fit K covariance-ellipse seeds from the residual error grid (port of
+// shim.cu momentSeedKernel + momentFitDevice). Each thread samples a centre from the
+// error-grid CDF (same importance bias as the random search), caps its radius at the
+// boundary, and fits the residual blob's covariance ellipse (in double; sqrt/atan via
+// float). An empty window falls back to a round seed so genmoment always has a seed.
+
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) writeonly buffer Sd { float seeds[]; };
+layout(std430, binding = 1) readonly  buffer Gc { float gridCDF[]; };
+layout(std430, binding = 2) readonly  buffer Bd { float boundDist[]; };
+layout(push_constant) uniform PC {
+    uint seedLo, seedHi; int K, gw, gh, W, H, hasBound; float maxR, boundPad, boundMix;
+} pc;
+
+uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float uf(uint i, inout uint ctr) {
+    uint a = pc.seedLo ^ 0x9e3779b9u, b = pc.seedHi;
+    ctr += 1u;
+    uint h = wanghash(a + wanghash(i + 0x85ebca6bu) + wanghash((b ^ ctr) * 0xc2b2ae35u));
+    return float(h >> 8) * (1.0 / 16777216.0);
+}
+float clampf2(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+float cellErr(int idx) { return gridCDF[idx] - (idx > 0 ? gridCDF[idx - 1] : 0.0); }
+
+void main() {
+    int k = int(gl_GlobalInvocationID.x);
+    if (k >= pc.K) return;
+    uint ctr = 0u;
+    float total = gridCDF[pc.gw * pc.gh - 1];
+    float cx, cy;
+    if (total <= 0.0) { cx = uf(uint(k), ctr) * float(pc.W); cy = uf(uint(k), ctr) * float(pc.H); }
+    else {
+        float u = uf(uint(k), ctr) * total;
+        int lo = 0, hi = pc.gw * pc.gh - 1;
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (gridCDF[mid] < u) lo = mid + 1; else hi = mid; }
+        int gx = lo % pc.gw, gy = lo / pc.gw;
+        int x0 = gx * pc.W / pc.gw, x1 = (gx + 1) * pc.W / pc.gw, y0 = gy * pc.H / pc.gh, y1 = (gy + 1) * pc.H / pc.gh;
+        if (x1 <= x0) x1 = x0 + 1; if (y1 <= y0) y1 = y0 + 1;
+        cx = float(x0) + uf(uint(k), ctr) * float(x1 - x0);
+        cy = float(y0) + uf(uint(k), ctr) * float(y1 - y0);
+    }
+    cx = clampf2(cx, 0.0, float(pc.W - 1)); cy = clampf2(cy, 0.0, float(pc.H - 1));
+    float capR = pc.maxR;
+    if (pc.hasBound != 0 && pc.boundMix > 0.0) {
+        int bidx = int(cy) * pc.W + int(cx);
+        if (bidx >= 0 && bidx < pc.W * pc.H) { float lim = boundDist[bidx] + pc.boundPad; if (lim < capR) capR = capR + (lim - capR) * pc.boundMix; }
+    }
+    // momentFitDevice
+    float sx = float(pc.W) / float(pc.gw), sy = float(pc.H) / float(pc.gh);
+    int gcx = int(cx / sx), gcy = int(cy / sy);
+    int rcx = int(capR / sx) + 1, rcy = int(capR / sy) + 1;
+    int gx0 = max(gcx - rcx, 0), gy0 = max(gcy - rcy, 0), gx1 = min(gcx + rcx, pc.gw - 1), gy1 = min(gcy + rcy, pc.gh - 1);
+    double m00 = 0.0LF, m10 = 0.0LF, m01 = 0.0LF;
+    for (int gy = gy0; gy <= gy1; gy++) for (int gx = gx0; gx <= gx1; gx++) {
+        int idx = gy * pc.gw + gx; float e = cellErr(idx); if (e <= 0.0) continue;
+        m00 += double(e); m10 += double(gx) * double(e); m01 += double(gy) * double(e);
+    }
+    float scx, scy, srx, sry, sth; int valid = 1;
+    if (m00 <= 1e-9LF) { valid = 0; }
+    else {
+        double mcx = m10 / m00, mcy = m01 / m00;
+        double u20 = 0.0LF, u02 = 0.0LF, u11 = 0.0LF;
+        for (int gy = gy0; gy <= gy1; gy++) for (int gx = gx0; gx <= gx1; gx++) {
+            int idx = gy * pc.gw + gx; float e = cellErr(idx); if (e <= 0.0) continue;
+            double dx = double(gx) - mcx, dy = double(gy) - mcy;
+            u20 += double(e) * dx * dx; u02 += double(e) * dy * dy; u11 += double(e) * dx * dy;
+        }
+        u20 /= m00; u02 /= m00; u11 /= m00;
+        double hlf = (u20 - u02) / 2.0LF;
+        double d = double(sqrt(float(max(0.0LF, hlf * hlf + u11 * u11))));
+        double lmax = (u20 + u02) / 2.0LF + d, lmin = (u20 + u02) / 2.0LF - d; if (lmin < 0.0LF) lmin = 0.0LF;
+        double major = 2.0LF * double(sqrt(float(lmax))), minor = 2.0LF * double(sqrt(float(lmin)));
+        float s = (sx + sy) / 2.0;
+        scx = float((mcx + 0.5LF) * double(sx)); scy = float((mcy + 0.5LF) * double(sy));
+        srx = float(max(major, 0.5LF) * double(s)); sry = float(max(minor, 0.5LF) * double(s));
+        sth = 0.5 * atan(float(2.0LF * u11), float(u20 - u02)) * 57.295779513082323;
+    }
+    if (valid == 0) { scx = cx; scy = cy; srx = max(4.0, capR * 0.3); sry = srx; sth = uf(uint(k), ctr) * 360.0; }
+    int base = k * 6;
+    seeds[base + 0] = scx; seeds[base + 1] = scy; seeds[base + 2] = srx; seeds[base + 3] = sry; seeds[base + 4] = sth; seeds[base + 5] = capR;
+}
