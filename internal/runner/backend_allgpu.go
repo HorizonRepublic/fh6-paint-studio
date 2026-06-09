@@ -9,20 +9,55 @@ import (
 	"fh6-paint-studio/internal/backend/vulkan"
 )
 
-// newBackend (allgpu build) auto-selects the GPU backend at runtime: CUDA on NVIDIA (the
-// tuned fast path), else Vulkan (cross-vendor: AMD/Intel/NVIDIA + everywhere fh6cuda.dll
-// is absent), else the CPU reference. One binary runs on any GPU — ship it with both
-// fh6cuda.dll (nvcc) and fh6vk.dll (Vulkan shim) beside the exe.
+// newBackend (allgpu build) constructs the chosen GPU backend at runtime: CUDA on NVIDIA (the tuned
+// fast path) and Vulkan everywhere else, ordered by BackendPreference so the studio's engine picker
+// can override the default. A failed init falls through to the next, then to the CPU reference, so one
+// binary runs on any GPU — ship it with both fh6cuda.dll (nvcc) and fh6vk.dll (Vulkan shim).
 func newBackend(pixels, weight []float32, w, h, grid int) (backend.Backend, string, error) {
-	if be, err := cuda.New(pixels, weight, w, h, grid); err == nil {
-		return be, "CUDA", nil
+	try := func(which string) (backend.Backend, string, bool) {
+		switch which {
+		case "CUDA":
+			if be, err := cuda.New(pixels, weight, w, h, grid); err == nil {
+				return be, "CUDA", true
+			}
+		case "Vulkan":
+			if be, err := vulkan.New(pixels, weight, w, h, grid); err == nil {
+				return be, "Vulkan", true
+			}
+		}
+		return nil, "", false
 	}
-	if be, err := vulkan.New(pixels, weight, w, h, grid); err == nil {
-		return be, "Vulkan", nil
+	order := []string{"CUDA", "Vulkan"}
+	if BackendPreference == "Vulkan" {
+		order = []string{"Vulkan", "CUDA"}
+	}
+	for _, which := range order {
+		if be, name, ok := try(which); ok {
+			return be, name, nil
+		}
 	}
 	c := cpu.New(pixels, w, h, grid)
 	if weight != nil {
 		c.SetWeight(weight)
 	}
 	return c, "CPU", nil
+}
+
+// AvailableBackends (allgpu build) probes which GPU backends can initialise on this machine and
+// returns them in preference order (CUDA first) — a real load-init-free of each DLL, so the studio
+// only offers a backend that actually works. Falls back to {"CPU"} when no GPU is usable.
+func AvailableBackends() []string {
+	var out []string
+	if be, err := cuda.New([]float32{0, 0, 0, 1}, nil, 1, 1, 1); err == nil {
+		be.Close()
+		out = append(out, "CUDA")
+	}
+	if be, err := vulkan.New([]float32{0, 0, 0, 1}, nil, 1, 1, 1); err == nil {
+		be.Close()
+		out = append(out, "Vulkan")
+	}
+	if len(out) == 0 {
+		out = append(out, "CPU")
+	}
+	return out
 }

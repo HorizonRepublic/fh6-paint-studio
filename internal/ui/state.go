@@ -52,9 +52,6 @@ type RunStats struct {
 }
 
 // UpdateETA refreshes ETA from a recent-rate EMA of seconds/shape, called once per progress tick.
-// The per-shape cost is heavily front-loaded (big early shapes are far slower than late detail), so
-// a linear elapsed/frac estimate overestimates early; the EMA tracks the speed-up onto cheap late
-// shapes, so the displayed estimate falls realistically instead of staying inflated.
 func (s *RunStats) UpdateETA(shapes, total int, elapsed time.Duration) {
 	if shapes > s.etaLastShapes {
 		dt := (elapsed - s.etaLastElapsed).Seconds()
@@ -83,14 +80,15 @@ type UpdateInfo struct {
 	URL     string
 }
 
-// AppState holds every widget state plus the loaded image and run telemetry. The panel
-// Layout methods read and mutate it; the main loop feeds runner events into it.
+// AppState holds every widget state plus the loaded image and run telemetry. The panel Layout methods
+// read and mutate it; the main loop feeds runner events into it.
 type AppState struct {
 	Th *Theme
 
 	// app identity (set by main)
 	Version      string
 	BackendLabel string
+	Backend      *Dropdown // engine picker (CUDA/Vulkan); nil when only one backend works (no choice to make)
 
 	// loaded image
 	ImgPath   string
@@ -365,6 +363,19 @@ func NewAppState(th *Theme) *AppState {
 	s.baseMode = s.Mode.Value()
 	s.applyModeKnobs() // fill the expert knobs with the default mode's concrete values
 	return s
+}
+
+// SetBackends configures the engine label and, when more than one backend works on this machine, a
+// picker dropdown (CUDA/Vulkan). opts[0] is the default/preferred. With a single backend there is no
+// choice to make, so no dropdown is created and the label shows it statically.
+func (s *AppState) SetBackends(opts []string) {
+	if len(opts) == 0 {
+		opts = []string{"CPU"}
+	}
+	s.BackendLabel = "shape engine · " + opts[0]
+	if len(opts) > 1 {
+		s.Backend = NewDropdown(opts, 0)
+	}
 }
 
 // crop drag kinds (cropDragKind): cropHandle0+i selects handle i (0..7 = NW,N,NE,E,SE,S,SW,W).

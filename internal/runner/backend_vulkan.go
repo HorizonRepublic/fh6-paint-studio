@@ -21,3 +21,6 @@ func newBackend(pixels, weight []float32, w, h, grid int) (backend.Backend, stri
 	}
 	return be, "Vulkan", nil
 }
+
+// AvailableBackends reports the backends offered by this (Vulkan-only) build.
+func AvailableBackends() []string { return []string{"Vulkan"} }

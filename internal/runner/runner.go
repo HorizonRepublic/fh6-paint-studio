@@ -13,6 +13,11 @@ import (
 	"fh6-paint-studio/internal/preset"
 )
 
+// BackendPreference biases newBackend toward a named GPU backend ("CUDA"/"Vulkan") on allgpu builds
+// where both are compiled in. Empty = the build's default order (CUDA first). Single-backend builds
+// ignore it. Set by the studio's engine picker.
+var BackendPreference string
+
 // RunAsync builds the backend from the resolved run config and runs engine.Run in a worker
 // goroutine. onEvent is called FROM THAT GOROUTINE for every event (Log/Progress/Frame and a
 // terminal Done/Failed) — the UI is responsible for marshalling these onto its own loop

@@ -16,7 +16,6 @@ import (
 )
 
 // Layout renders the whole window: top bar, the 3-column body, and the bottom status bar.
-// The main loop calls this each frame with full-window constraints.
 func (s *AppState) Layout(gtx C) D {
 	th := s.Th
 	paint.Fill(gtx.Ops, th.Bg)
@@ -76,8 +75,6 @@ func (s *AppState) lightboxOverlay(gtx C) D {
 	sz := gtx.Constraints.Max
 	paint.FillShape(gtx.Ops, color.NRGBA{A: 224}, clip.Rect{Max: sz}.Op())
 	pointer.CursorPointer.Add(gtx.Ops)
-	// Claim pointer presses over the whole scrim: dismiss on a tap AND occlude the gallery thumbs
-	// behind so the dismiss click can't fall through and re-open it.
 	area := clip.Rect{Max: sz}.Push(gtx.Ops)
 	event.Op(gtx.Ops, &s.lightboxTag)
 	area.Pop()
@@ -127,7 +124,14 @@ func (s *AppState) topBar(gtx C) D {
 					)
 				}
 				children = append(children,
-					layout.Rigid(func(gtx C) D { return th.Dim(gtx, s.BackendLabel) }),
+					layout.Rigid(func(gtx C) D {
+						if s.Backend != nil { // >1 backend works -> a picker; else the static label
+							gtx.Constraints.Min.X = 0
+							gtx.Constraints.Max.X = gtx.Dp(128)
+							return s.Backend.Layout(gtx, th)
+						}
+						return th.Dim(gtx, s.BackendLabel)
+					}),
 					layout.Rigid(GapH(10).Layout),
 					layout.Rigid(s.aboutChip),
 				)

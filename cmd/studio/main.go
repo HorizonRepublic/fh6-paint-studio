@@ -86,7 +86,9 @@ func loop(w *app.Window) error {
 	th := ui.NewTheme()
 	st := ui.NewAppState(th)
 	st.Version = version
-	st.BackendLabel = "shape engine · " + backendName
+	backends := backendOptions()
+	st.SetBackends(backends)               // a picker when >1 GPU backend works (allgpu build), else a static label
+	runner.BackendPreference = backends[0] // default to the system's preferred (CUDA where present, else Vulkan)
 	st.UpdateCheckEnabled = updateCheckEnabled
 	st.Elevated = inject.Elevated()
 	prefs := loadConfig()
@@ -758,6 +760,10 @@ func loop(w *app.Window) error {
 				lastTitle = title
 			}
 			st.Layout(gtx)
+			if st.Backend != nil && st.Backend.Changed() { // engine picker -> bias the next run's backend
+				runner.BackendPreference = st.Backend.Value()
+				st.BackendLabel = "shape engine · " + st.Backend.Value()
+			}
 			e.Frame(gtx.Ops)
 		}
 	}
