@@ -69,10 +69,53 @@ func (s *AppState) libraryScreen(gtx C) D {
 	return th.Card(gtx, func(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(s.libraryHeader),
+			layout.Rigid(GapV(8).Layout),
+			layout.Rigid(s.injectGuide),
 			layout.Rigid(GapV(10).Layout),
 			layout.Flexed(1, s.libraryList),
 		)
 	})
+}
+
+// injectGuide is the collapsible "How injecting works" strip in the Library — the inject ritual is
+// FH6's biggest footgun (wrong template size silently drops shapes; the game only re-derives the mesh on
+// a vinyl save+reload), so the steps are spelled out one click away.
+func (s *AppState) injectGuide(gtx C) D {
+	th := s.Th
+	if s.InjectGuideClick.Clicked(gtx) {
+		s.InjectGuideOpen = !s.InjectGuideOpen
+	}
+	arrow := "▸"
+	if s.InjectGuideOpen {
+		arrow = "▾"
+	}
+	head := func(gtx C) D {
+		return material.Clickable(gtx, &s.InjectGuideClick, func(gtx C) D {
+			return th.Lbl(gtx, 12, arrow+"  How injecting works", th.Accent)
+		})
+	}
+	if !s.InjectGuideOpen {
+		return head(gtx)
+	}
+	step := func(n, text string) layout.FlexChild {
+		return layout.Rigid(func(gtx C) D {
+			return layout.Inset{Top: 3, Left: 4}.Layout(gtx, func(gtx C) D {
+				return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 12, n, th.Accent) }),
+					layout.Rigid(GapH(8).Layout),
+					layout.Rigid(func(gtx C) D { return th.Dim(gtx, text) }),
+				)
+			})
+		})
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(head),
+		layout.Rigid(GapV(4).Layout),
+		step("1", "In FH6, add a vinyl group with at least as many layers as the generation's shapes."),
+		step("2", "Set “FH6 template” (top-right) to that group's layer count."),
+		step("3", "Click Inject on the generation — the app needs admin + FH6 running."),
+		step("4", "In FH6, Save & reload the vinyl — the mesh only appears after a reload."),
+	)
 }
 
 func (s *AppState) libraryHeader(gtx C) D {
@@ -89,7 +132,12 @@ func (s *AppState) libraryHeader(gtx C) D {
 		}),
 		layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Max.X, 0)} }),
 		layout.Rigid(func(gtx C) D {
-			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return th.Dim(gtx, "FH6 layers") })
+			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return th.Dim(gtx, "FH6 template") })
+		}),
+		layout.Rigid(func(gtx C) D {
+			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D {
+				return s.InjectHint.Layout(gtx, th, "The number of LAYERS in the in-game vinyl group you're injecting into — it must match. If it's smaller than the generation's shapes, the extra shapes are silently dropped in-game. Make a group with enough layers in FH6 first, then put that count here.")
+			})
 		}),
 		num(&s.InjectLayers, "count", 72, s.InjectLayersErr),
 		layout.Rigid(GapH(10).Layout),
@@ -102,6 +150,8 @@ func (s *AppState) libraryHeader(gtx C) D {
 	)
 }
 
+// libraryList lays the saved generations out as a responsive card GRID (a gallery): bigger thumbnails,
+// 1-4 columns by width — so the space is used and the vinyls read as a showcase, not a thin list.
 func (s *AppState) libraryList(gtx C) D {
 	th := s.Th
 	if len(s.LibRows) == 0 {
@@ -109,43 +159,110 @@ func (s *AppState) libraryList(gtx C) D {
 			return th.Dim(gtx, "No generations yet — reconstruct an image in Studio.")
 		})
 	}
-	return material.List(th.M, &s.LibScroll).Layout(gtx, len(s.LibRows), func(gtx C, i int) D {
-		return s.libraryRow(gtx, &s.LibRows[i])
+	cols := libCols(gtx)
+	rows := (len(s.LibRows) + cols - 1) / cols
+	return material.List(th.M, &s.LibScroll).Layout(gtx, rows, func(gtx C, row int) D {
+		return s.libraryGridRow(gtx, row, cols)
 	})
 }
 
-func (s *AppState) libraryRow(gtx C, r *LibraryRow) D {
-	th := s.Th
-	return layout.Inset{Top: 4, Bottom: 4}.Layout(gtx, func(gtx C) D {
-		return th.Card(gtx, func(gtx C) D {
-			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return s.rowThumb(gtx, r) }),
-				layout.Rigid(GapH(12).Layout),
-				layout.Flexed(1, func(gtx C) D {
-					// While renaming, the name area is JUST the editor (the meta line is hidden) so the
-					// row keeps its normal height — the 54dp thumbnail stays the tallest element, and the
-					// editor lines up with the Save/Cancel buttons instead of pushing the row taller.
-					if r.Editing {
-						// A small right gap so the field doesn't butt up against the Save button.
-						return layout.Inset{Right: 10}.Layout(gtx, func(gtx C) D {
-							gtx.Constraints.Min.X = gtx.Constraints.Max.X
-							return th.editorBox(gtx, &r.NameEd, "name") // natural single-line height
-						})
-					}
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 14, r.Entry.Name, th.Text) }),
-						layout.Rigid(GapV(3).Layout),
-						layout.Rigid(func(gtx C) D {
-							meta := fmt.Sprintf("%s · %s · %s", r.Entry.Preset, entryCountLabel(r.Entry),
-								r.Entry.Created.Format("02.01 15:04"))
-							return th.Dim(gtx, meta)
-						}),
-					)
-				}),
-				layout.Rigid(func(gtx C) D { return s.rowActions(gtx, r) }),
-			)
-		})
+// libCols picks the column count from the available width (cards target ~330dp).
+func libCols(gtx C) int {
+	c := gtx.Constraints.Max.X / gtx.Dp(330)
+	if c < 1 {
+		c = 1
+	}
+	if c > 4 {
+		c = 4
+	}
+	return c
+}
+
+// libraryGridRow lays one row of up to cols equal-width cards. Empty trailing cells are padded so the
+// cards keep a consistent width across rows.
+func (s *AppState) libraryGridRow(gtx C, row, cols int) D {
+	gap := gtx.Dp(12)
+	cw := (gtx.Constraints.Max.X - gap*(cols-1)) / cols
+	children := make([]layout.FlexChild, 0, cols*2)
+	for c := 0; c < cols; c++ {
+		if c > 0 {
+			children = append(children, layout.Rigid(GapH(12).Layout))
+		}
+		idx := row*cols + c
+		if idx >= len(s.LibRows) {
+			children = append(children, layout.Rigid(func(gtx C) D { return D{Size: image.Pt(cw, 0)} }))
+			continue
+		}
+		i := idx
+		children = append(children, layout.Rigid(func(gtx C) D {
+			gtx.Constraints.Min.X, gtx.Constraints.Max.X = cw, cw
+			return s.libraryCard(gtx, &s.LibRows[i])
+		}))
+	}
+	return layout.Inset{Top: 6, Bottom: 6}.Layout(gtx, func(gtx C) D {
+		return layout.Flex{}.Layout(gtx, children...)
 	})
+}
+
+// libraryCard is one gallery tile: a big clickable thumbnail, the name (or inline editor), the meta
+// line, and the action buttons.
+func (s *AppState) libraryCard(gtx C, r *LibraryRow) D {
+	th := s.Th
+	return th.Card(gtx, func(gtx C) D {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx C) D { return s.cardThumb(gtx, r) }),
+			layout.Rigid(GapV(10).Layout),
+			layout.Rigid(func(gtx C) D {
+				if r.Editing {
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return th.editorBox(gtx, &r.NameEd, "name")
+				}
+				return th.Lbl(gtx, 15, r.Entry.Name, th.Text)
+			}),
+			layout.Rigid(GapV(3).Layout),
+			layout.Rigid(func(gtx C) D {
+				meta := fmt.Sprintf("%s · %s · %s", r.Entry.Preset, entryCountLabel(r.Entry),
+					r.Entry.Created.Format("02.01 15:04"))
+				return th.Dim(gtx, meta)
+			}),
+			layout.Rigid(GapV(10).Layout),
+			layout.Rigid(func(gtx C) D { return s.cardActions(gtx, r) }),
+		)
+	})
+}
+
+// cardThumb is the large 16:10 preview filling the card width; clicking it opens the lightbox.
+func (s *AppState) cardThumb(gtx C, r *LibraryRow) D {
+	th := s.Th
+	w := gtx.Constraints.Max.X
+	sz := image.Pt(w, w*10/16)
+	return r.ThumbBtn.Layout(gtx, func(gtx C) D {
+		fillRRect(gtx, th.SurfaceHi, sz, 8)
+		pointer.CursorPointer.Add(gtx.Ops)
+		gtx.Constraints = layout.Exact(sz)
+		if (r.Thumb != paint.ImageOp{}) {
+			defer clip.UniformRRect(image.Rectangle{Max: sz}, 8).Push(gtx.Ops).Pop()
+			widget.Image{Src: r.Thumb, Fit: widget.Contain, Position: layout.Center}.Layout(gtx)
+		}
+		return D{Size: sz}
+	})
+}
+
+// fitBadge shows, per row, whether the current FH6-template count covers this generation's shapes:
+// "✓ fits" when the template is big enough, "⚠ −N" when N shapes would be dropped in-game. Hidden until
+// a template count is entered.
+func (s *AppState) fitBadge(gtx C, r *LibraryRow) D {
+	th := s.Th
+	layers := s.InjectLayersValue()
+	if layers <= 0 || r.Entry.Shapes <= 0 {
+		return D{}
+	}
+	txt, col := "✓ fits", th.Good
+	if layers < r.Entry.Shapes {
+		txt, col = fmt.Sprintf("−%d will drop", r.Entry.Shapes-layers), th.Warn
+	}
+	return layout.Inset{Bottom: 6}.Layout(gtx, func(gtx C) D { return th.Lbl(gtx, 12, txt, col) })
 }
 
 // injectButton renders the row's Inject control by inject state: a spinner while in flight, then a
@@ -153,58 +270,62 @@ func (s *AppState) libraryRow(gtx C, r *LibraryRow) D {
 func (s *AppState) injectButton(gtx C, r *LibraryRow) D {
 	th := s.Th
 	switch {
-	case s.InjectingID == r.Entry.ID:
+	case s.InjectingID != "" && s.InjectingID == r.Entry.ID:
 		return th.BusyPill(gtx, "Injecting…")
-	case s.InjectResultID == r.Entry.ID && s.InjectOK:
+	case s.InjectResultID != "" && s.InjectResultID == r.Entry.ID && s.InjectOK:
 		return th.StatusPill(gtx, "✓ Injected", th.Good)
-	case s.InjectResultID == r.Entry.ID:
+	case s.InjectResultID != "" && s.InjectResultID == r.Entry.ID:
 		return th.StatusPill(gtx, "✗ Failed", th.Bad)
 	default:
-		return th.SecondaryButton(gtx, &r.Inject, "Inject into FH6", true)
+		return th.AccentButton(gtx, &r.Inject, "Inject into FH6") // the card's primary action
 	}
 }
 
-func (s *AppState) rowThumb(gtx C, r *LibraryRow) D {
+// cardActions is the tile's button area: the fit badge + a full-width primary Inject, over a secondary
+// Export / Rename / Delete row. While renaming it collapses to Save / Cancel.
+func (s *AppState) cardActions(gtx C, r *LibraryRow) D {
 	th := s.Th
-	sz := image.Pt(gtx.Dp(72), gtx.Dp(54))
-	// The thumb is a click target — opens the full preview in a lightbox.
-	return r.ThumbBtn.Layout(gtx, func(gtx C) D {
-		fillRRect(gtx, th.SurfaceHi, sz, 6)
-		pointer.CursorPointer.Add(gtx.Ops)
-		gtx.Constraints = layout.Exact(sz)
-		if (r.Thumb != paint.ImageOp{}) {
-			defer clip.UniformRRect(image.Rectangle{Max: sz}, 6).Push(gtx.Ops).Pop()
-			widget.Image{Src: r.Thumb, Fit: widget.Contain, Position: layout.Center}.Layout(gtx)
-		}
-		return D{Size: sz}
-	})
-}
-
-func (s *AppState) rowActions(gtx C, r *LibraryRow) D {
-	th := s.Th
-	// While renaming, the row's actions collapse to Save / Cancel — Inject/Export/Delete don't make
-	// sense mid-edit. Save is an accent button at the SAME compact size as the other row buttons (a
-	// full-size PrimaryButton was taller and made the row jump).
 	if r.Editing {
-		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(func(gtx C) D { return th.AccentButton(gtx, &r.Rename, "Save") }),
+		return layout.Flex{}.Layout(gtx,
+			layout.Flexed(1, func(gtx C) D {
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				return th.AccentButton(gtx, &r.Rename, "Save")
+			}),
 			layout.Rigid(GapH(8).Layout),
-			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &r.RenameCancel, "Cancel", true) }),
+			layout.Flexed(1, func(gtx C) D {
+				gtx.Constraints.Min.X = gtx.Constraints.Max.X
+				return th.SecondaryButton(gtx, &r.RenameCancel, "Cancel", true)
+			}),
 		)
 	}
-	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return s.injectButton(gtx, r) }),
-		layout.Rigid(GapH(8).Layout),
-		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &r.Export, "Export JSON", true) }),
-		layout.Rigid(GapH(8).Layout),
-		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &r.Rename, "Rename", true) }),
-		layout.Rigid(GapH(8).Layout),
-		layout.Rigid(func(gtx C) D {
-			// Armed delete turns red (DangerButton) to make the destructive confirm unmistakable.
-			if r.ConfirmDelete {
-				return th.DangerButton(gtx, &r.Delete, "Confirm?")
+	secondary := func(btn *widget.Clickable, label string, danger bool) layout.FlexChild {
+		return layout.Flexed(1, func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			if danger {
+				return th.DangerButton(gtx, btn, label)
 			}
-			return th.SecondaryButton(gtx, &r.Delete, "Delete", true)
+			return th.SecondaryButton(gtx, btn, label, true)
+		})
+	}
+	delLabel := "Delete"
+	if r.ConfirmDelete {
+		delLabel = "Confirm?"
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx C) D { return s.fitBadge(gtx, r) }),
+		layout.Rigid(func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return s.injectButton(gtx, r)
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{}.Layout(gtx,
+				secondary(&r.Export, "Export", false),
+				layout.Rigid(GapH(8).Layout),
+				secondary(&r.Rename, "Rename", false),
+				layout.Rigid(GapH(8).Layout),
+				secondary(&r.Delete, delLabel, r.ConfirmDelete),
+			)
 		}),
 	)
 }

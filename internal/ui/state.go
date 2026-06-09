@@ -101,8 +101,20 @@ type AppState struct {
 	// run
 	Phase Phase
 	Stats RunStats
-	Log   []string
+	Log   []LogEntry
 	Toast string
+
+	// activity console (shared bottom drawer): a one-line status strip, expandable to the full feed.
+	ConsoleOpen     bool
+	ConsoleToggle   widget.Clickable
+	OpenLogBtn      widget.Clickable // "Open log" affordance shown in the Activity error state
+	LogFilterErrors bool             // console feed shows only warnings + errors
+	LogClearBtn     widget.Clickable
+	LogCopyBtn      widget.Clickable
+	LogFilterBtn    widget.Clickable
+
+	// Quality is the perceptual score of the last finished generation (shown as a friendly badge).
+	Quality QualityInfo
 
 	// settings widgets
 	Budget     widget.Float
@@ -110,11 +122,16 @@ type AppState struct {
 	lastBudget int
 	Mode       *Dropdown
 	InkRatio   widget.Float // hybrid Artist knob: fraction of the budget for FDoG ink lines (slider 0..1 -> ratio 0..MaxInkRatio); the rest is the geometrize fill
-	Alpha      widget.Bool
-	Backfit    widget.Bool
-	Boundary   widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
-	KeepInside widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
-	Seed       widget.Editor
+
+	// step-1 preset picker: the built-in modes and the saved presets are rendered as selectable cards
+	// (recognition over a text dropdown). Click targets parallel builtinCards / Presets respectively.
+	BuiltinCards []widget.Clickable
+	PresetCards  []widget.Clickable
+	Alpha        widget.Bool
+	Backfit      widget.Bool
+	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
+	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	Seed         widget.Editor
 
 	AlphaHint      Hint
 	BackfitHint    Hint
@@ -194,17 +211,23 @@ type AppState struct {
 	ExpGroups       [4]expertGroup // collapse state of the expert sub-sections
 
 	// actions
-	OpenBtn         widget.Clickable
-	PreviewOpen     widget.Clickable // the empty-state preview area doubles as an Open button
-	GenBtn          widget.Clickable
-	CancelBtn       widget.Clickable
-	InjectLayers    widget.Editor // exact FH6 template layer count for injection (library inject controls)
-	InjectLayersErr bool          // the FH6-layers field was empty/invalid on an Inject click — draw it red until a valid count is entered
-	InjectScale     widget.Editor // uniform scale of the injected art on the decal (1.0 = fit the canvas; <1 shrinks toward centre so it fits a zoomed-in editor view)
-	ElevateBtn      widget.Clickable
-	Elevated        bool        // process is running as administrator (set by main at startup)
-	Shield          image.Image // system UAC shield icon (nil if unavailable)
-	ShieldOp        paint.ImageOp
+	OpenBtn          widget.Clickable
+	PreviewOpen      widget.Clickable // the empty-state preview area doubles as an Open button
+	Recent           []string         // recently opened image paths (newest first); rendered in the Source card
+	RecentBtns       []widget.Clickable
+	escTag           int // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
+	GenBtn           widget.Clickable
+	CancelBtn        widget.Clickable
+	InjectLayers     widget.Editor // exact FH6 template layer count for injection (library inject controls)
+	InjectLayersErr  bool          // the FH6-layers field was empty/invalid on an Inject click — draw it red until a valid count is entered
+	InjectScale      widget.Editor // uniform scale of the injected art on the decal (1.0 = fit the canvas; <1 shrinks toward centre so it fits a zoomed-in editor view)
+	InjectHint       Hint          // explains the FH6-template-layers field (the inject footgun)
+	InjectGuideClick widget.Clickable
+	InjectGuideOpen  bool // the "How injecting works" steps are expanded
+	ElevateBtn       widget.Clickable
+	Elevated         bool        // process is running as administrator (set by main at startup)
+	Shield           image.Image // system UAC shield icon (nil if unavailable)
+	ShieldOp         paint.ImageOp
 
 	// preview interaction
 	Wipe        widget.Float
@@ -298,6 +321,7 @@ func NewAppState(th *Theme) *AppState {
 	s.Seed.SingleLine = true
 	s.Seed.SetText("1")
 	s.InkRatio.Value = ratioToSlider(preset.DefaultInkRatio("anime-ink")) // sane start; reseeded when a hybrid preset is picked
+	s.BuiltinCards = make([]widget.Clickable, len(builtinCards))
 	s.RandomEd.SingleLine = true
 	s.MutatedEd.SingleLine = true
 	s.SampleEd.SingleLine = true
@@ -407,6 +431,14 @@ func (s *AppState) FinishInject(id string, ok bool, until time.Time) {
 // InjectBusy reports whether any injection is currently in flight (used to block re-entry).
 func (s *AppState) InjectBusy() bool { return s.InjectingID != "" }
 
+// InjectLayersValue is the FH6 template layer count entered in the Library header (0 = unset/invalid).
+func (s *AppState) InjectLayersValue() int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s.InjectLayers.Text())); err == nil && v > 0 {
+		return v
+	}
+	return 0
+}
+
 // MaybeClearInjectResult drops the lingering tick/cross pill once its display window has elapsed.
 func (s *AppState) MaybeClearInjectResult(now time.Time) {
 	if s.InjectResultID != "" && !s.InjectResultUntil.IsZero() && now.After(s.InjectResultUntil) {
@@ -451,9 +483,19 @@ func (s *AppState) SetPreview(img *image.NRGBA) {
 	s.PreviewOp = paint.NewImageOp(img)
 }
 
-// AppendLog adds a line to the execution log (capped to the last 600 lines).
-func (s *AppState) AppendLog(line string) {
-	s.Log = append(s.Log, line)
+// SetRecent stores the recently-opened image paths (newest first) and rebuilds their click targets.
+func (s *AppState) SetRecent(paths []string) {
+	s.Recent = paths
+	s.RecentBtns = make([]widget.Clickable, len(paths))
+}
+
+// AppendLog adds a line to the activity feed, inferring its severity from the text (capped to 600).
+func (s *AppState) AppendLog(line string) { s.AppendLogLvl(classifyLog(line), line) }
+
+// AppendLogLvl adds a line with an explicit severity (used for the messages that matter most — phase
+// transitions, inject — where content-based classification would be ambiguous).
+func (s *AppState) AppendLogLvl(level LogLevel, line string) {
+	s.Log = append(s.Log, LogEntry{Time: time.Now(), Level: level, Text: line})
 	if len(s.Log) > 600 {
 		s.Log = s.Log[len(s.Log)-600:]
 	}
@@ -604,6 +646,7 @@ func (s *AppState) ApplyChoices(c preset.Choices) {
 	s.SetInkRatio(c.InkRatio)
 	s.Seed.SetText(strconv.FormatInt(c.Seed, 10))
 	s.Expert.Value = true
+	s.AdvOpen = true // a saved preset is a full snapshot — open Advanced so its loaded knobs are visible
 	s.applyKnobs(c)
 }
 
@@ -655,6 +698,7 @@ func (s *AppState) SelectPreset(value string) {
 // followed by the preset names), preserving the current selection where possible.
 func (s *AppState) SetPresets(ps []userpreset.Preset) {
 	s.Presets = ps
+	s.PresetCards = make([]widget.Clickable, len(ps))
 	builtin := []string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}
 	opts := append([]string{}, builtin...)
 	for i := range ps {

@@ -4,6 +4,8 @@ import (
 	"image"
 	"image/color"
 
+	"gioui.org/io/event"
+	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
@@ -26,7 +28,7 @@ func (s *AppState) Layout(gtx C) D {
 			}
 			return s.bodyRow(gtx)
 		}),
-		layout.Rigid(s.statusBar),
+		layout.Rigid(s.console), // shared activity console (status strip + expandable feed) — visible in both views
 	)
 	if s.LightboxOn { // drawn last so the full-image overlay sits on top of everything
 		s.lightboxOverlay(gtx)
@@ -34,7 +36,31 @@ func (s *AppState) Layout(gtx C) D {
 	if s.AboutOn {
 		s.aboutOverlay(gtx)
 	}
+	s.escDismiss(gtx)
 	return dims
+}
+
+// escDismiss lets Esc close a modal overlay (lightbox / About). Key focus is grabbed ONLY while an
+// overlay is up — where no text field is reachable — so it never interferes with typing; the scrim
+// stays click-to-dismiss regardless, so there's no regression if focus doesn't land.
+func (s *AppState) escDismiss(gtx C) {
+	if !s.LightboxOn && !s.AboutOn {
+		return
+	}
+	area := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
+	event.Op(gtx.Ops, &s.escTag)
+	area.Pop()
+	gtx.Execute(key.FocusCmd{Tag: &s.escTag})
+	for {
+		ev, ok := gtx.Event(key.Filter{Focus: &s.escTag, Name: key.NameEscape})
+		if !ok {
+			break
+		}
+		if ke, ok := ev.(key.Event); ok && ke.State == key.Press {
+			s.LightboxOn = false
+			s.AboutOn = false
+		}
+	}
 }
 
 // lightboxOverlay draws a dimmed full-window scrim with the selected library preview centred. The

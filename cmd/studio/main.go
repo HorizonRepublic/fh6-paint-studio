@@ -93,6 +93,7 @@ func loop(w *app.Window) error {
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
 	st.LastSeen = prefs.LastSeenVersion
+	st.SetRecent(prefs.Recent) // restore the recently-opened images
 
 	// Warm the shell file-dialog infrastructure in the background so the first Open shows the native
 	// dialog without a cold-start delay.
@@ -179,17 +180,34 @@ func loop(w *app.Window) error {
 
 	// savePrefs persists the UI preferences (window size + sound) to studio.json — called on exit and
 	// whenever a persisted toggle changes, so a preference survives even an unclean shutdown.
+	recent := append([]string(nil), prefs.Recent...) // recently-opened images, newest first
 	savePrefs := func() {
 		on := st.SoundOn.Value
 		keep := st.KeepInside.Value
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
 			KeepInside: &keep, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
-			LastSeenVersion: st.LastSeen}
+			LastSeenVersion: st.LastSeen, Recent: recent}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
 		}
 		saveConfig(c)
+	}
+	// pushRecent moves a freshly-opened image to the front of the recent list (deduped, capped) and
+	// persists it, so it survives a restart and shows in the Source card.
+	pushRecent := func(p string) {
+		if p == "" {
+			return
+		}
+		out := []string{p}
+		for _, q := range recent {
+			if q != p && len(out) < 8 {
+				out = append(out, q)
+			}
+		}
+		recent = out
+		st.SetRecent(recent)
+		savePrefs()
 	}
 
 	post := func(e runner.Event) { q.push(e); w.Invalidate() }
@@ -301,6 +319,15 @@ func loop(w *app.Window) error {
 						}
 						hybridInk = 0
 					}
+					// Perceptual quality of the finished render vs the source (still at the run dims, before
+					// the keep-inside unpad) — shown as a friendly badge in the Activity panel.
+					if curGen != nil && canvas != nil && canvas.Bounds().Dx() == curGen.W && canvas.Bounds().Dy() == curGen.H {
+						src := imageio.EncodeForDisplay(curGen.Pixels)
+						de, _ := metric.DeltaE76(src, nrgbaToFloat(canvas), curGen.W, curGen.H)
+						ss := metric.SSIM(src, nrgbaToFloat(canvas), curGen.W, curGen.H)
+						st.SetQuality(de, ss)
+						st.AppendLog(fmt.Sprintf("quality: ΔE76 %.2f · SSIM %.3f", de, ss))
+					}
 					if curGen != nil { // crop run -> crop dims; whole-image run -> full dims
 						lastW, lastH = curGen.W, curGen.H
 					}
@@ -350,6 +377,7 @@ func loop(w *app.Window) error {
 					st.SetSource(res.img, res.path)
 					st.Toast = ""
 					st.Log = nil
+					pushRecent(res.path)
 				}
 			}
 
@@ -368,6 +396,12 @@ func loop(w *app.Window) error {
 				// Gio's main thread would make the modal SendMessage to that thread and deadlock.
 				picking = true
 				go func() { openPick.put(pickFile(0)); w.Invalidate() }()
+			}
+			// Reopen a recently-used image (clicked in the Source card).
+			for i := range st.RecentBtns {
+				if st.RecentBtns[i].Clicked(gtx) && !opening && !picking && i < len(st.Recent) {
+					beginOpen(st.Recent[i])
+				}
 			}
 			if p, ok := openPick.take(); ok {
 				picking = false
@@ -440,6 +474,7 @@ func loop(w *app.Window) error {
 					}
 					st.AppendLog(fmt.Sprintf("%s: %d ink lines + %d fill (%.0f%% lines)", ch.Mode, hybridInk, r.Options.StopAt, ch.InkRatio*100))
 				}
+				st.ClearQuality() // drop the previous run's quality badge
 				st.Stats = ui.RunStats{Total: r.Options.StopAt}
 				cancelRun = runner.RunAsync(*genPrep, r, post)
 			}
@@ -455,6 +490,7 @@ func loop(w *app.Window) error {
 			if st.LibraryTab.Clicked(gtx) {
 				st.View = ui.ViewLibrary
 				reloadLibrary(st, store) // pick up anything saved since
+				prefillInjectLayers(st)  // seed the FH6-template field so it isn't a blank footgun
 			}
 			if st.OpenFolderBtn.Clicked(gtx) && store != nil {
 				openInExplorer(store.Root)
@@ -658,8 +694,11 @@ func loop(w *app.Window) error {
 				st.FinishInject(o.id, o.err == nil, gtx.Now.Add(6*time.Second))
 				if o.err != nil {
 					st.Toast = "Inject failed: " + o.err.Error()
+					st.AppendLogLvl(ui.LogErr, "inject failed: "+o.err.Error())
+					st.ConsoleOpen = true // surface the failure — the Library view has no Activity card
 				} else {
 					st.Toast = "Injected — now Save & reload the vinyl in FH6 to apply"
+					st.AppendLogLvl(ui.LogGood, "injected OK — Save & reload the vinyl in FH6 to apply")
 				}
 			}
 
@@ -750,6 +789,42 @@ func loadPreviewImage(store *library.Store, id string) (image.Image, error) {
 	defer f.Close()
 	img, _, err := image.Decode(f)
 	return img, err
+}
+
+// nrgbaToFloat converts an sRGB NRGBA image to the packed []float32 RGBA (0..1) the metric package
+// expects, honouring the row stride.
+func nrgbaToFloat(img *image.NRGBA) []float32 {
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	out := make([]float32, w*h*4)
+	for y := 0; y < h; y++ {
+		row := img.Pix[y*img.Stride : y*img.Stride+w*4]
+		for x := 0; x < w*4; x++ {
+			out[y*w*4+x] = float32(row[x]) / 255
+		}
+	}
+	return out
+}
+
+// prefillInjectLayers seeds the FH6-template count (when blank) from the largest generation, capped to
+// the per-group ceiling — a safe default that fits every entry, which the per-row fit badge then
+// confirms. The user lowers it to match their real in-game template; the badges update to show drops.
+func prefillInjectLayers(st *ui.AppState) {
+	if strings.TrimSpace(st.InjectLayers.Text()) != "" {
+		return
+	}
+	max := 0
+	for i := range st.LibRows {
+		if n := st.LibRows[i].Entry.Shapes; n > max {
+			max = n
+		}
+	}
+	if max <= 0 {
+		return
+	}
+	if max > preset.MaxShapes {
+		max = preset.MaxShapes
+	}
+	st.InjectLayers.SetText(strconv.Itoa(max))
 }
 
 // reloadLibrary refreshes the UI library rows from the store (newest first, thumbs decoded on the UI
