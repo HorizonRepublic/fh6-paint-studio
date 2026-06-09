@@ -31,16 +31,17 @@ const MaxInkRatio = 0.5
 // and WeightStrength use -1; PolishTau0/Tau1 use 0; Overdraw uses 0/1 for off.
 
 type Choices struct {
-	Shapes   int     // budget; clamped to [1, MaxShapes]
-	Mode     string  // anime|photo|flat (3 manual presets; legacy names collapse via presetMode; "" -> anime)
-	InkRatio float64 // hybrid family only: fraction of the budget spent on FDoG ink lines (0..MaxInkRatio); fill gets the rest. 0 = no lines / non-hybrid.
-	Quality  string  // fast|balanced|max|quality|ultra ("" -> balanced)
-	Alpha    *bool   // nil = mode default; set = override (forced off for cutouts)
-	Seed     int64
-	Polish   *bool // nil = on
-	Backfit  *bool // nil = mode default (auto for flat/logo/line/cutout)
-	Boundary *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
-	SS       int   // preview supersample factor (UI-side; carried through Resolved.SS)
+	Shapes    int     // budget; clamped to [1, MaxShapes]
+	Mode      string  // anime|photo|flat (3 manual presets; legacy names collapse via presetMode; "" -> anime)
+	MonoColor string  // MONO single-colour logo/decal: "" = off; "auto" = the logo's dominant ink colour; "#RRGGBB" = exact. Forces a flat single-colour cutout (every shape one solid colour, no grey edges). Orthogonal to Mode — implies flat.
+	InkRatio  float64 // hybrid family only: fraction of the budget spent on FDoG ink lines (0..MaxInkRatio); fill gets the rest. 0 = no lines / non-hybrid.
+	Quality   string  // fast|balanced|max|quality|ultra ("" -> balanced)
+	Alpha     *bool   // nil = mode default; set = override (forced off for cutouts)
+	Seed      int64
+	Polish    *bool // nil = on
+	Backfit   *bool // nil = mode default (auto for flat/logo/line/cutout)
+	Boundary  *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
+	SS        int   // preview supersample factor (UI-side; carried through Resolved.SS)
 
 	// Advanced (zero = preset/mode default, except Aspect/WeightStrength/AlphaMin = -1)
 	Random, Mutated, SampleBudget, MaxNoImprove int
@@ -100,6 +101,19 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 	}
 	flatMode := resolved == "flat"
 	transparent := prep.HasTransparency && !prep.PaddedOpaque // padded-opaque keeps content tuning; spill penalty still fires
+
+	// MONO single-colour logo/decal (c.MonoColor): binarize the target to a clean single-colour cutout
+	// (no grey antialiased-edge shapes) and snap every shape to that exact colour at the end of the run.
+	// Implies flat + opaque cutout. Work on a COPY so the loaded source is never mutated (studio re-runs
+	// + the source thumbnail share prep.Pixels); the colour is sampled from the ORIGINAL pixels.
+	var monoLock *model.RGBA
+	if lc, ok := engine.ParseLockColor(c.MonoColor, prep.Pixels, w, h, prep.HasTransparency); ok {
+		binar := append([]float32(nil), prep.Pixels...)
+		engine.BinarizeForLock(binar, w, h, lc, prep.HasTransparency)
+		prep.Pixels = binar // local copy only — md/sp/weight below now fit the clean mono mask
+		prep.HasTransparency = true
+		monoLock, transparent, resolved, flatMode = &lc, true, "flat", true
+	}
 
 	// All benchmark-hardwired per-mode constants come from ModeDefaultsFor (the single source of truth
 	// shared with the CLI). The override logic (explicit Choices fields) stays here.
@@ -194,6 +208,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		LiveBatch:         ecoLB,
 		LiveBase:          ecoBase,
 		AnnealIters:       ecoAnneal,
+		LockColor:         monoLock,
 		StandoutTol:       c.StandoutTol,
 		// Boundary-aware radius: opt-in (caller toggle). A real win on smooth photo/anime character
 		// content but a regression on text/flat, with no clean way to gate automatically — so it is

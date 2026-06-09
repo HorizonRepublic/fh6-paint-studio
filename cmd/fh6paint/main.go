@@ -61,6 +61,7 @@ func main() {
 	weightV2 := flag.Bool("weight-v2", false, "force the richer dilated ink-aware saliency map (WeightMapV2) on/off; default is auto (on for flat/logo/line/cutout, off for photo/anime). V2 protects 1-2px black contours from being smeared by flat-fill shapes.")
 	preprocess := flag.String("preprocess", "auto", "target preprocessing: none|luma_bands. luma_bands = edge-weighted luminance banding (cleans contours/flat fills for the generator). auto = none (kept as a manual opt-in for noisy sources).")
 	posterize := flag.Int("posterize", 0, "quantize each target RGB channel to N levels before fitting (0=off; ~32-96 for flat/logo to snap broad color regions to exact constants). Applied after -preprocess.")
+	lockColorFlag := flag.String("lock-color", "", "MONO logo mode: force ALL shapes to ONE colour for a flat single-colour brand logo / decal. \"\"=off; \"auto\"=the logo's dominant ink colour; \"#RRGGBB\"=an exact colour. Binarizes the target to a clean single-colour cutout (no grey antialiased-edge shapes) and snaps every output shape to that colour. Output is always a transparent-background cutout.")
 	aspect := flag.Float64("aspect", -1, "max aspect ratio for ellipse/rect candidates: minor=major/U(1,aspect) makes thin slivers along the edge orientation (traces sharp contours). -1=auto (flat 8, organic 6). <=1 = round axes.")
 	ssaa := flag.Int("ss", 1, "preview supersampling factor (1=off): render the output shapes at ss× then box-downsample for ANTI-ALIASED edges. Our raster uses hard binary coverage, so contours are 1px steps while the source images have soft ~1-2px ramps — that mismatch is where nearly all residual image-space error sits. ss=3-4 closes it. Affects the preview/comparison render only (the game rasterizes the geometry itself).")
 	gpuSearch := flag.Bool("gpu-search", true, "CUDA build only: run each shape's random-candidate phase on-device (generate+score+argmin in one launch) — the throughput unlock for high candidate volume. Ignored by the CPU backend (host path).")
@@ -328,6 +329,24 @@ func main() {
 		prep.Pixels = metric.Posterize(prep.Pixels, prep.W, prep.H, *posterize)
 	}
 
+	// MONO single-colour logo mode (-lock-color): binarize the target to a clean single-colour
+	// cutout so no grey antialiased-edge shapes appear, and tell the engine to snap every shape to
+	// that exact colour. Forces opaque cutout-style placement regardless of the content mode.
+	var lockColor *model.RGBA
+	if *lockColorFlag != "" {
+		lc, ok := engine.ParseLockColor(*lockColorFlag, prep.Pixels, prep.W, prep.H, prep.HasTransparency)
+		if !ok {
+			must(fmt.Errorf("invalid -lock-color %q (use \"auto\" or \"#RRGGBB\")", *lockColorFlag))
+		}
+		engine.BinarizeForLock(prep.Pixels, prep.W, prep.H, lc, prep.HasTransparency)
+		lockColor = &lc
+		prep.HasTransparency = true // mono output is a single-colour cutout decal
+		cutout = true               // opaque, crisp-silhouette placement (useV2, no compact bias)
+		allowAlpha = false
+		applog.Printf("mono lock-colour #%02X%02X%02X — binarized target to a single-colour cutout",
+			model.EncByte(lc.R), model.EncByte(lc.G), model.EncByte(lc.B))
+	}
+
 	// Saliency map: flat/line-art/cutout default to the richer WeightMapV2 (absolute,
 	// 3x3-dilated, ink-aware) for crisp contours; smooth content keeps the Sobel WeightMap.
 	// -weight-v2 forces the choice. Scale-invariant => no backend/CUDA change.
@@ -499,6 +518,7 @@ func main() {
 		AnnealIters:       *anneal,
 		LiveBatch:         *live,
 		LiveBase:          *liveBase,
+		LockColor:         lockColor,
 		Progress: func(n int, e float64) {
 			if n%25 == 0 {
 				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, fillBudget, e, time.Since(start).Seconds())

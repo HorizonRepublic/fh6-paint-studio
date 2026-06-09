@@ -137,6 +137,11 @@ func (s *AppState) settingsCard(gtx C) D {
 		layout.Rigid(func(gtx C) D { return s.stepHeader(gtx, "2", "Adjust") }),
 		layout.Rigid(GapV(10).Layout),
 		layout.Rigid(s.budgetRow),
+		layout.Rigid(GapV(10).Layout),
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.Mono, "Single colour (logo / decal)", &s.MonoHint,
+				"For a FLAT single-colour brand logo or decal. Forces every shape to ONE solid colour (auto-detected from the logo) on a clean cutout, so there are no grey antialiased-edge shapes and no background box — just the crisp single-colour silhouette. Pairs with a low shape budget. Leave OFF for normal multi-colour images.")
+		}),
 		layout.Rigid(func(gtx C) D {
 			if !preset.IsHybridMode(s.baseMode) { // the Artist line/fill dial only applies to the hybrids
 				return D{}

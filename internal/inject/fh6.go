@@ -38,7 +38,23 @@ func (f *FH6) Inject(shapes []model.Shape, w, h int) error {
 	if f.Canvas != nil {
 		cm = *f.Canvas
 	}
-	return f.run(shapes, cm)
+	return f.run(dropInvisible(shapes), cm)
+}
+
+// dropInvisible removes fully-transparent shapes (alpha byte 0). The editor's transparency floor
+// (~0.78%, see fh6Alpha) would otherwise render an alpha-0 shape as a faint grey haze: a cutout /
+// transparent-background reconstruction's BACKGROUND rectangle is alpha 0 and meant to be invisible, so
+// injecting it draws a grey box around the logo (reported in-game). Opaque backgrounds (alpha 255) and
+// every semi-transparent shape (alpha ≥ alphaMin·255) are kept — only the truly invisible bg is dropped.
+func dropInvisible(shapes []model.Shape) []model.Shape {
+	out := make([]model.Shape, 0, len(shapes))
+	for _, s := range shapes {
+		if len(s.Color) >= 4 && s.Color[3] == 0 {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // Locate finds the FH6 process and the live layer table for the configured layer count WITHOUT

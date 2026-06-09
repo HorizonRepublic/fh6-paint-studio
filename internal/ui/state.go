@@ -132,12 +132,14 @@ type AppState struct {
 	Backfit      widget.Bool
 	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
 	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	Mono         widget.Bool // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
 	Seed         widget.Editor
 
 	AlphaHint      Hint
 	BackfitHint    Hint
 	BoundaryHint   Hint
 	KeepInsideHint Hint
+	MonoHint       Hint
 	BudgetHint     Hint
 	ModeHint       Hint
 	InkHint        Hint
@@ -580,6 +582,11 @@ func (s *AppState) Choices() preset.Choices {
 	if v, err := strconv.ParseInt(strings.TrimSpace(s.Seed.Text()), 10, 64); err == nil {
 		c.Seed = v
 	}
+	// MONO single-colour logo/decal — a curated toggle (works in any mode; preset.Resolve forces the
+	// flat single-colour cutout). "auto" picks the logo's dominant ink colour.
+	if s.Mono.Value {
+		c.MonoColor = "auto"
+	}
 	if !s.Expert.Value {
 		return c
 	}
@@ -645,6 +652,7 @@ func (s *AppState) ApplyChoices(c preset.Choices) {
 	s.baseMode = c.Mode
 	s.RestoreBudget(c.Shapes)
 	s.SetInkRatio(c.InkRatio)
+	s.Mono.Value = c.MonoColor != ""
 	s.Seed.SetText(strconv.FormatInt(c.Seed, 10))
 	s.Expert.Value = true
 	s.AdvOpen = true // a saved preset is a full snapshot — open Advanced so its loaded knobs are visible

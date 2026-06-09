@@ -395,6 +395,9 @@ func (r *run) refine() {
 			p.apply(r)
 		}
 	}
+	// MONO mode: snap every shape to the exact lock colour LAST, after polish/back-fit/standout have
+	// finished moving colours — guaranteeing one pure brand colour in the output.
+	r.lockColors()
 }
 
 // setStatus reports the current post-greedy phase to the optional Options.Status callback (a UI
