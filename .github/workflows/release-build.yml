@@ -1,6 +1,6 @@
 name: Release build
 
-# Builds the 2-file Windows release (GUI exe + fat CUDA DLL). On a release it attaches the .7z to the
+# Builds the Windows release (GUI exe + fat CUDA DLL + cross-vendor Vulkan DLL). On a release it attaches the .7z to the
 # GitHub release; on a release-touching PR it builds the same and uploads the .7z as an artifact (a
 # dry-run, so a tag is never the first time the release build runs). Also dispatchable by hand.
 on:
@@ -21,6 +21,7 @@ on:
       - "scripts/**"
       - "cmd/studio/**"
       - "internal/backend/cuda/shim.cu"
+      - "internal/backend/vulkan/**"
       - ".github/workflows/release-build.yml"
 
 permissions:
@@ -30,7 +31,7 @@ permissions:
 
 jobs:
   windows:
-    name: Build & attach (GUI + fat CUDA DLL)
+    name: Build & attach (GUI + CUDA + Vulkan)
     # windows-2022 ships VS 2022 (MSVC 14.4x), which CUDA 12.8's cudafe++ supports. windows-latest now
     # ships VS 18 / MSVC 14.51, on which 12.8's cudafe++ crashes (ACCESS_VIOLATION at compile time).
     runs-on: windows-2022
@@ -54,7 +55,12 @@ jobs:
           cuda: "12.8.1"
           sub-packages: '["nvcc", "cudart"]'
           method: "network"
-      - name: Build release (fat CUDA DLL + GUI)
+      # Vulkan shim toolchain (glslang + headers + volk) assembled into third_party\vulkan so
+      # build-vulkan.ps1 can compile fh6vk.dll; MSVC (set up above) compiles the shim + volk.
+      - name: Set up Vulkan toolchain
+        shell: pwsh
+        run: .\scripts\setup-vulkan-ci.ps1
+      - name: Build release (CUDA + Vulkan + GUI)
         shell: pwsh
         run: .\scripts\build-release.ps1 -Toolkit "$env:CUDA_PATH" -Version "$env:VERSION"
       # Archived from inside bin\ so the files sit flat (no bin\ folder on extract).
@@ -63,7 +69,7 @@ jobs:
         run: |
           $archive = "fh6-paint-studio-${env:VERSION}-windows-x64.7z"
           Push-Location bin
-          7z a -mx=9 "..\$archive" fh6-paint-studio.exe fh6cuda.dll
+          7z a -mx=9 "..\$archive" fh6-paint-studio.exe fh6cuda.dll fh6vk.dll
           $code = $LASTEXITCODE
           Pop-Location
           if ($code -ne 0) { throw "7z failed ($code)" }

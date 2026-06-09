@@ -33,6 +33,12 @@ jobs:
         run: |
           go build -tags cuda ./cmd/studio
           go build -tags cuda ./cmd/fh6paint
+      # allgpu = CUDA + Vulkan auto-select + the in-app engine picker. Like the cuda build, both shims
+      # load via syscall at runtime, so this only verifies the allgpu-tagged Go compiles (no toolchains).
+      - name: Build (allgpu-tagged)
+        run: |
+          go build -tags allgpu ./cmd/studio
+          go build -tags allgpu ./cmd/fh6paint
       # The studio half of the release build (version resource + ldflags), no CUDA toolkit needed.
       - name: Release smoke (version resource + studio exe)
         shell: pwsh
