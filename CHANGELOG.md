@@ -5,12 +5,18 @@
 
 ### Features
 
-* line-art stylizer, hybrid mode, and AMD/Intel GPU support ([ce261b4](https://github.com/HorizonRepublic/fh6-paint-studio/commit/ce261b4084da58dbe35fabacf741e4a9a7a25ebb))
+* Line-art and anime stylizer — turn an image into clean vector line-art or anime-style vinyls
+* Hybrid mode that lays ink lines over a geometrize fill
+* Single-colour mode for clean one-colour logos and decals
+* A built-in Library to save, browse and reuse past generations
+* A crop tool to focus generation on part of an image
+* Runs on AMD and Intel GPUs, not just NVIDIA
+* Pick the GPU engine (CUDA or Vulkan) in the studio
 
 
-### Bug Fixes
+### Performance
 
-* **deps:** update module golang.org/x/image to v0.42.0 ([#23](https://github.com/HorizonRepublic/fh6-paint-studio/issues/23)) ([b431681](https://github.com/HorizonRepublic/fh6-paint-studio/commit/b431681569fb31378f10247df9d98e89a1dda251))
+* Faster refinement, so generations finish quicker
 
 ## [1.1.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.0.1...v1.1.0) (2026-06-04)
 
