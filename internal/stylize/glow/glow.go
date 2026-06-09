@@ -164,6 +164,9 @@ func ringDeviates(src *stylize.SrcImage, w, h, px, py int, r float64, seed model
 // compositeGlow alpha-composites a glow (colour=seed, FH6 KindGlow falloff, radius r) into canvas over its
 // footprint and refreshes err there. a = FalloffGlow(t), t = elliptical normalised radius (isotropic here).
 func compositeGlow(canvas []model.RGBA, err []float64, src *stylize.SrcImage, w, h, px, py int, r float64, seed model.RGBA) {
+	if r < 1 {
+		r = 1 // floor: r=0 (custom rMin with no growth) would divide by zero at t = hypot/r -> NaN canvas
+	}
 	ri := int(math.Ceil(r))
 	for dy := -ri; dy <= ri; dy++ {
 		y := py + dy

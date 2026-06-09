@@ -147,6 +147,7 @@ func loop(w *app.Window) error {
 	// size (TranslateShapes/UnpadCanvas) — a clean, frame-free result. runPadPx==0 means no surround.
 	var runPadPx, runOrigW, runOrigH int
 	var cancelRun func()
+	var runCancelled bool        // set when the user cancels; the engine still emits Done, so the Done handler must not treat a cancelled run as a finished one
 	var lastShapes []model.Shape // final base geometry, for export
 	var lastW, lastH int
 
@@ -269,6 +270,7 @@ func loop(w *app.Window) error {
 					st.RandomEd.SetText("600") // fast demo via custom override (quality is auto now)
 					st.MutatedEd.SetText("400")
 					st.Phase = ui.PhaseRunning
+					runCancelled = false
 					runStart = time.Now()
 					curGen = curPrep
 					r := preset.Resolve(*curPrep, st.Choices())
@@ -343,22 +345,30 @@ func loop(w *app.Window) error {
 					st.Stats.Err = ev.Result.FinalError
 					st.Stats.ETA = 0
 					lastShapes = shapes
-					doneMsg := fmt.Sprintf("done: %d shapes, error %.1f in %s",
-						st.Stats.Shapes, ev.Result.FinalError, fmtSecs(st.Stats.Elapsed))
-					if st.Stats.Cap > 0 && st.Stats.Shapes < st.Stats.Cap*9/10 {
-						doneMsg += fmt.Sprintf(" — auto-trimmed from %d (optimal for this image)", st.Stats.Cap)
-					}
-					st.AppendLog(doneMsg)
 					cancelRun = nil
-					st.Phase = ui.PhaseDone
 					st.Stats.Stage = ""
 					tb.clear()
-					flashWindow(winHWND) // nudge the taskbar button if the user is in another window (e.g. FH6)
-					if st.SoundOn.Value {
-						playDoneSound()
+					if runCancelled {
+						// The engine emits Done even on a cooperative cancel (it keeps the partial result).
+						// Treat it honestly: show the partial preview, but DON'T announce success, label it
+						// "optimal", save it to the library, or chime — none of that is true for a cancel.
+						st.AppendLog(fmt.Sprintf("cancelled at %d shapes — partial result kept (not saved)", st.Stats.Shapes))
+						st.Phase = ui.PhaseIdle
+					} else {
+						doneMsg := fmt.Sprintf("done: %d shapes, error %.1f in %s",
+							st.Stats.Shapes, ev.Result.FinalError, fmtSecs(st.Stats.Elapsed))
+						if st.Stats.Cap > 0 && st.Stats.Shapes < st.Stats.Cap*9/10 {
+							doneMsg += fmt.Sprintf(" — auto-trimmed from %d (optimal for this image)", st.Stats.Cap)
+						}
+						st.AppendLog(doneMsg)
+						st.Phase = ui.PhaseDone
+						flashWindow(winHWND) // nudge the taskbar button if the user is in another window (e.g. FH6)
+						if st.SoundOn.Value {
+							playDoneSound()
+						}
+						savePrefs() // persist the preset + budget that just produced a result
+						saveDecalToLibrary(st, store, lastShapes, lastW, lastH)
 					}
-					savePrefs() // persist the preset + budget that just produced a result
-					saveDecalToLibrary(st, store, lastShapes, lastW, lastH)
 				case runner.Failed:
 					st.Phase = ui.PhaseError
 					st.Stats.Stage = ""
@@ -463,6 +473,7 @@ func loop(w *app.Window) error {
 				}
 				curGen = genPrep
 				st.Phase = ui.PhaseRunning
+				runCancelled = false
 				runStart = time.Now()
 				tb.indeterminate() // instant taskbar feedback until the first progress tick
 				ch := st.Choices()
@@ -485,6 +496,7 @@ func loop(w *app.Window) error {
 			}
 			if st.CancelBtn.Clicked(gtx) && cancelRun != nil {
 				cancelRun()
+				runCancelled = true
 				tb.clear()
 				st.AppendLog("cancelling…")
 			}
@@ -673,16 +685,19 @@ func loop(w *app.Window) error {
 					}
 				}
 				if r.ThumbBtn.Clicked(gtx) && store != nil { // open the full preview in the lightbox
-					if img, err := loadPreviewImage(store, r.Entry.ID); err == nil {
+					if st.LightboxOn {
+						// A click while the preview is open dismisses it. Gio only re-resolves the pointer
+						// hit-target on a MOVE, so a click that doesn't move the cursor lands back on the
+						// thumb that opened it (not the scrim) — handle that here so it closes on first click.
+						st.HideLightbox()
+					} else if img, err := loadPreviewImage(store, r.Entry.ID); err == nil {
 						st.ShowLightbox(img)
 					} else {
 						st.Toast = "Preview unavailable: " + err.Error()
 					}
 				}
 			}
-			if st.LightboxClose.Clicked(gtx) { // click anywhere on the overlay to dismiss
-				st.HideLightbox()
-			}
+			// (the lightbox now dismisses itself via its own pointer capture in lightboxOverlay)
 			if needReload {
 				reloadLibrary(st, store)
 			}
@@ -912,7 +927,7 @@ func exportLibraryEntry(store *library.Store, id, dst string) string {
 	}
 	if src, err := os.Open(store.PreviewPath(id)); err == nil {
 		defer src.Close()
-		if out, err := os.Create(strings.TrimSuffix(dst, ".json") + ".png"); err == nil {
+		if out, err := os.Create(strings.TrimSuffix(dst, filepath.Ext(dst)) + ".png"); err == nil {
 			_, _ = io.Copy(out, src)
 			out.Close()
 		}

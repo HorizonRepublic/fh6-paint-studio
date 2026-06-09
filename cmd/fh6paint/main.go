@@ -91,6 +91,7 @@ func main() {
 	live := flag.Int("live", 0, "EXPERIMENTAL LIVE-style component-init scheduler (0=off, REPLACES greedy when >0): add shapes in batches of this size seeded from the largest residual components (big regions first) + re-polish ALL jointly after every batch. The proven low-primitive-count win (5 paths vs 256). For the low-budget economy regime; ~6-10 batch. Use at low -shapes with -polish.")
 	liveBase := flag.Int("live-base", 0, "with -live: run the LIVE co-adaptation only for the first this-many shapes (the structural BASE), then greedy for the rest of -shapes (the detail). 0 = LIVE all the way. The two-phase economy: cheap co-adapted base frees budget for detail; affordable at full -shapes since LIVE runs only on the base.")
 	anneal := flag.Int("anneal", 0, "EXPERIMENTAL basin-hopping / iterated local search (0=off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget economy regime (50-300 shapes); ~20-40 iters. Costly (re-polishes each iter) — use only at low -shapes.")
+	economy := flag.Bool("economy", false, "opt-in to the auto economy schedule (LIVE co-adaptation / anneal at ≤~1500 shapes): better quality at low budgets but ~4x slower (re-polishes all shapes per batch). Off by default. Explicit -live/-anneal override it regardless.")
 	scoreJSON := flag.String("score-json", "", "comparison mode: render an existing geometry JSON through our backend, score it (unweighted SSE + per-pixel) vs -input, save -preview, then exit. Set -max-res to the JSON's canvas size for alignment.")
 	polishJSON := flag.String("polish-json", "", "polish-harness mode: load a saved greedy geometry JSON, run ONLY the gated joint polish on it (current -polish-* opts) against -input, save polished -output + -preview, then exit. The greedy input is FIXED, so any final-error delta is purely the polish change — an isolated harness for tuning polish (faster than a full run). Set -max-res to the JSON canvas size.")
 	imgVs := flag.String("img-vs", "", "image-space comparison: compare the -input PNG against this PNG pixel-for-pixel (must be same size), report SSE + per-pixel, save a difference heatmap to -preview, then exit. Convention-free (no rendering).")
@@ -102,9 +103,11 @@ func main() {
 	hybridInk := flag.Int("hybrid-ink", 0, "HYBRID: after the geometrize run, lay up to N clean FDoG ink lines (stylizer) ON TOP — the optimized colour/detail fill (alive eyes) + the designed anime outline. N>0: -shapes is the fill budget, total = -shapes + N. N=-1: AUTO — split -shapes by content (photo→no lines; line-art→line-heavy 35%; cel→fill-heavy 12%; else 20%). 0=off.")
 	saveLib := flag.Bool("library", false, "save the final geometry as a Studio library entry (~/FH6PaintStudio/library) for one-click word-only in-game inject from the Library tab (works for the geometrize + hybrid path).")
 	metrics := flag.Bool("metrics", false, "print perceptual quality of the final render vs the source (ΔE76 mean/p95, SSIM, banding) — the offline quality harness; the WYSIWYG render is in-game-faithful so these correlate with the eye.")
+	perceptualLuma := flag.Bool("perceptual-luma", false, "EXPERIMENT (default off): compute WeightMapV2's luma in sRGB space so its darkness/highlight pivots land correctly in the linear pipeline. A/B only — validate by eye end-to-end (REVIEW M4).")
 	flag.Parse()
 
 	model.LinearLight = *linear
+	metric.PerceptualLuma = *perceptualLuma
 	applyPreset(*preset, randomSamples, mutated, sampleBudget, maxNoImprove)
 
 	logPath := applog.Init("fh6paint.log")
@@ -233,9 +236,10 @@ func main() {
 	if !userSet["knee-floor"] {
 		*kneeFloor = md.KneeFloor
 	}
-	// Economy auto-schedule (same source of truth as the studio): a co-adapted LIVE base / anneal at low-mid
-	// budgets lifts quality. Explicit -live / -live-base / -anneal override.
-	if !userSet["live"] && !userSet["live-base"] && !userSet["anneal"] {
+	// Economy schedule (OPT-IN via -economy; same source of truth as the studio): a co-adapted LIVE base /
+	// anneal at low-mid budgets lifts quality but is ~4x slower, so it is off unless asked for. Explicit
+	// -live / -live-base / -anneal override regardless.
+	if *economy && !userSet["live"] && !userSet["live-base"] && !userSet["anneal"] {
 		*live, *liveBase, *anneal = presetpkg.EconomyParams(resolvedMode, fillBudget)
 	}
 	// Alpha + kind mix (md): organic = semi-transparent, alphaMin 0.40, triangle-rich; flat = OPAQUE,
@@ -333,7 +337,9 @@ func main() {
 	// cutout so no grey antialiased-edge shapes appear, and tell the engine to snap every shape to
 	// that exact colour. Forces opaque cutout-style placement regardless of the content mode.
 	var lockColor *model.RGBA
-	if *lockColorFlag != "" {
+	// Mono only applies to the main geometrize run (it snaps the shapes Run produces). Skip it for the
+	// score-json / polish-json / gaussian modes, where it would silently binarize the target with no snap.
+	if *lockColorFlag != "" && *scoreJSON == "" && *polishJSON == "" && !*gaussian {
 		lc, ok := engine.ParseLockColor(*lockColorFlag, prep.Pixels, prep.W, prep.H, prep.HasTransparency)
 		if !ok {
 			must(fmt.Errorf("invalid -lock-color %q (use \"auto\" or \"#RRGGBB\")", *lockColorFlag))

@@ -127,7 +127,11 @@ func (e *engine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 			continue // region sits in the light background → don't paint a halo there, free its budget
 		}
 		var s []model.Shape
-		fillRatio := float64(regions[i].Area) / float64(regions[i].BW*regions[i].BH)
+		bbArea := regions[i].BW * regions[i].BH
+		if bbArea <= 0 {
+			continue // degenerate region (zero-area bbox) — skip rather than divide by zero
+		}
+		fillRatio := float64(regions[i].Area) / float64(bbArea)
 		// One moment-fit ellipse covers a compact region (round blob OR straight sliver) where
 		// triangulation spends ~6-10 triangles and blocks spend a dozen squares — freeing budget for
 		// detail. Only when the ellipse genuinely matches the mask (IoU gate); concave/sprawling regions

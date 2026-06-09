@@ -47,9 +47,14 @@ func (s *AppState) escDismiss(gtx C) {
 	if !s.LightboxOn && !s.AboutOn {
 		return
 	}
+	// PassOp: this key-focus area covers the whole window and is registered AFTER the overlays, so
+	// without pass-through it could occlude their click-to-dismiss. Pass lets pointer events fall
+	// through to the scrim; the tag still receives KEY events via the focus below.
+	pass := pointer.PassOp{}.Push(gtx.Ops)
 	area := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
 	event.Op(gtx.Ops, &s.escTag)
 	area.Pop()
+	pass.Pop()
 	gtx.Execute(key.FocusCmd{Tag: &s.escTag})
 	for {
 		ev, ok := gtx.Event(key.Filter{Focus: &s.escTag, Name: key.NameEscape})
@@ -64,20 +69,37 @@ func (s *AppState) escDismiss(gtx C) {
 }
 
 // lightboxOverlay draws a dimmed full-window scrim with the selected library preview centred. The
-// whole surface is a click target (LightboxClose) so a click anywhere dismisses it.
+// whole surface EXPLICITLY captures pointer presses on its own tag: that both dismisses it on a click
+// anywhere AND occludes the gallery thumbnails behind, so a click can't fall through and re-open
+// (the bug a plain click-wrapped scrim had — the thumb behind kept eating the dismiss click).
 func (s *AppState) lightboxOverlay(gtx C) D {
-	return s.LightboxClose.Layout(gtx, func(gtx C) D {
-		sz := gtx.Constraints.Max
-		paint.FillShape(gtx.Ops, color.NRGBA{A: 224}, clip.Rect{Max: sz}.Op())
-		pointer.CursorPointer.Add(gtx.Ops) // whole overlay is click-to-dismiss
-		if (s.LightboxOp != paint.ImageOp{}) {
-			gtx.Constraints.Min = sz
-			layout.UniformInset(unit.Dp(32)).Layout(gtx, func(gtx C) D {
-				return widget.Image{Src: s.LightboxOp, Fit: widget.Contain, Position: layout.Center}.Layout(gtx)
-			})
+	sz := gtx.Constraints.Max
+	paint.FillShape(gtx.Ops, color.NRGBA{A: 224}, clip.Rect{Max: sz}.Op())
+	pointer.CursorPointer.Add(gtx.Ops)
+	// Claim pointer presses over the whole scrim: dismiss on a tap AND occlude the gallery thumbs
+	// behind so the dismiss click can't fall through and re-open it.
+	area := clip.Rect{Max: sz}.Push(gtx.Ops)
+	event.Op(gtx.Ops, &s.lightboxTag)
+	area.Pop()
+	// Dismiss on Release as well as Press: a freshly-registered area can miss the first Press (the
+	// hit-target only updates on a move), but the Release is delivered to the handler the Press
+	// grabbed, so the tap reliably closes on the FIRST click.
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &s.lightboxTag, Kinds: pointer.Press | pointer.Release})
+		if !ok {
+			break
 		}
-		return D{Size: sz}
-	})
+		if _, ok := ev.(pointer.Event); ok {
+			s.LightboxOn = false
+		}
+	}
+	if (s.LightboxOp != paint.ImageOp{}) {
+		gtx.Constraints.Min = sz
+		layout.UniformInset(unit.Dp(32)).Layout(gtx, func(gtx C) D {
+			return widget.Image{Src: s.LightboxOp, Fit: widget.Contain, Position: layout.Center}.Layout(gtx)
+		})
+	}
+	return D{Size: sz}
 }
 
 func (s *AppState) topBar(gtx C) D {

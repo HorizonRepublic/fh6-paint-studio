@@ -76,6 +76,11 @@ func Run(src *SrcImage, presetName string, budget int) (model.Geometry, error) {
 			ctx.Budget = 0
 		}
 	}
+	// Hard cap: a stage that over-emits (e.g. a custom BaseGrid producing more cells than the budget,
+	// or any future engine ignoring ctx.Budget) must never blow the ≤3000-layer injection limit.
+	if budget > 0 && len(shapes) > budget {
+		shapes = shapes[:budget]
+	}
 	return model.Geometry{Shapes: shapes}, nil
 }
 

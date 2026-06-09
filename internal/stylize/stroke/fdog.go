@@ -255,6 +255,9 @@ func flowDoG(luma, tx, ty []float64, w, h int, p fdogParams) []float64 {
 }
 
 func gauss1(x, sigma float64) float64 {
+	if sigma < 1e-3 {
+		sigma = 1e-3 // floor: a 0 sigma (custom config) would divide by zero -> NaN kernel; the spike is normalized away by the caller's wsum
+	}
 	return math.Exp(-x*x/(2*sigma*sigma)) / (sigma * math.Sqrt(2*math.Pi))
 }
 

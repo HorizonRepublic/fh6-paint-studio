@@ -122,8 +122,10 @@ func opaqueShape(s model.Shape) bool {
 // for the accept threshold and error accounting — the penalty only biases WHICH
 // shape wins, it must not pollute the accumulated error.
 func pickBest(be backend.Backend, cands []model.Candidate, penalty func(model.Candidate) float32) (model.Candidate, float32) {
-	res, _ := be.Evaluate(cands)
-	if len(res) == 0 {
+	res, err := be.Evaluate(cands)
+	if err != nil || len(res) == 0 {
+		// A backend (device) fault returns garbage scores; treat the batch as "no improving
+		// candidate" so the greedy skips it cleanly instead of accepting corrupt data.
 		return model.Candidate{}, math.MaxFloat32
 	}
 	bi := 0

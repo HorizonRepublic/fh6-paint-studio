@@ -11,10 +11,14 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 )
 
+// mu guards logger/file: the studio's worker + update goroutines may Printf while main defers Close,
+// and Close nil-ing the file under a concurrent Printf is otherwise a data race.
 var (
+	mu     sync.Mutex
 	logger *log.Logger
 	file   *os.File
 )
@@ -32,8 +36,10 @@ func Init(name string) string {
 	} else {
 		fmt.Fprintf(os.Stderr, "applog: could not open %s: %v (logging to stderr only)\n", path, err)
 	}
+	mu.Lock()
 	logger = log.New(w, "", log.LstdFlags|log.Lmicroseconds)
-	logger.Printf("==== session start %s (pid %d) ====", time.Now().Format(time.RFC3339), os.Getpid())
+	mu.Unlock()
+	Printf("==== session start %s (pid %d) ====", time.Now().Format(time.RFC3339), os.Getpid())
 	return path
 }
 
@@ -52,8 +58,11 @@ func logDir() string {
 
 // Printf logs a formatted line to the file + stderr (or stderr only pre-Init).
 func Printf(format string, args ...any) {
-	if logger != nil {
-		logger.Printf(format, args...)
+	mu.Lock()
+	l := logger
+	mu.Unlock()
+	if l != nil {
+		l.Printf(format, args...)
 		return
 	}
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
@@ -61,10 +70,13 @@ func Printf(format string, args ...any) {
 
 // Close flushes and closes the log file. Safe to call multiple times.
 func Close() {
+	mu.Lock()
+	defer mu.Unlock()
 	if file != nil {
 		file.Close()
 		file = nil
 	}
+	logger = nil // post-close Printf falls back to stderr instead of writing the closed file's MultiWriter
 }
 
 // Recover logs a panic with its stack trace, then exits non-zero. Use as the

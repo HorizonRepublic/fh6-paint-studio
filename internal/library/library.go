@@ -5,6 +5,7 @@
 package library
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -25,13 +26,13 @@ import (
 // Entry is the metadata for one saved generation (meta.json).
 type Entry struct {
 	ID          string    `json:"id"`
-	Name        string    `json:"name"`              // display name (source basename, no ext)
-	Source      string    `json:"source"`            // original source path (informational)
-	Preset      string    `json:"preset"`            // anime|photo|flat
-	Shapes      int       `json:"shapes"`            // FH6 shape count = len(shapes)-1 (excludes background)
-	Width       int       `json:"width"`             // render width  (CanvasMap on inject)
-	Height      int       `json:"height"`            // render height
-	Budget      int       `json:"budget"`            // requested shape budget
+	Name        string    `json:"name"`   // display name (source basename, no ext)
+	Source      string    `json:"source"` // original source path (informational)
+	Preset      string    `json:"preset"` // anime|photo|flat
+	Shapes      int       `json:"shapes"` // FH6 shape count = len(shapes)-1 (excludes background)
+	Width       int       `json:"width"`  // render width  (CanvasMap on inject)
+	Height      int       `json:"height"` // render height
+	Budget      int       `json:"budget"` // requested shape budget
 	Seed        int64     `json:"seed"`
 	InjectScale float64   `json:"injectScale"` // scale used at gen time (default for inject)
 	Created     time.Time `json:"created"`
@@ -66,6 +67,39 @@ func (s *Store) Dir(id string) string          { return filepath.Join(s.Root, id
 func (s *Store) GeometryPath(id string) string { return filepath.Join(s.Root, id, "geometry.json") }
 func (s *Store) PreviewPath(id string) string  { return filepath.Join(s.Root, id, "preview.png") }
 func (s *Store) ThumbPath(id string) string    { return filepath.Join(s.Root, id, "thumb.png") }
+
+// validID reports whether id is a safe single-segment directory name that resolves strictly inside
+// Root. It rejects path separators, traversal (".", ".."), and absolute / Windows drive-relative
+// paths (e.g. "C:foo", whose filepath.Base differs). The library's mutating ops gate on this.
+func validID(id string) bool {
+	return id != "" && id != "." && id != ".." &&
+		!filepath.IsAbs(id) && id == filepath.Base(id) && !strings.ContainsAny(id, `/\`)
+}
+
+// atomicWriteFile writes b to a temp file in the destination directory then renames it over path —
+// so a crash / full disk leaves either the old file or the complete new one, never a torn file.
+func atomicWriteFile(path string, b []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(b)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(name)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	_ = os.Chmod(name, perm)
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
 
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -127,12 +161,21 @@ func (s *Store) Save(shapes []model.Shape, preview *image.NRGBA, meta Entry) (En
 
 // LoadGeometry reads a saved decal's shapes.
 func (s *Store) LoadGeometry(id string) (model.Geometry, error) {
+	if !validID(id) {
+		return model.Geometry{}, fmt.Errorf("library: invalid id %q", id)
+	}
 	b, err := os.ReadFile(s.GeometryPath(id))
 	if err != nil {
 		return model.Geometry{}, err
 	}
 	var g model.Geometry
-	return g, json.Unmarshal(b, &g)
+	if err := json.Unmarshal(b, &g); err != nil {
+		return model.Geometry{}, err
+	}
+	if len(g.Shapes) == 0 { // a valid decal always has at least the background shape[0]
+		return model.Geometry{}, fmt.Errorf("library: %q has no shapes (corrupt geometry)", id)
+	}
+	return g, nil
 }
 
 func writeMeta(dir string, meta Entry) error {
@@ -140,19 +183,18 @@ func writeMeta(dir string, meta Entry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "meta.json"), b, 0o644)
+	return atomicWriteFile(filepath.Join(dir, "meta.json"), b, 0o644)
 }
 
 func writePNG(path string, img image.Image) error {
 	if img == nil {
 		return nil
 	}
-	f, err := os.Create(path)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
 		return err
 	}
-	defer f.Close()
-	return png.Encode(f, img)
+	return atomicWriteFile(path, buf.Bytes(), 0o644)
 }
 
 // List scans Root and returns entries newest-first (by Created). Dirs without a valid meta.json are
@@ -187,7 +229,7 @@ func (s *Store) List() ([]Entry, error) {
 
 // Delete removes an entry directory. The id must be a bare dir name (no path separators).
 func (s *Store) Delete(id string) error {
-	if id == "" || strings.ContainsAny(id, `/\`) {
+	if !validID(id) {
 		return fmt.Errorf("library: invalid id %q", id)
 	}
 	return os.RemoveAll(filepath.Join(s.Root, id))
@@ -197,7 +239,7 @@ func (s *Store) Delete(id string) error {
 // left unchanged so on-disk paths and any cached references stay valid — only the Name field moves.
 // The id must be a bare dir name; the name is trimmed and must be non-empty. Returns the updated entry.
 func (s *Store) Rename(id, name string) (Entry, error) {
-	if id == "" || strings.ContainsAny(id, `/\`) {
+	if !validID(id) {
 		return Entry{}, fmt.Errorf("library: invalid id %q", id)
 	}
 	name = strings.TrimSpace(name)

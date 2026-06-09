@@ -93,6 +93,20 @@ func DefaultPolishOptions() PolishOptions {
 	}
 }
 
+// clampPolishTau floors Tau0/Tau1 to positive defaults. The tau anneal computes
+// tau = Tau0*(Tau1/Tau0)^t and the soft-coverage gradient divides by tau, so a zero
+// tau yields NaN/Inf that corrupts the whole shape set. DefaultPolishOptions is only
+// substituted when Iters<=0, so a caller passing Iters>0 with a zero tau would slip
+// through; this guards that path independently.
+func clampPolishTau(opt *PolishOptions) {
+	if opt.Tau0 <= 0 {
+		opt.Tau0 = 2.0
+	}
+	if opt.Tau1 <= 0 {
+		opt.Tau1 = 0.15
+	}
+}
+
 // pshape is a shape's mutable optimization state (float64 params + Adam moments).
 type pshape struct {
 	kind   model.ShapeKind
@@ -223,6 +237,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	if opt.Iters <= 0 {
 		opt = DefaultPolishOptions()
 	}
+	clampPolishTau(&opt)
 	if len(shapes) <= 1 {
 		return PolishResult{Shapes: shapes}
 	}
@@ -399,7 +414,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	restoreParams(ps, bestP)
 
 	out := make([]model.Shape, 0, len(shapes))
-	out = append(out, shapes[0])
+	out = append(out, cloneShape(shapes[0])) // clone, not alias: recolorVisible mutates opaque shapes in place; on a polish-discard the caller's input bg must stay untouched
 	for i := range ps {
 		out = append(out, snapShape(ps[i], shapes[i+1], w, h))
 	}
@@ -415,6 +430,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	if opt.Iters <= 0 {
 		opt = DefaultPolishOptions()
 	}
+	clampPolishTau(&opt)
 	if len(shapes) <= 1 {
 		return PolishResult{Shapes: shapes}
 	}
@@ -518,7 +534,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 
 	// Snap back to hard, game-representable shapes.
 	out := make([]model.Shape, 0, len(shapes))
-	out = append(out, shapes[0])
+	out = append(out, cloneShape(shapes[0])) // clone, not alias: recolorVisible mutates opaque shapes in place; on a polish-discard the caller's input bg must stay untouched
 	for i := range ps {
 		out = append(out, snapShape(ps[i], shapes[i+1], w, h))
 	}

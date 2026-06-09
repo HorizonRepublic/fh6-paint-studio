@@ -87,6 +87,9 @@ func newRun(be backend.Backend, opt Options) *run {
 	if opt.RandomSamples < 1 {
 		opt.RandomSamples = 1
 	}
+	if opt.StopAt < 1 {
+		opt.StopAt = 1 // self-defend: callers clamp, but a 0/negative budget would NaN the progress fraction
+	}
 	kinds := opt.Kinds
 	if len(kinds) == 0 {
 		kinds = []model.ShapeKind{model.KindEllipse}
@@ -279,6 +282,10 @@ func (r *run) greedy() {
 			}
 		}
 		best, bestScore := r.searchOne(progress, sampGrid, penalty)
+		// bestScore is the backend's PROGRESSIVELY-SAMPLED ΔSSE (SampleBudget pixels), not the exact
+		// full-res delta, so "every accepted shape strictly lowers the hard error" is statistical, not
+		// exact, when SampleBudget < shape area. A rare net-neutral shape is absorbed by later shapes +
+		// the postProcess recolor + the honestly-measured FinalError.
 		if bestScore >= -1e-7 {
 			if noImprove++; noImprove >= r.maxNI {
 				break

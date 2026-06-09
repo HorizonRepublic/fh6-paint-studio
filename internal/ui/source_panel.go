@@ -210,6 +210,13 @@ func (s *AppState) artistBlock(gtx C) D {
 					layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Lines") }),
 				)
 			}),
+			layout.Rigid(GapV(6).Layout),
+			// Footnote: spell out the jargon — "ink/lines" is not obvious to a first-time user.
+			layout.Rigid(func(gtx C) D {
+				l := material.Label(th.M, 11, "“Ink” = clean black outline lines (the manga / line-art look) drawn on TOP of the colour fill. Slide left for more paint, right for a bolder outline.")
+				l.Color = th.TextDim
+				return l.Layout(gtx)
+			}),
 		)
 	})
 }
@@ -249,6 +256,11 @@ func (s *AppState) advancedSection(gtx C) D {
 		layout.Rigid(func(gtx C) D {
 			return s.toggleRow(gtx, &s.KeepInside, "Keep shapes inside image", &s.KeepInsideHint,
 				"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture, with no circles or rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean. Turn off only for the legacy behaviour.")
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.Economy, "Economy mode (slower, better at low budgets)", &s.EconomyHint,
+				"OFF by default. At low shape counts (≲1500) this co-adapts the shapes — it keeps re-fitting ALL of them together as it builds, for a cleaner result with fewer shapes. The catch: it's MUCH slower (it re-polishes the whole set repeatedly), so turn it on only when you want maximum quality on a tight budget and don't mind the wait. No effect on Logo/Flat or above ~1500 shapes.")
 		}),
 		layout.Rigid(GapV(12).Layout),
 		layout.Rigid(s.expertBlock),

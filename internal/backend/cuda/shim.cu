@@ -140,7 +140,7 @@ __host__ __device__ void bbox(int kind, const float* P, int w, int h, int* xMin,
 // passed in as a kernel arg). A cap >= bbox area yields step 1 (full-res scoring).
 __host__ __device__ int sampleStep(int xMin, int yMin, int xMax, int yMax, int targetSamples) {
     if (targetSamples < 1) targetSamples = 4000;
-    long area = (long)(xMax - xMin + 1) * (long)(yMax - yMin + 1);
+    long long area = (long long)(xMax - xMin + 1) * (long long)(yMax - yMin + 1); // long is 32-bit on MSVC
     if (area <= targetSamples) return 1;
     int step = (int)sqrt((double)area / (double)targetSamples);
     return step < 1 ? 1 : step;
@@ -366,7 +366,7 @@ __global__ void evalKernel(const float* __restrict__ cands, int n, const float* 
     int step = sampleStep(xMin, yMin, xMax, yMax, sampleBudget);
     int cols = (xMax - xMin) / step + 1;
     int rows = (yMax - yMin) / step + 1;
-    long total = (long)cols * rows;
+    long long total = (long long)cols * rows; // long is 32-bit on MSVC — widen so large bboxes don't overflow
 
     SC sc;
     prepShape(kind, P, &sc);
@@ -377,7 +377,7 @@ __global__ void evalKernel(const float* __restrict__ cands, int n, const float* 
     bool isGrad = isGradKind(kind);
     float L[NACC];
     for (int k = 0; k < NACC; k++) L[k] = 0.0f;
-    for (long tt = threadIdx.x; tt < total; tt += blockDim.x) {
+    for (long long tt = threadIdx.x; tt < total; tt += blockDim.x) {
         int x = xMin + (int)(tt % cols) * step;
         int y = yMin + (int)(tt / cols) * step;
         if (isGrad) {
@@ -511,13 +511,13 @@ __global__ void evalKernelWarp(const float* cands, int n, const float* target, c
     int step = sampleStep(xMin, yMin, xMax, yMax, sampleBudget);
     int cols = (xMax - xMin) / step + 1;
     int rows = (yMax - yMin) / step + 1;
-    long total = (long)cols * rows;
+    long long total = (long long)cols * rows; // long is 32-bit on MSVC — widen so large bboxes don't overflow
 
     SC sc;
     prepShape(kind, P, &sc);
     float L[NACC];
     for (int k = 0; k < NACC; k++) L[k] = 0.0f;
-    for (long tt = lane; tt < total; tt += 32) {
+    for (long long tt = lane; tt < total; tt += 32) {
         int x = xMin + (int)(tt % cols) * step;
         int y = yMin + (int)(tt / cols) * step;
         if (!insideC(kind, &sc, P, x, y)) continue;
@@ -591,7 +591,7 @@ __global__ void evalKernelWarpFP16(const float* cands, int n, const float* targe
     int step = sampleStep(xMin, yMin, xMax, yMax, sampleBudget);
     int cols = (xMax - xMin) / step + 1;
     int rows = (yMax - yMin) / step + 1;
-    long total = (long)cols * rows;
+    long long total = (long long)cols * rows; // long is 32-bit on MSVC — widen so large bboxes don't overflow
     SC sc;
     prepShape(kind, P, &sc);
     __half2 sT01 = __float2half2_rn(0.f), sT23 = __float2half2_rn(0.f); // w*target
@@ -599,7 +599,7 @@ __global__ void evalKernelWarpFP16(const float* cands, int n, const float* targe
     __half2 sQ01 = __float2half2_rn(0.f), sQ23 = __float2half2_rn(0.f); // w*canvas^2
     __half2 sX01 = __float2half2_rn(0.f), sX23 = __float2half2_rn(0.f); // w*target*canvas
     float Lw = 0.f, Ln = 0.f, Lnt = 0.f;
-    for (long tt = lane; tt < total; tt += 32) {
+    for (long long tt = lane; tt < total; tt += 32) {
         int x = xMin + (int)(tt % cols) * step;
         int y = yMin + (int)(tt / cols) * step;
         if (!insideC(kind, &sc, P, x, y)) continue;
@@ -693,9 +693,9 @@ __global__ void gridKernel(const float* target, const float* canvas, const float
     int x0 = gx * W / GW, x1 = (gx + 1) * W / GW;
     int y0 = gy * H / GH, y1 = (gy + 1) * H / GH;
     int cols = x1 - x0, rows = y1 - y0;
-    long total = (long)cols * rows;
+    long long total = (long long)cols * rows; // long is 32-bit on MSVC — widen so large bboxes don't overflow
     double s = 0;
-    for (long tt = threadIdx.x; tt < total; tt += blockDim.x) {
+    for (long long tt = threadIdx.x; tt < total; tt += blockDim.x) {
         int x = x0 + (int)(tt % cols);
         int y = y0 + (int)(tt / cols);
         int idx = y * W + x, p = idx * 4;
@@ -1505,6 +1505,11 @@ API void fp_eval(const float* cands, int n, float* out) {
         evalKernel<<<n, BLOCK>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
     cudaMemcpy(out, d_out, (size_t)n * 5 * sizeof(float), cudaMemcpyDeviceToHost);
 }
+
+// fp_last_error returns AND CLEARS the sticky CUDA error (cudaGetLastError). The Go side calls it
+// after a run of kernels so a launch/exec fault (OOM, illegal address) surfaces as a Go error instead
+// of leaving the eval output silently garbage. 0 = cudaSuccess. Absent on DLLs predating this export.
+API int fp_last_error() { return (int)cudaGetLastError(); }
 
 // fp_set_sample_budget sets the progressive-sampling pixel cap used by the eval
 // kernel (mirrors CPU SetSampleBudget). n<1 resets to the default 4000. A value

@@ -16,6 +16,9 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 		return err
 	}
 	f.logf("found %s (pid %d)", name, pid)
+	if !writeSafeProcess(name) {
+		return fmt.Errorf("refusing to calib-write into %q — the FH6 offsets do not apply to FH5 (read-only diagnostics only)", name)
+	}
 	p, err := openProc(pid, true) // read-write
 	if err != nil {
 		return err
@@ -31,8 +34,8 @@ func (f *FH6) calibWrite(layers []CalibLayer) error {
 			return fmt.Errorf("calib slot %d out of range [0,%d)", cl.Slot, f.Layers)
 		}
 		ptr, ok := p.readU64(table + uintptr(cl.Slot)*8)
-		if !ok || !isUserPointer(ptr) {
-			return fmt.Errorf("calib slot %d: null/invalid layer pointer", cl.Slot)
+		if !ok || !p.isPrivateWritable(ptr) {
+			return fmt.Errorf("calib slot %d: null/invalid/non-writable layer pointer", cl.Slot)
 		}
 		if cl.WantWord != 0 {
 			w, ok := p.readU16(ptr + uintptr(prof.ShapeIDOffset))

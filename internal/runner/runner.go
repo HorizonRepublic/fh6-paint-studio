@@ -32,13 +32,12 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		w, h := prep.W, prep.H
 		onEvent(Log{Line: fmt.Sprintf("loaded image %dx%d", w, h)})
 
-		// MONO single-colour mode: the engine fits a clean single-colour cutout, so binarize the target
-		// to match. Work on a COPY — the loaded source + its thumbnail share prep.Pixels and must not be
-		// mutated (the user may re-run with mono off).
-		target := prep.Pixels
-		if r.Options.LockColor != nil {
-			target = append([]float32(nil), prep.Pixels...)
-			engine.BinarizeForLock(target, w, h, *r.Options.LockColor, prep.HasTransparency)
+		// Resolve already produced the exact target the backend should fit (the loaded pixels, or — for
+		// MONO mode — a binarized single-colour copy that never mutates the shared source). Reuse it so
+		// the target is binarized ONCE, never twice.
+		target := r.Target
+		if target == nil {
+			target = prep.Pixels
 		}
 
 		be, name, err := newBackend(target, r.Weight, w, h, r.Grid)

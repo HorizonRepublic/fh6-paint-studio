@@ -1,9 +1,20 @@
 package metric
 
-import "math"
+import (
+	"math"
+
+	"fh6-paint-studio/internal/model"
+)
 
 // WeightBase is the minimum per-pixel weight so flat regions still contribute.
 const WeightBase = 0.15
+
+// PerceptualLuma is an OPT-IN experiment (default off): when true AND the pipeline is linear-light,
+// WeightMapV2 computes its luma in sRGB (perceptual) space so the darkness/highlight pivots (tuned for
+// sRGB luma) land correctly, instead of on raw linear luma where they over/under-fire. Default off so
+// the eye-tuned generation behaviour is unchanged; flip it (CLI -perceptual-luma) only for an A/B,
+// validated BY EYE end-to-end (the map is max-normalised, so the win may be small). See REVIEW M4.
+var PerceptualLuma bool
 
 // WeightMap returns a per-pixel importance weight in [WeightBase, 1] derived from
 // the target's edge strength (Sobel gradient magnitude on luminance). Edges and
@@ -72,9 +83,14 @@ func WeightMapV2(target []float32, w, h int) []float32 {
 	}
 	luma := make([]float32, n)
 	alpha := make([]float32, n)
+	perceptual := PerceptualLuma && model.LinearLight // sRGB-luma for the darkness/highlight pivots (opt-in)
 	for i := 0; i < n; i++ {
 		p := i * 4
-		luma[i] = Luma(target[p], target[p+1], target[p+2])
+		r, g, b := target[p], target[p+1], target[p+2]
+		if perceptual {
+			r, g, b = model.LinearToSRGB(r), model.LinearToSRGB(g), model.LinearToSRGB(b)
+		}
+		luma[i] = Luma(r, g, b)
 		alpha[i] = clamp01f(target[p+3])
 	}
 	imp := make([]float32, n)
@@ -96,6 +112,12 @@ func WeightMapV2(target []float32, w, h int) []float32 {
 			}
 			lumaEdge := maxf(gx, gy)
 			alphaEdge := maxf(agx, agy)
+			// NOTE: the 0.48 darkness pivot and the 0.78 highlight pivot are tuned for sRGB luma, but
+			// in the default linear-light pipeline luma[] is LINEAR (sRGB 0.48 ≈ linear 0.20), so the
+			// ink/darkness term currently over-fires and the highlight term under-fires. Re-pivoting for
+			// linear is a real QUALITY lever, but the whole map is max-normalised so the effect largely
+			// cancels, and these constants were eye-tuned against the CURRENT (linear) behaviour — so it
+			// must be re-validated BY EYE end-to-end before changing (do not silently flip the space).
 			darkness := clamp01f((0.48 - luma[i]) / 0.48)
 			linework := darkness * clamp01f(lumaEdge*6) * a // EDGE-gated ink term (fires on black outlines)
 			highlights := clamp01f((luma[i]-0.78)/0.22) * clamp01f(sat*1.15) * a

@@ -133,6 +133,7 @@ type AppState struct {
 	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
 	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
 	Mono         widget.Bool // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
+	Economy      widget.Bool // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
 	Seed         widget.Editor
 
 	AlphaHint      Hint
@@ -140,6 +141,7 @@ type AppState struct {
 	BoundaryHint   Hint
 	KeepInsideHint Hint
 	MonoHint       Hint
+	EconomyHint    Hint
 	BudgetHint     Hint
 	ModeHint       Hint
 	InkHint        Hint
@@ -219,6 +221,7 @@ type AppState struct {
 	Recent           []string         // recently opened image paths (newest first); rendered in the Source card
 	RecentBtns       []widget.Clickable
 	escTag           int // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
+	lightboxTag      int // pointer tag for the lightbox scrim — captures clicks so they dismiss it (and don't fall through to the gallery thumbs behind)
 	GenBtn           widget.Clickable
 	CancelBtn        widget.Clickable
 	InjectLayers     widget.Editor // exact FH6 template layer count for injection (library inject controls)
@@ -587,6 +590,7 @@ func (s *AppState) Choices() preset.Choices {
 	if s.Mono.Value {
 		c.MonoColor = "auto"
 	}
+	c.Economy = s.Economy.Value // opt-in low-budget co-adaptation (slow); curated toggle, applied in both modes
 	if !s.Expert.Value {
 		return c
 	}
@@ -653,6 +657,7 @@ func (s *AppState) ApplyChoices(c preset.Choices) {
 	s.RestoreBudget(c.Shapes)
 	s.SetInkRatio(c.InkRatio)
 	s.Mono.Value = c.MonoColor != ""
+	s.Economy.Value = c.Economy
 	s.Seed.SetText(strconv.FormatInt(c.Seed, 10))
 	s.Expert.Value = true
 	s.AdvOpen = true // a saved preset is a full snapshot — open Advanced so its loaded knobs are visible

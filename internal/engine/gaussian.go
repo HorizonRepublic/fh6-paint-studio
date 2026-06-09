@@ -53,6 +53,9 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 	po.LRAlpha *= gaussLRScale
 	// Drive the UI % bar off the TRAINING ITERATIONS (the greedy's shape-count progress is meaningless
 	// when all glows train jointly). opt.Progress is the runner's light per-event hook (no frame read).
+	// The error is reported as the static initErr ON PURPOSE: a live per-iteration loss would force a
+	// device sync every step (PolishLoss is only fetched on the final iter for exactly this reason), so
+	// the studio shows the % bar advancing with a fixed baseline error rather than paying that cost.
 	if opt.Progress != nil {
 		po.OnProgress = func(iter, total int) { opt.Progress(iter, initErr) }
 	}

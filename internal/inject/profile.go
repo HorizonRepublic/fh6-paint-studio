@@ -38,16 +38,19 @@ func FH6Profile() GameProfile {
 		Label:        "Forza Horizon 6",
 		ProcessNames: []string{"ForzaHorizon6.exe", "ForzaHorizon6-Win64-Shipping.exe", "ForzaHorizon5.exe"},
 
-		LiveryCountOffset: 0x5A,
-		LayerTableOffset:  0x78,
+		// NB two DISTINCT structs share offset 0x78: LayerTableOffset is into the CLiveryGroup
+		// (group+0x78 = the layer pointer table), MaskOffset is into a LAYER (layerPtr+0x78 = 1-byte
+		// mask). They are never the same object — don't conflate them when editing offsets.
+		LiveryCountOffset: 0x5A, // CLiveryGroup
+		LayerTableOffset:  0x78, // CLiveryGroup
 
-		PosOffset:      0x18,
-		ScaleOffset:    0x28,
-		RotationOffset: 0x50,
-		SkewOffset:     0x70,
-		ColorOffset:    0x74,
-		MaskOffset:     0x78,
-		ShapeIDOffset:  0x7A,
+		PosOffset:      0x18, // layer
+		ScaleOffset:    0x28, // layer
+		RotationOffset: 0x50, // layer
+		SkewOffset:     0x70, // layer
+		ColorOffset:    0x74, // layer
+		MaskOffset:     0x78, // layer (NOT the group's table at 0x78)
+		ShapeIDOffset:  0x7A, // layer — the WORD; the only field whose write derives the mesh on reload
 	}
 }
 

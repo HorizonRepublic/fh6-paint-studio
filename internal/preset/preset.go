@@ -41,6 +41,7 @@ type Choices struct {
 	Polish    *bool // nil = on
 	Backfit   *bool // nil = mode default (auto for flat/logo/line/cutout)
 	Boundary  *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
+	Economy   bool  // OPT-IN (default off): the low-budget global-search schedule (LIVE co-adaptation / anneal at ≤~1500 shapes). Lifts quality but re-polishes ALL shapes per batch (~4x slower), so it's off by default and enabled only when the user asks for it.
 	SS        int   // preview supersample factor (UI-side; carried through Resolved.SS)
 
 	// Advanced (zero = preset/mode default, except Aspect/WeightStrength/AlphaMin = -1)
@@ -78,6 +79,10 @@ type Resolved struct {
 	Mode    string
 	SS      int
 	Summary []string
+	// Target is the working-space pixel buffer the backend should fit — usually the loaded pixels,
+	// but the MONO path replaces it with a binarized single-colour copy. The runner uses this so the
+	// target is binarized ONCE (here) instead of again at backend-build time.
+	Target []float32
 }
 
 // Resolve maps Choices + the loaded image to a Resolved run configuration.
@@ -148,10 +153,14 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		qual = "balanced"
 	}
 
-	// Economy auto-schedule: at low-mid budgets a co-adapted LIVE base (or anneal at the tightest budgets)
-	// lifts quality — the app spends fewer shapes on the structural base so the greedy detail builds on a
-	// better foundation. Off for flat (knee handles it) and above economyLiveMax (marginal vs cost).
-	ecoLB, ecoBase, ecoAnneal := EconomyParams(resolved, shapes)
+	// Economy schedule (OPT-IN, c.Economy): at low-mid budgets a co-adapted LIVE base (or anneal at the
+	// tightest budgets) lifts quality — fewer shapes on the structural base so the greedy detail builds
+	// on a better foundation. It re-polishes ALL shapes per batch (~4x slower), so it is OFF by default
+	// and only applied when the user enables it. Still off for flat (the knee handles it) and >economyLiveMax.
+	var ecoLB, ecoBase, ecoAnneal int
+	if c.Economy {
+		ecoLB, ecoBase, ecoAnneal = EconomyParams(resolved, shapes)
+	}
 
 	opt := engine.Options{
 		Width: w, Height: h, Background: prep.Background,
@@ -229,7 +238,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		fmt.Sprintf("random=%d  mutated=%d  sample-budget=%d  grid=%d", random, mutated, sampleBudget, grid),
 	}
 
-	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, Summary: summary}
+	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, Summary: summary, Target: prep.Pixels}
 }
 
 // clampShapes constrains the budget to [1, MaxShapes] — the FH6 per-group layer ceiling.
