@@ -1,8 +1,8 @@
 // Package maskbank holds the FH6 native-dictionary silhouettes ("words") as embedded 256² coverage
 // textures. At init it decodes each mask and registers its word with the model (KindMaskBase+i, in
 // manifest order), so the engine can render any dictionary shape 1:1 with the game. The assets are
-// generated from the live calibration by debug/calib/gen_maskbank.py (source masks live in
-// debug/calib/masks/; see docs/research/lineart/MASKSTAMP.md).
+// produced by the local calibration tooling (debug/, not published): exact vector silhouettes with
+// sub-pixel edges and true gradient ramps, framed by the calibrated manifest extents.
 package maskbank
 
 import (
