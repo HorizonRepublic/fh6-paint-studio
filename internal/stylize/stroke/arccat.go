@@ -20,6 +20,7 @@ type arcWord struct {
 	nativeW, nativeH float64
 	a, b, mid        [2]float64
 	sweep, radius    float64
+	strokeHW         float64 // native half stroke width (coverage area / arc length / 2) — the placement scale multiplies it
 }
 
 // arcWordHex is the thin-stroke dictionary arcs usable as constant-width outlines. Partial arcs only
@@ -104,9 +105,16 @@ func measureArc(e maskbank.Entry) (arcWord, bool) {
 	}
 	sweep := a1 - a0
 	at := func(ang float64) [2]float64 { return [2]float64{cx + r*math.Cos(ang), cy + r*math.Sin(ang)} }
+	// Native stroke half-width: covered area over arc length. The placement scale multiplies it,
+	// so a big-scale fit renders a proportionally fatter (and softer — upscaled mask) line.
+	var strokeHW float64
+	if length := r * sweep; length > 1e-6 {
+		pxArea := float64(e.NativeW) / float64(e.W) * float64(e.NativeH) / float64(e.H)
+		strokeHW = float64(len(pts)) * pxArea / length / 2
+	}
 	return arcWord{
 		word: e.Word, kind: e.Kind, nativeW: float64(e.NativeW), nativeH: float64(e.NativeH),
-		a: at(a0), b: at(a1), mid: at(a0 + sweep/2), sweep: sweep, radius: r,
+		a: at(a0), b: at(a1), mid: at(a0 + sweep/2), sweep: sweep, radius: r, strokeHW: strokeHW,
 	}, true
 }
 
