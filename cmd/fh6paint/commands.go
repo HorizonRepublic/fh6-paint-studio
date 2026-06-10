@@ -222,7 +222,7 @@ func polishGeometryJSON(be backend.Backend, jsonPath string, prep *imageio.Prepa
 }
 
 // polishOpts builds polish config from the iteration count (other knobs default).
-func polishOpts(iters int, tau0, tau1 float64, ste, early, oklab bool, feLambda float64) engine.PolishOptions {
+func polishOpts(iters int, tau0, tau1 float64, ste, early, oklab bool, feLambda, ssimLambda float64) engine.PolishOptions {
 	o := engine.DefaultPolishOptions()
 	if iters > 0 {
 		o.Iters = iters
@@ -236,6 +236,7 @@ func polishOpts(iters int, tau0, tau1 float64, ste, early, oklab bool, feLambda 
 	o.STE = ste
 	o.OKLab = oklab
 	o.FalseEdgeLambda = feLambda
+	o.SSIMLambda = ssimLambda
 	if !early {
 		o.EarlyStopMargin = 0 // run the full Iters (no plateau early-stop)
 	}

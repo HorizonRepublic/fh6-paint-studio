@@ -182,6 +182,13 @@ func TestHardwiredPresets(t *testing.T) {
 		if o.PolishOpts.FalseEdgeLambda != wantFE {
 			t.Errorf("%s FalseEdgeLambda=%v want %v", mode, o.PolishOpts.FalseEdgeLambda, wantFE)
 		}
+		wantSSIM := 0.0
+		if mode == "anime" {
+			wantSSIM = 0.006 // SSIM polish term: anime-only default (GPU λ-grid, seed-replicated)
+		}
+		if o.PolishOpts.SSIMLambda != wantSSIM {
+			t.Errorf("%s SSIMLambda=%v want %v", mode, o.PolishOpts.SSIMLambda, wantSSIM)
+		}
 	}
 	check("anime", true, 0.30, false, false) // organic: alpha, alphaMin .30 (replicated floor grid), boundary OFF, no backfit
 	check("photo", true, 0.30, false, false) // photo: LOWER alpha floor (smoother tonal ramps; measured on cat+car)

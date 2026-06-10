@@ -210,7 +210,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		MomentSeed:        true,
 		MomentDetailStart: 0.55,
 		Polish:            sp.polish,
-		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge),
+		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim),
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
@@ -287,6 +287,7 @@ type shapeParams struct {
 	iters       int
 	tau1        float64
 	falseEdge   float64
+	ssim        float64
 	ste         bool
 }
 
@@ -304,6 +305,7 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 		iters:       md.PolishIters,
 		tau1:        md.PolishTau1,
 		falseEdge:   md.FalseEdge,
+		ssim:        md.SSIM,
 		ste:         true,
 	}
 
@@ -458,6 +460,7 @@ type ModeDefaults struct {
 	PolishIters int       // joint-polish iterations (perceptual knee)
 	PolishTau1  float64   // final polish edge softness
 	FalseEdge   float64   // false-edge additive polish loss λ (0 = off)
+	SSIM        float64   // SSIM additive polish loss λ (0 = off)
 	Boundary    bool      // boundary-aware radius
 	Backfit     bool      // post-polish back-fitting
 	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
@@ -499,6 +502,14 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// consistent +1..2% weighted for the banding drop (OFF); flat is content-scattered (img_1
 		// line-art likes 0.008 — manual flag), so both stay 0.
 		d.FalseEdge = 0.004
+		// SSIM additive polish term (λ·Σ(1−SSIM_8×8) on luma — local contrast/structure SSE
+		// undercharges), anime only. GPU λ-grid {1e-4..0.02} × img_5/img_22/img_24 × seeds 1/2/3:
+		// SSIM/banding improve monotonically with λ (band −10..16%) but ΔE drifts past ~0.006;
+		// 0.006 = the balanced point (band −10..12%, SSIM +0.003..0.010, ΔE ≤ +0.06, term ≈2% SSE).
+		// Eye at the 0.01 bracket: cel lash/lid lines crisper, pupil highlight cleaner, no colour
+		// damage; painterly (img_24) a coin toss. Photo pays real colour (cat ΔE 2.87→3.08, +7%
+		// weighted at 0.01) — OFF; flat thin evidence (one image) — OFF, manual -polish-ssim.
+		d.SSIM = 0.006
 	}
 	if flat {
 		d.AspectMax = 8
@@ -707,7 +718,7 @@ func resolveGaussian(prep imageio.Prepared, c Choices, w, h, shapes int) Resolve
 		Seed:          c.Seed,
 		TransparentBG: prep.HasTransparency,
 		Gaussian:      true,
-		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0),
+		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0, 0),
 	}
 	return Resolved{
 		Options: opt,
@@ -735,7 +746,7 @@ func gaussTrainIters(shapes int) int {
 	return it
 }
 
-func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda float64) engine.PolishOptions {
+func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda float64) engine.PolishOptions {
 	o := engine.DefaultPolishOptions()
 	if iters > 0 {
 		o.Iters = iters
@@ -748,6 +759,7 @@ func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda float64) engin
 	}
 	o.STE = ste
 	o.FalseEdgeLambda = feLambda
+	o.SSIMLambda = ssimLambda
 	return o
 }
 

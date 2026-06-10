@@ -1247,6 +1247,26 @@ static double* d_feDir = nullptr;      // 2*npix: active normalised gradient dir
 static double* d_feAdj = nullptr;      // npix: dFE/dLuma adjoint
 static double* d_fe_partial = nullptr; // per-block FE partials (deterministic fixed-order final sum)
 
+// SSIM additive term (mirrors engine/ssimterm.go): λ·Σ(1−SSIM) over uniform 8×8 luma windows at
+// VALID positions only (fully inside the canvas — no border clamping, so CPU==GPU exactly). The
+// recon enters each window only via mean(x), mean(x²), mean(x·y): forward = horizontal+vertical
+// 8-term box sums; backward = per-window moment-gradients box-correlated back + a per-pixel
+// combine. All sums run in double with the SAME direct loop order as the CPU reference.
+#define SSWIN 8
+#define SSINVN (1.0 / (SSWIN * SSWIN))
+#define SSC1 0.0001
+#define SSC2 0.0009
+static double g_polishSSIMLambda = 0.0;
+static float*  d_ssTL = nullptr;       // target luma (computed once per lambda-set)
+static float*  d_ssRL = nullptr;       // recon luma scratch
+static double* d_ssMy = nullptr;       // target window means (mw*mh)
+static double* d_ssMyy = nullptr;      // target window means of y² (mw*mh)
+static double* d_ssH = nullptr;        // 3 planes mw*h: horizontal sums of x, x², x·y
+static double* d_ssG = nullptr;        // 3 planes mw*mh: dL/dmx, dL/dmxx, dL/dmxy per window
+static double* d_ssHG = nullptr;       // 3 planes w*mh: horizontally box-correlated G
+static double* d_ssAdj = nullptr;      // npix: dSSIMterm/dLuma adjoint
+static double* d_ss_partial = nullptr; // per-block partials (deterministic fixed-order final sum)
+
 // d_linearToOKLab — OKLab from the linear working space (Ottosson 2020). Mirrors
 // engine.linearToOKLab; double precision so the golden-diff stays tight.
 __device__ inline void d_linearToOKLab(double r, double g, double b, double* L, double* A, double* B) {
@@ -1346,6 +1366,119 @@ __global__ void feAddTotal(const double* fepartial, int blocks, double lambda, d
     *lossOut += lambda * s;
 }
 
+// ssHPass — horizontal 8-term window sums of luma, luma² and luma·targetLuma (engine
+// ssimState.hpass). One thread per (row, valid px); k ascends 0..7 like the CPU loop.
+__global__ void ssHPass(const float* luma, const float* tl, int w, int h, int mw,
+                        double* hx, double* hxx, double* hxy) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= mw * h) return;
+    int y = i / mw, px = i % mw;
+    int row = y * w;
+    double sx = 0.0, sxx = 0.0, sxy = 0.0;
+    for (int k = 0; k < SSWIN; k++) {
+        double v = (double)luma[row + px + k];
+        sx += v;
+        sxx += v * v;
+        sxy += v * (double)tl[row + px + k];
+    }
+    hx[i] = sx; hxx[i] = sxx; hxy[i] = sxy;
+}
+
+// ssMyInit — target window means from the target's own h-pass (hx=Σy, hxx=Σy²).
+__global__ void ssMyInit(const double* hx, const double* hxx, int mw, int mh, double* my, double* myy) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= mw * mh) return;
+    int gy = i / mw, gx = i % mw;
+    double sy = 0.0, syy = 0.0;
+    for (int k = 0; k < SSWIN; k++) {
+        int row = (gy + k) * mw;
+        sy += hx[row + gx];
+        syy += hxx[row + gx];
+    }
+    my[i] = sy * SSINVN;
+    myy[i] = syy * SSINVN;
+}
+
+// ssMapReduce — per valid window: vertical 8-sums of the h-pass, the SSIM pieces, Σ(1−S) into the
+// block partial (NO atomic — fixed-order final sum, like feDirReduce); when g1 is non-null also
+// the per-window moment-gradients for the backward (engine ssimState.adjoint, same formulas).
+__global__ void ssMapReduce(const double* hx, const double* hxx, const double* hxy,
+                            const double* my, const double* myy, int mw, int mh,
+                            double* g1, double* g2, double* g3, double* partial) {
+    __shared__ double sh[BLOCK];
+    int nwin = mw * mh;
+    double acc = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < nwin; i += gridDim.x * blockDim.x) {
+        int gy = i / mw, gx = i % mw;
+        double sx = 0.0, sxx = 0.0, sxy = 0.0;
+        for (int k = 0; k < SSWIN; k++) {
+            int row = (gy + k) * mw;
+            sx += hx[row + gx];
+            sxx += hxx[row + gx];
+            sxy += hxy[row + gx];
+        }
+        double mx = sx * SSINVN, mxx = sxx * SSINVN, mxy = sxy * SSINVN;
+        double m2 = my[i], m2y = myy[i];
+        double a1 = 2.0 * mx * m2 + SSC1;
+        double a2 = 2.0 * (mxy - mx * m2) + SSC2;
+        double b1 = mx * mx + m2 * m2 + SSC1;
+        double b2 = (mxx - mx * mx) + (m2y - m2 * m2) + SSC2;
+        double s = (a1 * a2) / (b1 * b2);
+        acc += 1.0 - s;
+        if (g1) {
+            double denom = b1 * b2;
+            double dsdmx = 2.0 * m2 * (a2 - a1) / denom - s * 2.0 * mx * (1.0 / b1 - 1.0 / b2);
+            g1[i] = -dsdmx;
+            g2[i] = s / b2;
+            g3[i] = -2.0 * a1 / denom;
+        }
+    }
+    sh[threadIdx.x] = acc;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) partial[blockIdx.x] = sh[0];
+}
+
+// ssGH — horizontal box-correlation of the moment-gradients: HG(y,qx) = Σ G(y,px), px ∈
+// [qx−7, qx] clamped to valid window columns (ascending, like the CPU loop).
+__global__ void ssGH(const double* g1, const double* g2, const double* g3, int w, int mw, int mh,
+                     double* hg1, double* hg2, double* hg3) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * mh) return;
+    int gy = i / w, qx = i % w;
+    int p0 = qx - SSWIN + 1; if (p0 < 0) p0 = 0;
+    int p1 = qx; if (p1 > mw - 1) p1 = mw - 1;
+    int grow = gy * mw;
+    double t1 = 0.0, t2 = 0.0, t3 = 0.0;
+    for (int px = p0; px <= p1; px++) {
+        t1 += g1[grow + px];
+        t2 += g2[grow + px];
+        t3 += g3[grow + px];
+    }
+    hg1[i] = t1; hg2[i] = t2; hg3[i] = t3;
+}
+
+// ssAdjKernel — vertical box-correlation + per-pixel combine: adj(q) = (T1 + 2x·T2 + y·T3)/N.
+__global__ void ssAdjKernel(const double* hg1, const double* hg2, const double* hg3,
+                            const float* rl, const float* tl, int w, int h, int mh, double* adj) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * h) return;
+    int qy = i / w, qx = i % w;
+    int p0 = qy - SSWIN + 1; if (p0 < 0) p0 = 0;
+    int p1 = qy; if (p1 > mh - 1) p1 = mh - 1;
+    double t1 = 0.0, t2 = 0.0, t3 = 0.0;
+    for (int py = p0; py <= p1; py++) {
+        int row = py * w;
+        t1 += hg1[row + qx];
+        t2 += hg2[row + qx];
+        t3 += hg3[row + qx];
+    }
+    adj[i] = (t1 + 2.0 * (double)rl[i] * t2 + (double)tl[i] * t3) * SSINVN;
+}
+
 // polishLossReduce sums the weighted 4-channel SSE of render vs the (eval-shared) target,
 // writing each block's partial to lpartial[blockIdx.x] (NO atomic). polishLossFinal then sums
 // the partials in fixed block order — deterministic (the old atomicAdd into a scalar jittered).
@@ -1392,14 +1525,17 @@ __global__ void polishLossFinal(const double* lpartial, int blocks, double* loss
 // w.r.t. the final composited color). Mirrors the head of polish.go polishBackward.
 // oklab = 2*weight*J^T*dLab for the colour channels (engine.okLabPixelDC).
 __global__ void polishDCInit(const float* render, const float* target, const float* weight,
-                            int N, float* dC, int oklab, const double* feAdj, double feLambda) {
+                            int N, float* dC, int oklab, const double* feAdj, double feLambda,
+                            const double* ssimAdj, double ssimLambda) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
     double wt = (double)weight[idx];
     int p = idx * 4;
     double feR = 0.0, feG = 0.0, feB = 0.0;
-    if (feAdj) {
-        double a = feLambda * feAdj[idx];
+    if (feAdj || ssimAdj) {
+        double a = 0.0;
+        if (feAdj) a = feLambda * feAdj[idx];
+        if (ssimAdj) a += ssimLambda * ssimAdj[idx];
         feR = a * 0.299; feG = a * 0.587; feB = a * 0.114;
     }
     if (oklab) {
@@ -1752,6 +1888,61 @@ static void feAccumulateLoss() {
     feAddTotal<<<1, 1>>>(d_fe_partial, blocks, g_polishFELambda, d_ploss);
 }
 
+// fp_set_polish_ssim sets the SSIM λ (pointer: Win64 syscall ABI) and prepares the target-side
+// window moments. λ<=0 disables the term (buffers stay for reuse); a canvas smaller than one
+// window degrades to λ=0 (the CPU reference's nil-state contract).
+API void fp_set_polish_ssim(const double* lambdaPtr) {
+    g_polishSSIMLambda = lambdaPtr[0];
+    if (g_polishSSIMLambda <= 0.0) return;
+    int mw = g_w - SSWIN + 1, mh = g_h - SSWIN + 1;
+    if (mw < 1 || mh < 1) { g_polishSSIMLambda = 0.0; return; }
+    int npix = g_w * g_h;
+    if (!d_ssTL) {
+        cudaMalloc(&d_ssTL, (size_t)npix * sizeof(float));
+        cudaMalloc(&d_ssRL, (size_t)npix * sizeof(float));
+        cudaMalloc(&d_ssMy, (size_t)mw * mh * sizeof(double));
+        cudaMalloc(&d_ssMyy, (size_t)mw * mh * sizeof(double));
+        cudaMalloc(&d_ssH, (size_t)mw * g_h * 3 * sizeof(double));
+        cudaMalloc(&d_ssG, (size_t)mw * mh * 3 * sizeof(double));
+        cudaMalloc(&d_ssHG, (size_t)g_w * mh * 3 * sizeof(double));
+        cudaMalloc(&d_ssAdj, (size_t)npix * sizeof(double));
+        cudaMalloc(&d_ss_partial, 1024 * sizeof(double));
+    }
+    feLumaKernel<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_target, d_ssTL, npix);
+    size_t hplane = (size_t)mw * g_h;
+    int nh = mw * g_h;
+    ssHPass<<<(nh + BLOCK - 1) / BLOCK, BLOCK>>>(d_ssTL, d_ssTL, g_w, g_h, mw, d_ssH, d_ssH + hplane, d_ssH + 2 * hplane);
+    int nwin = mw * mh;
+    ssMyInit<<<(nwin + BLOCK - 1) / BLOCK, BLOCK>>>(d_ssH, d_ssH + hplane, mw, mh, d_ssMy, d_ssMyy);
+}
+
+// ssimForward runs luma + the box-sum passes on d_prender; with G buffers when the backward
+// needs the moment-gradients. Returns the partial-block count for the loss add.
+static int ssimForward(bool forBackward) {
+    int npix = g_w * g_h;
+    int mw = g_w - SSWIN + 1, mh = g_h - SSWIN + 1;
+    size_t hplane = (size_t)mw * g_h;
+    size_t gplane = (size_t)mw * mh;
+    int blocks = (npix + BLOCK - 1) / BLOCK;
+    feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_ssRL, npix);
+    int nh = mw * g_h;
+    ssHPass<<<(nh + BLOCK - 1) / BLOCK, BLOCK>>>(d_ssRL, d_ssTL, g_w, g_h, mw, d_ssH, d_ssH + hplane, d_ssH + 2 * hplane);
+    int nwin = mw * mh;
+    int rblocks = (nwin + BLOCK - 1) / BLOCK;
+    if (rblocks > 1024) rblocks = 1024;
+    ssMapReduce<<<rblocks, BLOCK>>>(d_ssH, d_ssH + hplane, d_ssH + 2 * hplane, d_ssMy, d_ssMyy, mw, mh,
+                                    forBackward ? d_ssG : nullptr,
+                                    forBackward ? d_ssG + gplane : nullptr,
+                                    forBackward ? d_ssG + 2 * gplane : nullptr, d_ss_partial);
+    return rblocks;
+}
+
+// ssimAccumulateLoss adds λ·Σ(1−SSIM)(d_prender) into d_ploss (fixed-order partial sum).
+static void ssimAccumulateLoss() {
+    int rblocks = ssimForward(false);
+    feAddTotal<<<1, 1>>>(d_ss_partial, rblocks, g_polishSSIMLambda, d_ploss);
+}
+
 // fp_set_orient uploads the per-pixel edge-orientation map (len w*h, degrees) used
 // by genKernel to seed elongated shapes along local edges. Called once by the engine
 // before the greedy loop (the map is fixed for a run).
@@ -1983,6 +2174,7 @@ API void fp_polish_loss(double* out) {
     polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npix, d_ploss_partial, g_polishOKLab);
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
     if (g_polishFELambda > 0.0) feAccumulateLoss();
+    if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2002,6 +2194,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npx, d_ploss_partial, g_polishOKLab);
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
     if (g_polishFELambda > 0.0) feAccumulateLoss();
+    if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2024,7 +2217,20 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
         feAdjKernel<<<blocks, BLOCK>>>(d_feDir, g_w, g_h, d_feAdj);
         feAdj = d_feAdj;
     }
-    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda);
+    const double* ssAdjPtr = nullptr;
+    if (g_polishSSIMLambda > 0.0) {
+        ssimForward(true);
+        int mw = g_w - SSWIN + 1, mh = g_h - SSWIN + 1;
+        size_t gplane = (size_t)mw * mh;
+        size_t hgplane = (size_t)g_w * mh;
+        int nhg = g_w * mh;
+        ssGH<<<(nhg + BLOCK - 1) / BLOCK, BLOCK>>>(d_ssG, d_ssG + gplane, d_ssG + 2 * gplane, g_w, mw, mh,
+                                                   d_ssHG, d_ssHG + hgplane, d_ssHG + 2 * hgplane);
+        ssAdjKernel<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_ssHG, d_ssHG + hgplane, d_ssHG + 2 * hgplane,
+                                                           d_ssRL, d_ssTL, g_w, g_h, mh, d_ssAdj);
+        ssAdjPtr = d_ssAdj;
+    }
+    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda, ssAdjPtr, g_polishSSIMLambda);
     // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
     int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
     polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
@@ -2055,6 +2261,10 @@ API void fp_polish_free() {
     cudaFree(d_feTL); cudaFree(d_feRL); cudaFree(d_feDir); cudaFree(d_feAdj); cudaFree(d_fe_partial);
     d_feTL = d_feRL = nullptr; d_feDir = d_feAdj = d_fe_partial = nullptr;
     g_polishFELambda = 0.0;
+    cudaFree(d_ssTL); cudaFree(d_ssRL); cudaFree(d_ssMy); cudaFree(d_ssMyy);
+    cudaFree(d_ssH); cudaFree(d_ssG); cudaFree(d_ssHG); cudaFree(d_ssAdj); cudaFree(d_ss_partial);
+    d_ssTL = d_ssRL = nullptr; d_ssMy = d_ssMyy = d_ssH = d_ssG = d_ssHG = d_ssAdj = d_ss_partial = nullptr;
+    g_polishSSIMLambda = 0.0;
     d_pbase = d_prender = d_pdC = d_pbelow = nullptr;
     d_pP = d_pcol = d_pgrad = d_ploss = nullptr;
     d_pgrad_partial = d_ploss_partial = nullptr; d_pdcsnap = nullptr;

@@ -46,16 +46,18 @@ func TestPolishGradientFD(t *testing.T) {
 	tau := 1.2
 
 	cases := []struct {
-		name     string
-		oklab    bool
-		feLambda float64
-	}{{"sse", false, 0}, {"oklab", true, 0}, {"false-edge", false, 0.5}}
+		name       string
+		oklab      bool
+		feLambda   float64
+		ssimLambda float64
+	}{{"sse", false, 0, 0}, {"oklab", true, 0, 0}, {"false-edge", false, 0.5, 0}, {"ssim", false, 0, 0.5}}
 	for _, tc := range cases {
 		tc := tc
 		// Analytic gradients at the unperturbed params (soft mode — the FD check validates the
 		// true soft-render gradient; STE's gradient is a deliberate surrogate, not FD-checkable).
 		// The oklab pass additionally validates the OKLab Jacobian chain (okLabPixelDC); the
-		// false-edge pass validates the Sobel-adjoint chain (feState.adjoint + the dC luma seed).
+		// false-edge pass validates the Sobel-adjoint chain (feState.adjoint + the dC luma seed);
+		// the ssim pass validates the window-moment chain (ssimState.adjoint, same dC seed).
 		oklab := tc.oklab
 		var fe *feState
 		var feAdj []float64
@@ -63,11 +65,20 @@ func TestPolishGradientFD(t *testing.T) {
 			fe = newFEState(target, w, h)
 			feAdj = fe.adj
 		}
+		var ssim *ssimState
+		var ssimAdj []float64
+		if tc.ssimLambda > 0 {
+			ssim = newSSIMState(target, w, h)
+			ssimAdj = ssim.adj
+		}
 		polishForward(ps, base, render, below, bbx, w, h, tau, false)
 		if fe != nil {
 			fe.adjoint(render, w, h)
 		}
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda)
+		if ssim != nil {
+			ssim.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda, ssimAdj, tc.ssimLambda)
 		ana := make([][10]float64, len(ps))
 		for i := range ps {
 			ana[i] = ps[i].grad
@@ -78,6 +89,9 @@ func TestPolishGradientFD(t *testing.T) {
 			l := polishLoss(render, target, weight, w, h, oklab)
 			if fe != nil {
 				l += tc.feLambda * fe.total(render, w, h)
+			}
+			if ssim != nil {
+				l += tc.ssimLambda * ssim.total(render, w, h)
 			}
 			return l
 		}

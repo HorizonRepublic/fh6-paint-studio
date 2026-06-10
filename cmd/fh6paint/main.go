@@ -29,8 +29,8 @@ func main() {
 	shapes := flag.Int("shapes", 1000, "shape budget (<=3000); higher = more detail")
 	maxRes := flag.Int("max-res", 1100, "max image side in px (IDENTICAL to the studio's loadImage default)")
 	autocrop := flag.Bool("autocrop", true, "auto-crop uniform/empty margins to the content bbox BEFORE downscale, so the content fills the render (more detail+shapes per feature). No-op on full-bleed images (guarded). Off: -autocrop=false.")
-	region := flag.String("region", "", "reconstruct only a sub-region as its OWN decal: fx,fy,fw,fh (fractions of the source, 0..1). The crop is taken at FULL source resolution THEN scaled to -max-res, so the region fills the render РІР‚вЂќ a face crop gets far more shapes/pixels than the same region inside the whole-image budget. The path to crisp detail: the detail's angular size in the decal sets its crispness, so a face inside a whole-scene decal is small and soft. Output coords are in the crop's own space (a standalone decal).")
-	gridSize := flag.Int("grid", 48, "error-grid resolution (NxN cells) for importance sampling; finer (96-160) targets shapes onto small high-contrast features (thin contours, text) instead of spreading them РІР‚вЂќ helps fine detail at the cost of a slightly more scattered coarse stage")
+	region := flag.String("region", "", "reconstruct only a sub-region as its OWN decal: fx,fy,fw,fh (fractions of the source, 0..1). The crop is taken at FULL source resolution THEN scaled to -max-res, so the region fills the render Р Р†Р вЂљРІР‚Сњ a face crop gets far more shapes/pixels than the same region inside the whole-image budget. The path to crisp detail: the detail's angular size in the decal sets its crispness, so a face inside a whole-scene decal is small and soft. Output coords are in the crop's own space (a standalone decal).")
+	gridSize := flag.Int("grid", 48, "error-grid resolution (NxN cells) for importance sampling; finer (96-160) targets shapes onto small high-contrast features (thin contours, text) instead of spreading them Р Р†Р вЂљРІР‚Сњ helps fine detail at the cost of a slightly more scattered coarse stage")
 	randomSamples := flag.Int("random", 1000, "random candidates per shape")
 	mutated := flag.Int("mutated", 1000, "hill-climb mutation budget per shape")
 	seed := flag.Int64("seed", 1, "RNG seed")
@@ -39,8 +39,8 @@ func main() {
 	weighted := flag.Bool("weighted", true, "use edge-weighted perceptual error")
 	weightStrength := flag.Float64("weight-strength", 1.0, "blend the edge-weight map toward uniform: w'=(1-s)+s*w. 1=full edge weighting, 0=uniform. Lower strength improves both image-space SSE and SSIM, since full edge weighting over-fits contours at the cost of flat-region fidelity.")
 	preset := flag.String("preset", "quality", "quality preset: fast|balanced|max|quality|ultra (sets -random/-mutated/-sample-budget/-max-no-improve unless given). Default 'quality' = the high-quality knee, identical to the studio.")
-	overdraw := flag.Float64("overdraw", 1.0, "generate -shapes*overdraw, keep the most useful -shapes (>1 trades time for a small quality-per-shape gain; opaque-only РІР‚вЂќ ignored with -alpha)")
-	alpha := flag.Bool("alpha", true, "allow semi-transparent shapes (alpha<1) on opaque images РІР‚вЂќ many soft layers build smooth gradients/fur in fewer shapes (auto-OFF for cutouts so the object stays opaque)")
+	overdraw := flag.Float64("overdraw", 1.0, "generate -shapes*overdraw, keep the most useful -shapes (>1 trades time for a small quality-per-shape gain; opaque-only Р Р†Р вЂљРІР‚Сњ ignored with -alpha)")
+	alpha := flag.Bool("alpha", true, "allow semi-transparent shapes (alpha<1) on opaque images Р Р†Р вЂљРІР‚Сњ many soft layers build smooth gradients/fur in fewer shapes (auto-OFF for cutouts so the object stays opaque)")
 	sampleBudget := flag.Int("sample-budget", 0, "progressive-sampling pixel cap per shape (0=preset/backend default 4000; higher=big early shapes scored sharper; ultra uses ~full-res)")
 	maxNoImprove := flag.Int("max-no-improve", 0, "consecutive non-improving shapes before early-stop (0=preset/default 100; high=fill the FULL shape budget)")
 	recolorVar := flag.Float64("recolor-var", 0, "skip the weighted-mean recolor for shapes whose owned target pixels have color variance > this (keeps crisp color on boundary-straddling fur/contour slivers instead of a muddy mean). 0=off. ~0.02-0.05 for organic content.")
@@ -49,13 +49,13 @@ func main() {
 	boundary := flag.Bool("boundary", false, "boundary-aware radius (OPT-IN): cap each candidate's size by its centre's distance to the nearest target boundary (luma edge / cutout silhouette), ramped past -boundary-start, so shapes can't balloon ACROSS edges. A win on smooth photo/anime CHARACTER content (smoother gradients, less translucent veil), but it regresses on text/dense-detail/flat (the all-edge cap fragments fills), so it stays opt-in. Use it on character/photo liveries.")
 	boundaryPad := flag.Float64("boundary-pad", 16, "with -boundary: px a shape may still reach past a boundary (larger=looser cap, smaller=tighter to edges).")
 	boundaryStart := flag.Float64("boundary-start", 0.42, "with -boundary: progress at which the radius cap engages (ramps to full by progress 1). Earlier=tighter silhouettes sooner but constrains the coarse base.")
-	canvasPad := flag.Float64("canvas-pad", 0.04, "canvas-edge clamp: shrink any ellipse/rect whose rotated bbox extends past the image rectangle by more than canvas-pad*min(w,h) px on a side. Stops shapes ballooning OUTSIDE the image (visible in-game, clipped in the preview) + saves budget. 0=off (legacy). ~0.04 keeps a small edge bleed; a small value like 0.002 clamps tight (РІвЂ°в‚¬no bleed). Helps opaque/busy content most.")
+	canvasPad := flag.Float64("canvas-pad", 0.04, "canvas-edge clamp: shrink any ellipse/rect whose rotated bbox extends past the image rectangle by more than canvas-pad*min(w,h) px on a side. Stops shapes ballooning OUTSIDE the image (visible in-game, clipped in the preview) + saves budget. 0=off (legacy). ~0.04 keeps a small edge bleed; a small value like 0.002 clamps tight (Р Р†РІР‚В°РІвЂљВ¬no bleed). Helps opaque/busy content most.")
 	padTransparent := flag.Float64("pad-transparent", 0, "keep shapes inside the image: generate against a transparent surround of this fraction of the long side (~0.1) so the overhang/spill penalty bounds every shape to the content rectangle (no shape balloons past the edge). The geometry + preview are mapped back to the original size afterwards (no frame). 0=off. The robust fix for the 'shapes outside the image' artefact on full-bleed content.")
-	standout := flag.Float64("standout", 0, "post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. 0=off. ~0.005 = conservative. The metric will NOT show the win РІР‚вЂќ judge by eye; the gate only bounds the loss.")
+	standout := flag.Float64("standout", 0, "post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. 0=off. ~0.005 = conservative. The metric will NOT show the win Р Р†Р вЂљРІР‚Сњ judge by eye; the gate only bounds the loss.")
 	alphaMinFlag := flag.Float64("alpha-min", -1, "lower bound for candidate alpha when -alpha is on (candidates draw alpha~U(alpha-min,1)). -1 = content-mode default (organic 0.30). HIGHER = crisper/more-opaque shapes (less soft muddying of detail like eyes/lips), at the cost of needing more shapes for smooth gradients; test 0.7-0.85 on detailed faces.")
-	shapeTol := flag.Float64("shape-tol", 0, "auto-shape-count: stop placing shapes when the relative marginal improvement rate r=РћвЂќErr/(windowР’В·currentErr) per shape stays below this (0=off, fill -shapes budget). Adapts the count per image: saturated flat/logo stop early (~175-400), detailed photo/anime/cartoon fill the budget. -shapes is the ceiling. Recommended auto value: 0.0002 (conservative; trims only genuinely-saturated content). 0.0005 = aggressive/draft.")
-	kneeFloor := flag.Float64("knee-floor", 0, "with -shape-tol: floor the knee denominator at this fraction of the INITIAL error so the same tol also trips on near-SOLVED content (clean line-art / fully-filled flats) where Р“В·currentErr blows up and never stops. 0=off (pure relative). ~0.02 = treat <2% residual as solved. Detailed photos (currentErr РІвЂ°В« floor) are unaffected.")
-	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (РІв‚¬вЂ™score/area) is below this РІР‚вЂќ a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small РІР‚вЂќ try ~1e-4..1e-3.")
+	shapeTol := flag.Float64("shape-tol", 0, "auto-shape-count: stop placing shapes when the relative marginal improvement rate r=Р С›РІР‚СњErr/(windowР вЂ™Р’В·currentErr) per shape stays below this (0=off, fill -shapes budget). Adapts the count per image: saturated flat/logo stop early (~175-400), detailed photo/anime/cartoon fill the budget. -shapes is the ceiling. Recommended auto value: 0.0002 (conservative; trims only genuinely-saturated content). 0.0005 = aggressive/draft.")
+	kneeFloor := flag.Float64("knee-floor", 0, "with -shape-tol: floor the knee denominator at this fraction of the INITIAL error so the same tol also trips on near-SOLVED content (clean line-art / fully-filled flats) where Р вЂњР’В·currentErr blows up and never stops. 0=off (pure relative). ~0.02 = treat <2% residual as solved. Detailed photos (currentErr Р Р†РІР‚В°Р’В« floor) are unaffected.")
+	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (Р Р†РІвЂљВ¬РІР‚в„ўscore/area) is below this Р Р†Р вЂљРІР‚Сњ a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small Р Р†Р вЂљРІР‚Сњ try ~1e-4..1e-3.")
 	zswap := flag.Int("zswap", 0, "z-order local swap EXPERIMENT (0=off): after polish, try swapping up to N z-adjacent overlapping shape pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render -- keep N modest (~200). Aimed at opaque/flat content where stack order owns contested pixels.")
 	compact := flag.Bool("compact", true, "bias the per-shape pick toward compact shapes (cleaner coarse stage)")
 	mode := flag.String("mode", "anime", "content PRESET (3 manual): anime | photo | flat. Legacy names (logo/line/illustration/cutout/auto) collapse to one of the 3 via preset.PresetMode. anime/photo = semi-transparent + triangle-rich + STE; flat = opaque + rect/triangle by palette + boundary + backfit. Transparency is auto-detected (forces opaque). Explicit flags override.")
@@ -64,8 +64,8 @@ func main() {
 	posterize := flag.Int("posterize", 0, "quantize each target RGB channel to N levels before fitting (0=off; ~32-96 for flat/logo to snap broad color regions to exact constants). Applied after -preprocess.")
 	lockColorFlag := flag.String("lock-color", "", "MONO logo mode: force ALL shapes to ONE colour for a flat single-colour brand logo / decal. \"\"=off; \"auto\"=the logo's dominant ink colour; \"#RRGGBB\"=an exact colour. Binarizes the target to a clean single-colour cutout (no grey antialiased-edge shapes) and snaps every output shape to that colour. Output is always a transparent-background cutout.")
 	aspect := flag.Float64("aspect", -1, "max aspect ratio for ellipse/rect candidates: minor=major/U(1,aspect) makes thin slivers along the edge orientation (traces sharp contours). -1=auto (flat 8, organic 6). <=1 = round axes.")
-	ssaa := flag.Int("ss", 1, "preview supersampling factor (1=off): render the output shapes at ssР“вЂ” then box-downsample for ANTI-ALIASED edges. Our raster uses hard binary coverage, so contours are 1px steps while the source images have soft ~1-2px ramps РІР‚вЂќ that mismatch is where nearly all residual image-space error sits. ss=3-4 closes it. Affects the preview/comparison render only (the game rasterizes the geometry itself).")
-	gpuSearch := flag.Bool("gpu-search", true, "CUDA build only: run each shape's random-candidate phase on-device (generate+score+argmin in one launch) РІР‚вЂќ the throughput unlock for high candidate volume. Ignored by the CPU backend (host path).")
+	ssaa := flag.Int("ss", 1, "preview supersampling factor (1=off): render the output shapes at ssР вЂњРІР‚вЂќ then box-downsample for ANTI-ALIASED edges. Our raster uses hard binary coverage, so contours are 1px steps while the source images have soft ~1-2px ramps Р Р†Р вЂљРІР‚Сњ that mismatch is where nearly all residual image-space error sits. ss=3-4 closes it. Affects the preview/comparison render only (the game rasterizes the geometry itself).")
+	gpuSearch := flag.Bool("gpu-search", true, "CUDA build only: run each shape's random-candidate phase on-device (generate+score+argmin in one launch) Р Р†Р вЂљРІР‚Сњ the throughput unlock for high candidate volume. Ignored by the CPU backend (host path).")
 	// -moment-seed = PURE fast generation (moment-seeding, no hybrid handoff). Kept as a CLI flag for
 	// experiments / new-preset tuning even though the studio no longer exposes it standalone: the studio's
 	// "Fast generation" toggle now maps to the HYBRID (moment base + random detail, -moment-detail-start
@@ -73,41 +73,42 @@ func main() {
 	momentSeed := flag.Bool("moment-seed", false, "moment-seeding (PURE fast, no hybrid): replace the blind random candidate batch with a closed-form covariance-ellipse seed fitted from the residual grid + a small localised refine pool (-moment-refine). Far fewer candidates per shape -> large eval speedup. Add -moment-detail-start 0.55 for the HYBRID (the studio's Fast generation). Kept for experiments/preset tuning.")
 	momentRefine := flag.Int("moment-refine", 2048, "with -moment-seed: candidate-pool size per shape (the seeds + localised kind-weighted refinements, scored via the normal eval path + hill-climb mutate). 2048 is the quality-neutral knee (~-33% eval vs the 50k search); ~512 is faster (~-40%) for a small quality cost.")
 	momentCenters := flag.Int("moment-centers", 16, "with -moment-seed: number of error-sampled SEED CENTRES per shape (the -moment-refine budget is split across them). 1 = single fit (anchors to one centre, loses to random); ~16 spreads the budget to restore multi-location exploration at the same candidate cost.")
-	momentDetailStart := flag.Float64("moment-detail-start", 0, "with -moment-seed: HYBRID schedule РІР‚вЂќ past this progress (0..1) hand the per-shape search off from the moment pool to the blind random brute force, which finds the sharp SMALL detail shapes the 2nd-moment blob fit never proposes (the late shapes are cheap, so it buys crispness for little time). 0 = off (moment all the way). ~0.6-0.7 = fast smooth base + sharp random detail.")
-	coarseSearch := flag.Bool("coarse-search", true, "CUDA build only: coarse-to-fine search РІР‚вЂќ score the candidate batch at a CHEAP pixel cap (-coarse-budget) to filter, then re-score only the -coarse-k survivors at the full -sample-budget and pick from those. The winner is full-budget scored (quality-neutral РІР‚вЂќ unlike a uniform -sample-budget cut, which mis-picks on low-res noise), while the bulk pays only the coarse cost. The dominant eval-speed lever at the quality preset (roughly halves eval wall-time). Auto-disabled below ~33k candidates (n>4*-coarse-k). -coarse-search=false for the exhaustive single-pass.")
+	momentDetailStart := flag.Float64("moment-detail-start", 0, "with -moment-seed: HYBRID schedule Р Р†Р вЂљРІР‚Сњ past this progress (0..1) hand the per-shape search off from the moment pool to the blind random brute force, which finds the sharp SMALL detail shapes the 2nd-moment blob fit never proposes (the late shapes are cheap, so it buys crispness for little time). 0 = off (moment all the way). ~0.6-0.7 = fast smooth base + sharp random detail.")
+	coarseSearch := flag.Bool("coarse-search", true, "CUDA build only: coarse-to-fine search Р Р†Р вЂљРІР‚Сњ score the candidate batch at a CHEAP pixel cap (-coarse-budget) to filter, then re-score only the -coarse-k survivors at the full -sample-budget and pick from those. The winner is full-budget scored (quality-neutral Р Р†Р вЂљРІР‚Сњ unlike a uniform -sample-budget cut, which mis-picks on low-res noise), while the bulk pays only the coarse cost. The dominant eval-speed lever at the quality preset (roughly halves eval wall-time). Auto-disabled below ~33k candidates (n>4*-coarse-k). -coarse-search=false for the exhaustive single-pass.")
 	coarseBudget := flag.Int("coarse-budget", 3000, "with -coarse-search: pixel cap for the cheap coarse filter pass (lower = faster bulk; must stay high enough that the true winner is its partition's coarse-min). 3000 is the floor: it selects the same survivors as a larger filter, while going below it starts missing winners.")
 	coarseK := flag.Int("coarse-k", 8192, "with -coarse-search: number of coarse survivors re-scored at the FULL budget (higher = the true winner is more reliably included -> closer to baseline quality, at a small extra re-eval cost; the bulk stays cheap).")
 	coarseFP16 := flag.Bool("coarse-fp16", true, "with -coarse-search: run the coarse FILTER pass in FP16/half2 (halves the ALU-bound per-pixel work; the FP32 re-eval still picks+scores the winner). Quality stays within the coarse-to-fine ranking band. -coarse-fp16=false restores FP32 filtering (exact-but-slower ranking).")
-	warpEval := flag.Bool("warp-eval", false, "CUDA build only: warp-per-candidate eval kernel (opt-in). Slower than the default block-per-candidate kernel РІР‚вЂќ large early shapes dominate runtime and want 128 threads/candidate, not 32. Kept for reference.")
+	warpEval := flag.Bool("warp-eval", false, "CUDA build only: warp-per-candidate eval kernel (opt-in). Slower than the default block-per-candidate kernel Р Р†Р вЂљРІР‚Сњ large early shapes dominate runtime and want 128 threads/candidate, not 32. Kept for reference.")
 	polish := flag.Bool("polish", false, "joint differentiable polish pass after greedy (refines all shapes together; slower, gated so it never regresses)")
-	gaussian := flag.Bool("gaussian", false, "NICHE MODE: reconstruct the image as -shapes soft GLOW splats jointly trained by the polish (no greedy, no densify) РІР‚вЂќ engine.GenerateGaussian. For SMOOTH / gradient / painterly content only (8x better than greedy on a gradient; loses on fine detail). -polish-iters sets the training budget (0 = auto-scaled to the glow count). Output glows are native FH6 KindGlow primitives.")
-	polishIters := flag.Int("polish-iters", 200, "polish gradient-descent iterations. Default 200 organic / 300 flat (set below) РІР‚вЂќ the perceptual knee: past it the result is indistinguishable by eye even though the hard-loss metric keeps inching down, so the extra iters are wasted wall-time (polish is 60-85% of a run). Raise for max metric fidelity.")
+	gaussian := flag.Bool("gaussian", false, "NICHE MODE: reconstruct the image as -shapes soft GLOW splats jointly trained by the polish (no greedy, no densify) Р Р†Р вЂљРІР‚Сњ engine.GenerateGaussian. For SMOOTH / gradient / painterly content only (8x better than greedy on a gradient; loses on fine detail). -polish-iters sets the training budget (0 = auto-scaled to the glow count). Output glows are native FH6 KindGlow primitives.")
+	polishIters := flag.Int("polish-iters", 200, "polish gradient-descent iterations. Default 200 organic / 300 flat (set below) Р Р†Р вЂљРІР‚Сњ the perceptual knee: past it the result is indistinguishable by eye even though the hard-loss metric keeps inching down, so the extra iters are wasted wall-time (polish is 60-85% of a run). Raise for max metric fidelity.")
 	polishTau0 := flag.Float64("polish-tau0", 2.0, "polish initial edge softness (px); higher = coarser early")
 	polishTau1 := flag.Float64("polish-tau1", 0.08, "polish final edge softness (px); lower = sharper, smaller soft->hard snap gap. DEFAULT is content-adaptive (set below unless given): flat/cutout 0.06, organic 0.08. ~0.06-0.08 is the sweet spot across content; the gradient vanishes below ~0.05.")
 	polishOKLab := flag.Bool("polish-oklab", false, "EXPERIMENT (default off): compute the polish loss/gradient in OKLab (perceptual colour distance) instead of raw channel SSE - hue/chroma errors cost what the eye charges, targeting the standout-colour artifact. Greedy scoring is untouched; the accept gate still measures plain SSE. Validate by EYE end-to-end (metrics may diverge).")
 	polishFalseEdge := flag.Float64("polish-false-edge", 0, "EXPERIMENT (0=off): add lambda*relu(|grad recon|-|grad target|) (Sobel on luma - the standout detector) to the polish loss, pressing shapes whose rims draw edges the target lacks DOWN during the descent instead of post-hoc. Additive-only per the OKLab lesson; CPU polish driver only (a non-zero lambda routes polish off the GPU). Judge by EYE + FalseEdges metric.")
+	polishSSIM := flag.Float64("polish-ssim", 0, "EXPERIMENT (0=off): add lambda*sum(1-SSIM_local) (uniform 8x8 luma windows) to the polish loss - charges local contrast/structure errors SSE undercharges. Additive-only per the OKLab lesson; the accept gate still measures plain SSE. Judge by EYE + SSIM metric.")
 	polishSTE := flag.Bool("polish-ste", false, "polish straight-through estimator: HARD-coverage forward composite (optimizes the EXACT shipped hard render, closing the soft->hard snap gap) with the soft surrogate gradient for geometry. Biggest win on flat/vector content where the snap gap is largest. Default off (soft polish).")
 	polishEarly := flag.Bool("polish-early", true, "early-stop the polish loop on diminishing returns (a late-phase check adds <2% of the total hard-loss gain so far, 3x); the best-hard point is still shipped, so this only drops a genuinely-wasteful tail. Inert at the tuned iters (polish is still productive there); trims when iters are raised. -polish-early=false runs the full -polish-iters.")
-	backfit := flag.Bool("backfit", false, "back-fitting: remove the lowest-contribution shapes and RE-GREEDY them against the completed-canvas residual (breaks the greedy plateau РІР‚вЂќ each shape was optimal WHEN placed, but later shapes changed the canvas). Gated END-TO-END: polish(greedy) vs polish(backfit(greedy)), keep the winner, so it NEVER regresses. AUTO-ON for flat/logo/line + cutout (where the greedy plateau bites hardest); opt-in elsewhere since it costs ~one extra polish for a smaller gain.")
+	backfit := flag.Bool("backfit", false, "back-fitting: remove the lowest-contribution shapes and RE-GREEDY them against the completed-canvas residual (breaks the greedy plateau Р Р†Р вЂљРІР‚Сњ each shape was optimal WHEN placed, but later shapes changed the canvas). Gated END-TO-END: polish(greedy) vs polish(backfit(greedy)), keep the winner, so it NEVER regresses. AUTO-ON for flat/logo/line + cutout (where the greedy plateau bites hardest); opt-in elsewhere since it costs ~one extra polish for a smaller gain.")
 	backfitPasses := flag.Int("backfit-passes", 2, "number of back-fitting passes (each removes+regrows -backfit-frac of the shapes); passes stop early once one stops improving")
 	backfitFrac := flag.Float64("backfit-frac", 0.1, "fraction of shapes removed+regrown per back-fitting pass (0.1 = the weakest 10%)")
 	live := flag.Int("live", 0, "EXPERIMENTAL LIVE-style component-init scheduler (0=off, REPLACES greedy when >0): add shapes in batches of this size seeded from the largest residual components (big regions first) + re-polish ALL jointly after every batch. The proven low-primitive-count win (5 paths vs 256). For the low-budget economy regime; ~6-10 batch. Use at low -shapes with -polish.")
 	liveBase := flag.Int("live-base", 0, "with -live: run the LIVE co-adaptation only for the first this-many shapes (the structural BASE), then greedy for the rest of -shapes (the detail). 0 = LIVE all the way. The two-phase economy: cheap co-adapted base frees budget for detail; affordable at full -shapes since LIVE runs only on the base.")
-	anneal := flag.Int("anneal", 0, "EXPERIMENTAL basin-hopping / iterated local search (0=off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget economy regime (50-300 shapes); ~20-40 iters. Costly (re-polishes each iter) РІР‚вЂќ use only at low -shapes.")
-	economy := flag.Bool("economy", false, "opt-in to the auto economy schedule (LIVE co-adaptation / anneal at РІвЂ°В¤~1500 shapes): better quality at low budgets but ~4x slower (re-polishes all shapes per batch). Off by default. Explicit -live/-anneal override it regardless.")
+	anneal := flag.Int("anneal", 0, "EXPERIMENTAL basin-hopping / iterated local search (0=off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget economy regime (50-300 shapes); ~20-40 iters. Costly (re-polishes each iter) Р Р†Р вЂљРІР‚Сњ use only at low -shapes.")
+	economy := flag.Bool("economy", false, "opt-in to the auto economy schedule (LIVE co-adaptation / anneal at Р Р†РІР‚В°Р’В¤~1500 shapes): better quality at low budgets but ~4x slower (re-polishes all shapes per batch). Off by default. Explicit -live/-anneal override it regardless.")
 	scoreJSON := flag.String("score-json", "", "comparison mode: render an existing geometry JSON through our backend, score it (unweighted SSE + per-pixel) vs -input, save -preview, then exit. Set -max-res to the JSON's canvas size for alignment.")
-	polishJSON := flag.String("polish-json", "", "polish-harness mode: load a saved greedy geometry JSON, run ONLY the gated joint polish on it (current -polish-* opts) against -input, save polished -output + -preview, then exit. The greedy input is FIXED, so any final-error delta is purely the polish change РІР‚вЂќ an isolated harness for tuning polish (faster than a full run). Set -max-res to the JSON canvas size.")
+	polishJSON := flag.String("polish-json", "", "polish-harness mode: load a saved greedy geometry JSON, run ONLY the gated joint polish on it (current -polish-* opts) against -input, save polished -output + -preview, then exit. The greedy input is FIXED, so any final-error delta is purely the polish change Р Р†Р вЂљРІР‚Сњ an isolated harness for tuning polish (faster than a full run). Set -max-res to the JSON canvas size.")
 	imgVs := flag.String("img-vs", "", "image-space comparison: compare the -input PNG against this PNG pixel-for-pixel (must be same size), report SSE + per-pixel, save a difference heatmap to -preview, then exit. Convention-free (no rendering).")
-	imgBlur := flag.Int("img-blur", 0, "with -img-vs: box-blur the compared (-img-vs) image by this radius before diffing РІР‚вЂќ tests the anti-aliasing hypothesis (does softening our hard edges match an AA target?).")
-	linear := flag.Bool("linear", true, "composite in LINEAR light РІР‚вЂќ the space the editor renders in (gamma ~2.2). DEFAULT-ON (matches the studio): the engine optimises the linear composite so the in-game result matches the target and semi-transparent shapes stop 'popping'; output colours are sRGB-encoded; opaque content is unaffected. Use -linear=false for an sRGB comparison. Measure with -fh6-score.")
+	imgBlur := flag.Int("img-blur", 0, "with -img-vs: box-blur the compared (-img-vs) image by this radius before diffing Р Р†Р вЂљРІР‚Сњ tests the anti-aliasing hypothesis (does softening our hard edges match an AA target?).")
+	linear := flag.Bool("linear", true, "composite in LINEAR light Р Р†Р вЂљРІР‚Сњ the space the editor renders in (gamma ~2.2). DEFAULT-ON (matches the studio): the engine optimises the linear composite so the in-game result matches the target and semi-transparent shapes stop 'popping'; output colours are sRGB-encoded; opaque content is unaffected. Use -linear=false for an sRGB comparison. Measure with -fh6-score.")
 	fh6Score := flag.String("fh6-score", "", "comparison mode: render a geometry JSON the way the GAME composites it (LINEAR light) and report SSE vs -input (sRGB), then exit. Measures real in-game fidelity (the semi-transparent pop). Set -max-res to the JSON canvas size; -ss for AA; saves the in-game render to -preview.")
 	stylizeMode := flag.String("stylize", "", "STYLIZER mode: run a stylizer preset (auto|anime|poster|ink) instead of the geometrize engine, writing injectable geometry to -output (+ -preview). 'auto' analyses the image's style (line-art/cel/hatched/busy) and picks the line+fill+smooth knobs per content. Uses -max-res as the working resolution and -shapes as the budget.")
-	stylizeLibrary := flag.Bool("stylize-library", false, "with -stylize: also save the result as a Studio library entry (~/FH6PaintStudio/library) so it injects from the studio's Library tab via the normal word-only path РІР‚вЂќ no GUI run needed.")
+	stylizeLibrary := flag.Bool("stylize-library", false, "with -stylize: also save the result as a Studio library entry (~/FH6PaintStudio/library) so it injects from the studio's Library tab via the normal word-only path Р Р†Р вЂљРІР‚Сњ no GUI run needed.")
 	hybridClaim := flag.Bool("hybrid-claim", false, "EXPERIMENT (with -hybrid-ink, default off): the drawn FDoG lines CLAIM their pixels from the fill target (inpainted from the surroundings), so the geometrize fill stops reproducing a soft offset copy of every inked stroke under the ink layer (the hybrid double-line/ghosting artifact). Lines the ink budget does not draw stay in the target and render via the fill as before. Judge by eye.")
-	hybridInk := flag.Int("hybrid-ink", 0, "HYBRID: after the geometrize run, lay up to N clean FDoG ink lines (stylizer) ON TOP РІР‚вЂќ the optimized colour/detail fill (alive eyes) + the designed anime outline. N>0: -shapes is the fill budget, total = -shapes + N. N=-1: AUTO РІР‚вЂќ split -shapes by content (photoРІвЂ вЂ™no lines; line-artРІвЂ вЂ™line-heavy 35%; celРІвЂ вЂ™fill-heavy 12%; else 20%). 0=off.")
+	hybridInk := flag.Int("hybrid-ink", 0, "HYBRID: after the geometrize run, lay up to N clean FDoG ink lines (stylizer) ON TOP Р Р†Р вЂљРІР‚Сњ the optimized colour/detail fill (alive eyes) + the designed anime outline. N>0: -shapes is the fill budget, total = -shapes + N. N=-1: AUTO Р Р†Р вЂљРІР‚Сњ split -shapes by content (photoР Р†РІР‚В РІР‚в„ўno lines; line-artР Р†РІР‚В РІР‚в„ўline-heavy 35%; celР Р†РІР‚В РІР‚в„ўfill-heavy 12%; else 20%). 0=off.")
 	saveLib := flag.Bool("library", false, "save the final geometry as a Studio library entry (~/FH6PaintStudio/library) for one-click word-only in-game inject from the Library tab (works for the geometrize + hybrid path).")
-	metrics := flag.Bool("metrics", false, "print perceptual quality of the final render vs the source (РћвЂќE76 mean/p95, SSIM, banding) РІР‚вЂќ the offline quality harness; the WYSIWYG render is in-game-faithful so these correlate with the eye.")
-	perceptualLuma := flag.Bool("perceptual-luma", false, "EXPERIMENT (default off): compute WeightMapV2's luma in sRGB space so its darkness/highlight pivots land correctly in the linear pipeline. A/B only РІР‚вЂќ validate by eye end-to-end (REVIEW M4).")
+	metrics := flag.Bool("metrics", false, "print perceptual quality of the final render vs the source (Р С›РІР‚СњE76 mean/p95, SSIM, banding) Р Р†Р вЂљРІР‚Сњ the offline quality harness; the WYSIWYG render is in-game-faithful so these correlate with the eye.")
+	perceptualLuma := flag.Bool("perceptual-luma", false, "EXPERIMENT (default off): compute WeightMapV2's luma in sRGB space so its darkness/highlight pivots land correctly in the linear pipeline. A/B only Р Р†Р вЂљРІР‚Сњ validate by eye end-to-end (REVIEW M4).")
 	flag.Parse()
 
 	model.LinearLight = *linear
@@ -119,7 +120,7 @@ func main() {
 	defer applog.Recover()
 
 	// In-game hard ceiling: a livery group accepts at most 3000 shape layers. A
-	// bumper panel is ~1000, a full side or roof is ~3000 РІР‚вЂќ each panel is its own
+	// bumper panel is ~1000, a full side or roof is ~3000 Р Р†Р вЂљРІР‚Сњ each panel is its own
 	// budget, so quality-per-shape matters most at the lower counts.
 	const fh6MaxShapes = 3000
 	if *shapes > fh6MaxShapes {
@@ -140,7 +141,7 @@ func main() {
 		*preset, *randomSamples, *mutated, *sampleBudget, *maxNoImprove, *alpha, *compact, *overdraw)
 
 	// Image-space comparison: diff two finished PNGs (native res, no rendering) against each
-	// other and exit. Convention-free РІР‚вЂќ renderer / type-id / ellipse-convention differences
+	// other and exit. Convention-free Р Р†Р вЂљРІР‚Сњ renderer / type-id / ellipse-convention differences
 	// can't distort it, so it's the honest way to compare two reconstructions of the same target.
 	if *imgVs != "" {
 		compareImages(*in, *imgVs, *preview, *imgBlur)
@@ -148,7 +149,7 @@ func main() {
 	}
 
 	// In-game fidelity check: render a geometry JSON in LINEAR light (how the editor composites) and
-	// score it against the sRGB target РІР‚вЂќ quantifies the semi-transparent "pop" and whether -linear fixes it.
+	// score it against the sRGB target Р Р†Р вЂљРІР‚Сњ quantifies the semi-transparent "pop" and whether -linear fixes it.
 	if *fh6Score != "" {
 		scoreFH6(*fh6Score, *in, *maxRes, *ssaa, *preview)
 		return
@@ -186,13 +187,13 @@ func main() {
 	padPx, origW, origH := 0, prep.W, prep.H
 	if *padTransparent > 0 {
 		prep, padPx = imageio.PadTransparent(prep, *padTransparent)
-		applog.Printf("pad-transparent: %.2f РІвЂ вЂ™ %dx%d surround (spill-penalty bounds shapes inside the image)", *padTransparent, prep.W, prep.H)
+		applog.Printf("pad-transparent: %.2f Р Р†РІР‚В РІР‚в„ў %dx%d surround (spill-penalty bounds shapes inside the image)", *padTransparent, prep.W, prep.H)
 	}
 	// cutout = a real source cutout, not just the keep-inside margin. The spill penalty (TransparentBG)
 	// still fires on the margin either way; the tuning below only switches to cutout mode for a real one.
 	cutout := prep.HasTransparency && !prep.PaddedOpaque
 
-	// Resolve the content MODE FIRST РІР‚вЂќ it drives three things: alpha (flat/line-art ->
+	// Resolve the content MODE FIRST Р Р†Р вЂљРІР‚Сњ it drives three things: alpha (flat/line-art ->
 	// OPAQUE crisp edges; photo/anime -> semi-transparent smooth gradient build-up), the
 	// kind mix (flat -> ellipse-dominant thin strokes that trace contours), AND the
 	// saliency map (flat/cutout -> the richer ink-aware WeightMapV2). Cutouts force opaque.
@@ -204,9 +205,9 @@ func main() {
 	// presets). "auto"/""/unknown -> anime.
 	resolvedMode := presetpkg.PresetMode(*mode)
 	flatMode := resolvedMode == "flat"
-	// Hybrid: generate the FDoG ink lines FIRST (from the source) so we know their ACTUAL count РІР‚вЂќ then give
+	// Hybrid: generate the FDoG ink lines FIRST (from the source) so we know their ACTUAL count Р Р†Р вЂљРІР‚Сњ then give
 	// the fill the rest of the budget, so nothing is wasted when FDoG self-limits below its ceiling.
-	// -hybrid-ink<0 = AUTO: pick the ink ceiling by content (photoРІвЂ вЂ™0, line-artРІвЂ вЂ™35%, celРІвЂ вЂ™12%, else 20%) and
+	// -hybrid-ink<0 = AUTO: pick the ink ceiling by content (photoР Р†РІР‚В РІР‚в„ў0, line-artР Р†РІР‚В РІР‚в„ў35%, celР Р†РІР‚В РІР‚в„ў12%, else 20%) and
 	// split the -shapes total. -hybrid-ink N>0 = fixed ceiling N, added on top (total = -shapes + actual).
 	inkCeiling := *hybridInk
 	if *hybridInk < 0 {
@@ -226,7 +227,7 @@ func main() {
 			fillBudget = 1
 		}
 	}
-	// All per-mode constants come from presetpkg.ModeDefaultsFor РІР‚вЂќ the SINGLE source of truth shared
+	// All per-mode constants come from presetpkg.ModeDefaultsFor Р Р†Р вЂљРІР‚Сњ the SINGLE source of truth shared
 	// with the studio (preset.Resolve), so the CLI and GUI can never drift. The CLI keeps its
 	// flag/userSet override plumbing; only the constant VALUES are sourced from md.
 	md := presetpkg.ModeDefaultsFor(resolvedMode, cs.Colors, cutout)
@@ -238,6 +239,10 @@ func main() {
 	// False-edge polish term default (md.FalseEdge: anime 0.004, photo/flat 0). -polish-false-edge overrides.
 	if !userSet["polish-false-edge"] {
 		*polishFalseEdge = md.FalseEdge
+	}
+	// SSIM polish term default (md.SSIM; 0 everywhere until the О»-grid ships one). -polish-ssim overrides.
+	if !userSet["polish-ssim"] {
+		*polishSSIM = md.SSIM
 	}
 	// Auto-shape-count knee default (md: flat/line-art trims the white-bg ghost-facet over-fill; off for
 	// anime/photo). -shape-tol / -knee-floor override. Same source of truth as the studio (ModeDefaultsFor).
@@ -272,11 +277,11 @@ func main() {
 	}
 
 	// Weight-strength default: the full edge weight (1.0) over-fits contours and hurts both
-	// image-space SSE and SSIM, so soften it per content РІР‚вЂќ flat/vector -> uniform (0), anime ->
+	// image-space SSE and SSIM, so soften it per content Р Р†Р вЂљРІР‚Сњ flat/vector -> uniform (0), anime ->
 	// light (0.15), photo -> mild (0.40). Explicit -weight-strength overrides. (The blend is
 	// applied to the weight map below.)
 	if !userSet["weight-strength"] {
-		*weightStrength = md.WeightStr // anime 0.15 / photo 0.40 / flat 0 (the only animeРІвЂ°В photo knob)
+		*weightStrength = md.WeightStr // anime 0.15 / photo 0.40 / flat 0 (the only animeР Р†РІР‚В°Р’В photo knob)
 	}
 
 	// Aspect bias (thin elongated slivers laid along the local edge orientation): the BIGGEST
@@ -291,7 +296,7 @@ func main() {
 	// Joint polish auto-on for ALL content. With the sharpened final tau the soft->hard snap gap is
 	// small enough that polish helps FLAT/vector art too, and on smooth content it's the big lever.
 	// It's GPU-fast and strictly gated (never regresses), so always-on is safe; explicit -polish=false
-	// opts out (e.g. for speed РІР‚вЂќ flat polish at 3000 shapes is ~half the wall time).
+	// opts out (e.g. for speed Р Р†Р вЂљРІР‚Сњ flat polish at 3000 shapes is ~half the wall time).
 	if !userSet["polish"] {
 		*polish = true
 	}
@@ -331,7 +336,7 @@ func main() {
 	// onto crisp contours + exact fills instead of compression/AA noise. luma_bands = edge-weighted
 	// luminance banding; posterize = color quantization. Applied BEFORE saliency + backend so both see
 	// the cleaned target. Banding makes the target differ from the original, which usually costs more
-	// than the cleaner-contour benefit buys on already-clean sources, so auto = none РІР‚вЂќ both are kept as
+	// than the cleaner-contour benefit buys on already-clean sources, so auto = none Р Р†Р вЂљРІР‚Сњ both are kept as
 	// manual opt-ins for noisy sources where they might help.
 	preMode := strings.ToLower(*preprocess)
 	if preMode == "auto" {
@@ -360,7 +365,7 @@ func main() {
 		prep.HasTransparency = true // mono output is a single-colour cutout decal
 		cutout = true               // opaque, crisp-silhouette placement (useV2, no compact bias)
 		allowAlpha = false
-		applog.Printf("mono lock-colour #%02X%02X%02X РІР‚вЂќ binarized target to a single-colour cutout",
+		applog.Printf("mono lock-colour #%02X%02X%02X Р Р†Р вЂљРІР‚Сњ binarized target to a single-colour cutout",
 			model.EncByte(lc.R), model.EncByte(lc.G), model.EncByte(lc.B))
 	}
 
@@ -390,9 +395,9 @@ func main() {
 		}
 	}
 	// -linear PERCEPTUAL WEIGHT: composite in linear (correct, no in-game pop) but minimise a
-	// PERCEPTUAL error, by weighting each pixel's linear-SSE by (d sRGB/d linear)Р’Р†. The sRGB EOTF
+	// PERCEPTUAL error, by weighting each pixel's linear-SSE by (d sRGB/d linear)Р вЂ™Р вЂ . The sRGB EOTF
 	// is steep in darks / flat in brights, so this up-weights shadow detail and down-weights bright
-	// regions exactly as perception does РІР‚вЂќ making the analytic weighted-mean optimal colour solve
+	// regions exactly as perception does Р Р†Р вЂљРІР‚Сњ making the analytic weighted-mean optimal colour solve
 	// for the sRGB-displayed result while the blend stays linear. Without it, plain linear-SSE
 	// biases colours bright and smooths detail.
 	if model.LinearLight {
@@ -435,7 +440,7 @@ func main() {
 	}
 	applog.Printf("backend=%s", beName)
 	if prep.HasTransparency {
-		applog.Printf("transparent background detected РІР‚вЂќ keeping background empty (cutout mode)")
+		applog.Printf("transparent background detected Р Р†Р вЂљРІР‚Сњ keeping background empty (cutout mode)")
 	}
 
 	// Comparison mode: render an external geometry JSON through our renderer and score it against
@@ -454,7 +459,7 @@ func main() {
 			Width: prep.W, Height: prep.H, Background: prep.Background, TransparentBG: prep.HasTransparency,
 			RecolorVarSkip: *recolorVar,
 			Polish:         true,
-			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge),
+			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM),
 		}, *out, *preview, *ssaa)
 		return
 	}
@@ -472,7 +477,7 @@ func main() {
 			Width: prep.W, Height: prep.H, Background: prep.Background,
 			StopAt: *shapes, Seed: *seed, TransparentBG: prep.HasTransparency,
 			Gaussian:   true,
-			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0),
+			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0, 0),
 		})
 		applog.Printf("gaussian: %d glows, error %.1f -> %.1f in %.1fs",
 			len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
@@ -516,7 +521,7 @@ func main() {
 		StandoutTol:         *standout,
 		ZSwapTrials:         *zswap,
 		// Compact-shape bias is SSE-neutral on opaque content but mildly HURTS cutouts (it
-		// early-stops short of the budget РІР‚вЂќ forcing small shapes fights the large flat fills
+		// early-stops short of the budget Р Р†Р вЂљРІР‚Сњ forcing small shapes fights the large flat fills
 		// a cutout's object needs). So apply it only to opaque images.
 		CompactPenalty:    *compact && !cutout,
 		OnDeviceSearch:    *gpuSearch,
@@ -529,7 +534,7 @@ func main() {
 		CoarseK:           *coarseK,
 		CoarseFP16:        *coarseFP16,
 		Polish:            *polish,
-		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge),
+		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM),
 		BackFit:           *backfit,
 		BackFitPasses:     *backfitPasses,
 		BackFitFrac:       *backfitFrac,
@@ -549,7 +554,7 @@ func main() {
 	logTimings(res.Timings)
 
 	// HYBRID: lay clean FDoG ink lines (the stylizer's designed anime outline) ON TOP of the geometrize
-	// colour/detail fill РІР‚вЂќ the optimized engine renders alive eyes + smooth shading that flat cells can't,
+	// colour/detail fill Р Р†Р вЂљРІР‚Сњ the optimized engine renders alive eyes + smooth shading that flat cells can't,
 	// and the crisp lines give the designed look. Built from prep.Pixels so the ink shares the exact canvas.
 	if len(inkShapes) > 0 {
 		res.Shapes = append(res.Shapes, inkShapes...) // designed FDoG outline, composited ON TOP of the fill
@@ -569,19 +574,19 @@ func main() {
 	must(imageio.WriteGeometry(*out, model.Geometry{Shapes: res.Shapes}))
 	var canvas []float32
 	if *preview != "" || *saveLib || *metrics {
-		// WYSIWYG render: the way the GAME composites РІР‚вЂќ LINEAR light РІР‚вЂќ so semi-transparent shapes show
+		// WYSIWYG render: the way the GAME composites Р Р†Р вЂљРІР‚Сњ LINEAR light Р Р†Р вЂљРІР‚Сњ so semi-transparent shapes show
 		// their TRUE in-game appearance instead of an sRGB-blend preview that under-states the "pop". For
 		// opaque content this equals a plain preview (no blending). ss>1 supersamples for anti-aliased edges.
 		canvas = imageio.RenderFH6(res.Shapes, prep.HasTransparency, outW, outH, *ssaa)
 	}
 	if *metrics && padPx == 0 && outW == prep.W && outH == prep.H {
-		// canvas (RenderFH6) is sRGB; prep.Pixels is LINEAR in -linear mode РІР‚вЂќ encode it to sRGB so the
+		// canvas (RenderFH6) is sRGB; prep.Pixels is LINEAR in -linear mode Р Р†Р вЂљРІР‚Сњ encode it to sRGB so the
 		// perceptual metrics (which expect sRGB) compare like-for-like.
 		srcSRGB := imageio.EncodeForDisplay(prep.Pixels)
 		de, p95 := metric.DeltaE76(srcSRGB, canvas, outW, outH)
 		ss := metric.SSIM(srcSRGB, canvas, outW, outH)
 		band := metric.FalseEdges(srcSRGB, canvas, outW, outH, 0.02)
-		fmt.Printf("[metrics] shapes=%d РћвЂќE76 mean=%.2f p95=%.2f  SSIM=%.4f  band=%.2f\n", len(res.Shapes)-1, de, p95, ss, band)
+		fmt.Printf("[metrics] shapes=%d Р С›РІР‚СњE76 mean=%.2f p95=%.2f  SSIM=%.4f  band=%.2f\n", len(res.Shapes)-1, de, p95, ss, band)
 	}
 	if *preview != "" {
 		must(ensureDir(*preview))
@@ -608,8 +613,8 @@ func main() {
 	applog.Printf("wrote %s", *out)
 }
 
-// runStylize runs a stylizer preset and writes injectable geometry (+ optional preview) РІР‚вЂќ the second
-// pipeline's CLI entry. Coordinates are at the working resolution (src.WР“вЂ”src.H), so inject at that
+// runStylize runs a stylizer preset and writes injectable geometry (+ optional preview) Р Р†Р вЂљРІР‚Сњ the second
+// pipeline's CLI entry. Coordinates are at the working resolution (src.WР вЂњРІР‚вЂќsrc.H), so inject at that
 // canvas size (printed below).
 func runStylize(preset, in, out, preview string, maxRes, budget, ss int, lib bool) {
 	src, err := stylize.Load(in, maxRes)

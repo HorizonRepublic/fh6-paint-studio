@@ -10,8 +10,9 @@ layout(std430, binding = 5)          buffer Db { float dC[]; };
 layout(std430, binding = 8) readonly buffer Tb { float target[]; };
 layout(std430, binding = 9) readonly buffer Wb { float weightb[]; };
 layout(std430, binding = 10) readonly buffer Fb { double feAdj[]; };
+layout(std430, binding = 11) readonly buffer Sb { double ssimAdj[]; };
 layout(push_constant) uniform PC {
-    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab; float feLambda;
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab; float feLambda; float ssimLambda;
 } pc;
 
 // dcbrt — double cube root via float seed + 2 Newton steps (see polish_loss.comp).
@@ -34,10 +35,13 @@ void main() {
     int idx = int(gl_GlobalInvocationID.x);
     if (idx >= pc.npix) return;
     int p = idx * 4;
-    // False-edge term (engine falseedge.go): dC RGB seeds gain λ·adj·lumaCoef; alpha carries no luma.
+    // False-edge + SSIM terms (engine falseedge.go / ssimterm.go): both chain through the luma
+    // coefficients into the dC RGB seeds; alpha carries no luma.
     double feR = 0.0LF, feG = 0.0LF, feB = 0.0LF;
-    if (pc.feLambda > 0.0) {
-        double a = double(pc.feLambda) * feAdj[idx];
+    if (pc.feLambda > 0.0 || pc.ssimLambda > 0.0) {
+        double a = 0.0LF;
+        if (pc.feLambda > 0.0) a = double(pc.feLambda) * feAdj[idx];
+        if (pc.ssimLambda > 0.0) a += double(pc.ssimLambda) * ssimAdj[idx];
         feR = a * 0.299LF; feG = a * 0.587LF; feB = a * 0.114LF;
     }
     if (pc.oklab != 0) {

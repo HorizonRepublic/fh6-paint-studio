@@ -63,6 +63,7 @@ type CUDA struct {
 	procPolSTE     *windows.Proc // optional: fp_set_polish_ste (straight-through coverage)
 	procPolOKLab   *windows.Proc // optional: fp_set_polish_oklab (perceptual OKLab polish loss)
 	procPolFE      *windows.Proc // optional: fp_set_polish_false_edge (false-edge additive polish loss term)
+	procPolSSIM    *windows.Proc // optional: fp_set_polish_ssim (SSIM additive polish loss term)
 	procPolSync    *windows.Proc // optional: fp_polish_sync (cudaDeviceSynchronize, for phase profiling)
 	procPolHard    *windows.Proc // optional: fp_polish_hard_loss (GPU best-hard render; nil -> CPU fallback)
 	// optional: joint-polish device primitives (nil on older DLLs)
@@ -147,6 +148,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procPolSTE, _ = dll.FindProc("fp_set_polish_ste")
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge")
+	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")
 	g.procWarpEval, _ = dll.FindProc("fp_set_warp_eval")
 	g.procGradients, _ = dll.FindProc("fp_set_gradients")
 	g.procCoarse, _ = dll.FindProc("fp_set_coarse")
@@ -492,6 +494,16 @@ func (g *CUDA) PolishSetFalseEdge(lambda float64) bool {
 		return false
 	}
 	g.procPolFE.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetSSIM sets the SSIM additive polish loss λ on the device — same contract as
+// PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
+func (g *CUDA) PolishSetSSIM(lambda float64) bool {
+	if g.procPolSSIM == nil {
+		return false
+	}
+	g.procPolSSIM.Call(uintptr(unsafe.Pointer(&lambda)))
 	return true
 }
 

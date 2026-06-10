@@ -67,7 +67,7 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
-	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
+	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
 
@@ -127,6 +127,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	}
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
+	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")     // optional: SSIM additive polish term
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -307,6 +308,16 @@ func (g *Vulkan) PolishSetFalseEdge(lambda float64) bool {
 		return false
 	}
 	g.procPolFE.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetSSIM sets the SSIM additive polish loss λ on the device — same contract as
+// PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
+func (g *Vulkan) PolishSetSSIM(lambda float64) bool {
+	if g.procPolSSIM == nil {
+		return false
+	}
+	g.procPolSSIM.Call(uintptr(unsafe.Pointer(&lambda)))
 	return true
 }
 

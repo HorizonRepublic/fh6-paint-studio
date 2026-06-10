@@ -173,8 +173,14 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 			feOK = s.PolishSetFalseEdge(0) // capability probe; PolishWithBackend sets the real λ after setup
 		}
 	}
+	ssimOK := opt.PolishOpts.SSIMLambda == 0
+	if !ssimOK {
+		if s, ok := be.(interface{ PolishSetSSIM(lambda float64) bool }); ok {
+			ssimOK = s.PolishSetSSIM(0)
+		}
+	}
 	var pr PolishResult
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK {
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)
