@@ -478,6 +478,13 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 	switch PresetMode(resolvedMode) {
 	case "photo":
 		d.WeightStr = 0.40
+		// Photo gradients want a LOWER alpha floor than cel art: more very-translucent layers build
+		// smoother tonal ramps at the same budget. Measured monotone across the floor grid on both
+		// photo bench images (cat: weighted −2.1%, ΔE/SSIM/image-SSE all better at 0.2-0.3; car:
+		// −4.1% weighted at 0.3) — restoring the per-content split the 3-preset unification lost.
+		// anime keeps 0.40: its content SPLITS (cel img_5 prefers 0.55 — crisper; painterly img_24
+		// prefers 0.25 — smoother), so the middle stays the right single default there.
+		d.AlphaMin = 0.30
 	case "flat":
 		d.WeightStr = 0
 	default: // anime

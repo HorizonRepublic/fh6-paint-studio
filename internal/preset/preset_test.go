@@ -177,7 +177,7 @@ func TestHardwiredPresets(t *testing.T) {
 		}
 	}
 	check("anime", true, 0.40, false, false) // organic: alpha, alphaMin .40, boundary OFF, no backfit
-	check("photo", true, 0.40, false, false)
+	check("photo", true, 0.30, false, false) // photo: LOWER alpha floor (smoother tonal ramps; measured on cat+car)
 	check("flat", false, 0, true, true) // opaque, boundary ON, backfit ON
 	// legacy names collapse
 	if m := Resolve(fixture(false), Choices{Mode: "logo"}).Mode; m != "flat" {
