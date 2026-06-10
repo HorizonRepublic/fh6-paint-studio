@@ -175,6 +175,13 @@ func TestHardwiredPresets(t *testing.T) {
 		if o.RecolorVarSkip != 0.03 {
 			t.Errorf("%s RecolorVarSkip=%v want 0.03 (universal)", mode, o.RecolorVarSkip)
 		}
+		wantFE := 0.0
+		if mode == "anime" {
+			wantFE = 0.004 // false-edge polish term: anime-only default (GPU-measured, seed-replicated)
+		}
+		if o.PolishOpts.FalseEdgeLambda != wantFE {
+			t.Errorf("%s FalseEdgeLambda=%v want %v", mode, o.PolishOpts.FalseEdgeLambda, wantFE)
+		}
 	}
 	check("anime", true, 0.30, false, false) // organic: alpha, alphaMin .30 (replicated floor grid), boundary OFF, no backfit
 	check("photo", true, 0.30, false, false) // photo: LOWER alpha floor (smoother tonal ramps; measured on cat+car)

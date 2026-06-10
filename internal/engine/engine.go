@@ -165,9 +165,16 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	t0 := time.Now()
 	// Use the GPU polish primitives when the backend provides them (CUDA), else the pure-Go
 	// reference. Both run the same algorithm; the GPU path just moves forward/loss/backward
-	// onto the device.
+	// onto the device. A non-zero false-edge λ needs the device-side term (fp_set_polish_false_edge);
+	// when the backend lacks it the CPU driver carries the experiment.
+	feOK := opt.PolishOpts.FalseEdgeLambda == 0
+	if !feOK {
+		if s, ok := be.(interface{ PolishSetFalseEdge(lambda float64) bool }); ok {
+			feOK = s.PolishSetFalseEdge(0) // capability probe; PolishWithBackend sets the real λ after setup
+		}
+	}
 	var pr PolishResult
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() {
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)

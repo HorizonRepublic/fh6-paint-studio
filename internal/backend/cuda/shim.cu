@@ -1237,6 +1237,16 @@ static long g_pbelowCap = 0;
 static int  g_polishSTE = 0; // straight-through: hard forward coverage, soft surrogate gradient
 static int  g_polishOKLab = 0; // perceptual loss: OKLab colour distance in loss/dcinit/hard (mirrors engine/oklab.go)
 
+// False-edge additive term (mirrors engine/falseedge.go): λ·Σ relu(|∇L_recon|−|∇L_target|) over
+// INTERIOR pixels (Sobel on Rec.601 luma, 1px border ring excluded so the adjoint scatter never
+// leaves the canvas). Folded into fp_polish_loss / fp_polish_hard_loss / polishDCInit when λ>0.
+static double g_polishFELambda = 0.0;
+static float*  d_feTL = nullptr;       // target luma (computed once per lambda-set)
+static float*  d_feRL = nullptr;       // recon luma scratch
+static double* d_feDir = nullptr;      // 2*npix: active normalised gradient direction (cx,cy), 0 if inactive
+static double* d_feAdj = nullptr;      // npix: dFE/dLuma adjoint
+static double* d_fe_partial = nullptr; // per-block FE partials (deterministic fixed-order final sum)
+
 // d_linearToOKLab — OKLab from the linear working space (Ottosson 2020). Mirrors
 // engine.linearToOKLab; double precision so the golden-diff stays tight.
 __device__ inline void d_linearToOKLab(double r, double g, double b, double* L, double* A, double* B) {
@@ -1254,6 +1264,86 @@ __device__ inline double d_cbrtSq(double x) {
     if (x < 1e-7) x = 1e-7;
     double c = cbrt(x);
     return c * c;
+}
+
+// feLumaKernel — Rec.601 luma plane of an RGBA canvas (engine lumaOf / metric.Luma).
+__global__ void feLumaKernel(const float* src, float* dst, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int p = i * 4;
+    dst[i] = 0.299f * src[p] + 0.587f * src[p + 1] + 0.114f * src[p + 2];
+}
+
+// d_sobelAt — Sobel gradient components at an INTERIOR pixel (no clamping; engine sobelAtFast).
+__device__ inline void d_sobelAt(const float* luma, int w, int i, double* gx, double* gy) {
+    double tl = luma[i - w - 1], tc = luma[i - w], tr = luma[i - w + 1];
+    double ml = luma[i - 1], mr = luma[i + 1];
+    double bl = luma[i + w - 1], bc = luma[i + w], br = luma[i + w + 1];
+    *gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    *gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+}
+
+// feDirReduce — per interior pixel: relu(|∇recon|−|∇target|); active pixels write their normalised
+// gradient direction into dir (zeroed otherwise) and the excess into the block's FE partial
+// (NO atomic — fixed-order final sum, like polishLossReduce).
+__global__ void feDirReduce(const float* rl, const float* tl, int w, int h, double* dir, double* fepartial) {
+    __shared__ double sh[BLOCK];
+    int N = w * h;
+    double s = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < N; i += gridDim.x * blockDim.x) {
+        int x = i % w, y = i / w;
+        double cx = 0.0, cy = 0.0;
+        if (x > 0 && x < w - 1 && y > 0 && y < h - 1) {
+            double gx, gy, tx, ty;
+            d_sobelAt(rl, w, i, &gx, &gy);
+            d_sobelAt(tl, w, i, &tx, &ty);
+            double gr = sqrt(gx * gx + gy * gy);
+            double d = gr - sqrt(tx * tx + ty * ty);
+            if (d > 0.0 && gr >= 1e-12) {
+                s += d;
+                cx = gx / gr;
+                cy = gy / gr;
+            }
+        }
+        dir[i * 2] = cx;
+        dir[i * 2 + 1] = cy;
+    }
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) fepartial[blockIdx.x] = sh[0];
+}
+
+// feAdjKernel — gather form of the CPU scatter (engine feState.adjoint): each pixel collects the
+// Sobel-stencil weights of its 8 neighbours' directions. dir is 0 on the border ring and on
+// inactive pixels, so no bounds branching beyond the canvas edge is needed.
+__global__ void feAdjKernel(const double* dir, int w, int h, double* adj) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int N = w * h;
+    if (i >= N) return;
+    int x = i % w, y = i / w;
+    double a = 0.0;
+    // neighbour q at (dx,dy) contributes W(-dx,-dy)(q): the inverse of the CPU scatter offsets.
+    if (x + 1 < w && y + 1 < h) { double cx = dir[(i + w + 1) * 2], cy = dir[(i + w + 1) * 2 + 1]; a += -cx - cy; }
+    if (y + 1 < h)              { double cy = dir[(i + w) * 2 + 1];                                a += -2.0 * cy; }
+    if (x > 0 && y + 1 < h)     { double cx = dir[(i + w - 1) * 2], cy = dir[(i + w - 1) * 2 + 1]; a += cx - cy; }
+    if (x + 1 < w)              { double cx = dir[(i + 1) * 2];                                    a += -2.0 * cx; }
+    if (x > 0)                  { double cx = dir[(i - 1) * 2];                                    a += 2.0 * cx; }
+    if (x + 1 < w && y > 0)     { double cx = dir[(i - w + 1) * 2], cy = dir[(i - w + 1) * 2 + 1]; a += -cx + cy; }
+    if (y > 0)                  { double cy = dir[(i - w) * 2 + 1];                                a += 2.0 * cy; }
+    if (x > 0 && y > 0)         { double cx = dir[(i - w - 1) * 2], cy = dir[(i - w - 1) * 2 + 1]; a += cx + cy; }
+    adj[i] = a;
+}
+
+// feAddTotal — fixed-order sum of the FE partials, scaled by λ, added into lossOut (one thread).
+__global__ void feAddTotal(const double* fepartial, int blocks, double lambda, double* lossOut) {
+    if (threadIdx.x != 0) return;
+    double s = 0.0;
+    for (int b = 0; b < blocks; b++) s += fepartial[b];
+    *lossOut += lambda * s;
 }
 
 // polishLossReduce sums the weighted 4-channel SSE of render vs the (eval-shared) target,
@@ -1302,11 +1392,16 @@ __global__ void polishLossFinal(const double* lpartial, int blocks, double* loss
 // w.r.t. the final composited color). Mirrors the head of polish.go polishBackward.
 // oklab = 2*weight*J^T*dLab for the colour channels (engine.okLabPixelDC).
 __global__ void polishDCInit(const float* render, const float* target, const float* weight,
-                            int N, float* dC, int oklab) {
+                            int N, float* dC, int oklab, const double* feAdj, double feLambda) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
     double wt = (double)weight[idx];
     int p = idx * 4;
+    double feR = 0.0, feG = 0.0, feB = 0.0;
+    if (feAdj) {
+        double a = feLambda * feAdj[idx];
+        feR = a * 0.299; feG = a * 0.587; feB = a * 0.114;
+    }
     if (oklab) {
         double rr = (double)render[p], rg = (double)render[p + 1], rb = (double)render[p + 2];
         double l = 0.4122214708 * rr + 0.5363325363 * rg + 0.0514459929 * rb;
@@ -1325,14 +1420,16 @@ __global__ void polishDCInit(const float* render, const float* target, const flo
         gl /= 3.0 * d_cbrtSq(l);
         gm /= 3.0 * d_cbrtSq(m);
         gs /= 3.0 * d_cbrtSq(s);
-        dC[p + 0] = (float)(gl * 0.4122214708 + gm * 0.2119034982 + gs * 0.0883024619);
-        dC[p + 1] = (float)(gl * 0.5363325363 + gm * 0.6806995451 + gs * 0.2817188376);
-        dC[p + 2] = (float)(gl * 0.0514459929 + gm * 0.1073969566 + gs * 0.6299787005);
+        dC[p + 0] = (float)(gl * 0.4122214708 + gm * 0.2119034982 + gs * 0.0883024619 + feR);
+        dC[p + 1] = (float)(gl * 0.5363325363 + gm * 0.6806995451 + gs * 0.2817188376 + feG);
+        dC[p + 2] = (float)(gl * 0.0514459929 + gm * 0.1073969566 + gs * 0.6299787005 + feB);
         dC[p + 3] = (float)(2.0 * wt * ((double)render[p + 3] - (double)target[p + 3]));
         return;
     }
-    for (int c = 0; c < 4; c++)
-        dC[p + c] = (float)(2.0 * wt * ((double)render[p + c] - (double)target[p + c]));
+    dC[p + 0] = (float)(2.0 * wt * ((double)render[p + 0] - (double)target[p + 0]) + feR);
+    dC[p + 1] = (float)(2.0 * wt * ((double)render[p + 1] - (double)target[p + 1]) + feG);
+    dC[p + 2] = (float)(2.0 * wt * ((double)render[p + 2] - (double)target[p + 2]) + feB);
+    dC[p + 3] = (float)(2.0 * wt * ((double)render[p + 3] - (double)target[p + 3]));
 }
 
 // polishGradReduceAll sums each shape's PMAXBLK partial gradients in FIXED block order into
@@ -1629,6 +1726,32 @@ API void fp_set_polish_ste(int on) { g_polishSTE = on ? 1 : 0; }
 // and backward seed together (one flag, so the optimisation stays self-consistent).
 API void fp_set_polish_oklab(int on) { g_polishOKLab = on ? 1 : 0; }
 
+// fp_set_polish_false_edge sets the false-edge λ (pointer: Win64 syscall path keeps doubles out of
+// XMM) and prepares the FE planes + target luma. λ<=0 disables the term (buffers stay for reuse).
+API void fp_set_polish_false_edge(const double* lambdaPtr) {
+    g_polishFELambda = lambdaPtr[0];
+    if (g_polishFELambda <= 0.0) return;
+    int npix = g_w * g_h;
+    if (!d_feTL) {
+        cudaMalloc(&d_feTL, (size_t)npix * sizeof(float));
+        cudaMalloc(&d_feRL, (size_t)npix * sizeof(float));
+        cudaMalloc(&d_feDir, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_feAdj, (size_t)npix * sizeof(double));
+        cudaMalloc(&d_fe_partial, 1024 * sizeof(double));
+    }
+    feLumaKernel<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_target, d_feTL, npix);
+}
+
+// feAccumulateLoss adds λ·FE(d_prender) into d_ploss (deterministic fixed-order partial sum).
+static void feAccumulateLoss() {
+    int npix = g_w * g_h;
+    int blocks = (npix + BLOCK - 1) / BLOCK;
+    feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_feRL, npix);
+    if (blocks > 1024) blocks = 1024;
+    feDirReduce<<<blocks, BLOCK>>>(d_feRL, d_feTL, g_w, g_h, d_feDir, d_fe_partial);
+    feAddTotal<<<1, 1>>>(d_fe_partial, blocks, g_polishFELambda, d_ploss);
+}
+
 // fp_set_orient uploads the per-pixel edge-orientation map (len w*h, degrees) used
 // by genKernel to seed elongated shapes along local edges. Called once by the engine
 // before the greedy loop (the map is fixed for a run).
@@ -1859,6 +1982,7 @@ API void fp_polish_loss(double* out) {
     if (blocks > 1024) blocks = 1024;
     polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npix, d_ploss_partial, g_polishOKLab);
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
+    if (g_polishFELambda > 0.0) feAccumulateLoss();
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -1877,6 +2001,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     if (blocks > 1024) blocks = 1024;
     polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npx, d_ploss_partial, g_polishOKLab);
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
+    if (g_polishFELambda > 0.0) feAccumulateLoss();
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -1890,7 +2015,16 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     // gradient partials default to 0 (empty (shape,block) slots write 0 themselves, but keep the
     // memset defensive for degenerate shapes / the fixed-order sum).
     cudaMemset(d_pgrad_partial, 0, (size_t)g_pN * PMAXBLK * 10 * sizeof(double));
-    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab);
+    const double* feAdj = nullptr;
+    if (g_polishFELambda > 0.0) {
+        int blocks = (npix + BLOCK - 1) / BLOCK;
+        feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_feRL, npix);
+        int rblocks = blocks > 1024 ? 1024 : blocks;
+        feDirReduce<<<rblocks, BLOCK>>>(d_feRL, d_feTL, g_w, g_h, d_feDir, d_fe_partial);
+        feAdjKernel<<<blocks, BLOCK>>>(d_feDir, g_w, g_h, d_feAdj);
+        feAdj = d_feAdj;
+    }
+    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda);
     // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
     int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
     polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
@@ -1918,6 +2052,9 @@ API void fp_polish_free() {
     cudaFree(d_pP); cudaFree(d_pcol); cudaFree(d_pkind); cudaFree(d_pbbx);
     cudaFree(d_pboff); cudaFree(d_pgrad); cudaFree(d_ploss);
     cudaFree(d_pgrad_partial); cudaFree(d_ploss_partial); cudaFree(d_pdcsnap);
+    cudaFree(d_feTL); cudaFree(d_feRL); cudaFree(d_feDir); cudaFree(d_feAdj); cudaFree(d_fe_partial);
+    d_feTL = d_feRL = nullptr; d_feDir = d_feAdj = d_fe_partial = nullptr;
+    g_polishFELambda = 0.0;
     d_pbase = d_prender = d_pdC = d_pbelow = nullptr;
     d_pP = d_pcol = d_pgrad = d_ploss = nullptr;
     d_pgrad_partial = d_ploss_partial = nullptr; d_pdcsnap = nullptr;

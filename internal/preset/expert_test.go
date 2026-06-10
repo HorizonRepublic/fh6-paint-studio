@@ -1,4 +1,4 @@
-﻿package preset
+package preset
 
 import (
 	"testing"

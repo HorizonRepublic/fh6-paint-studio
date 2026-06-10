@@ -45,13 +45,29 @@ func TestPolishGradientFD(t *testing.T) {
 	bbx := make([][4]int, len(ps))
 	tau := 1.2
 
-	for _, oklab := range []bool{false, true} {
-		oklab := oklab
+	cases := []struct {
+		name     string
+		oklab    bool
+		feLambda float64
+	}{{"sse", false, 0}, {"oklab", true, 0}, {"false-edge", false, 0.5}}
+	for _, tc := range cases {
+		tc := tc
 		// Analytic gradients at the unperturbed params (soft mode — the FD check validates the
 		// true soft-render gradient; STE's gradient is a deliberate surrogate, not FD-checkable).
-		// The oklab=true pass additionally validates the OKLab Jacobian chain (okLabPixelDC).
+		// The oklab pass additionally validates the OKLab Jacobian chain (okLabPixelDC); the
+		// false-edge pass validates the Sobel-adjoint chain (feState.adjoint + the dC luma seed).
+		oklab := tc.oklab
+		var fe *feState
+		var feAdj []float64
+		if tc.feLambda > 0 {
+			fe = newFEState(target, w, h)
+			feAdj = fe.adj
+		}
 		polishForward(ps, base, render, below, bbx, w, h, tau, false)
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab)
+		if fe != nil {
+			fe.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda)
 		ana := make([][10]float64, len(ps))
 		for i := range ps {
 			ana[i] = ps[i].grad
@@ -59,7 +75,11 @@ func TestPolishGradientFD(t *testing.T) {
 
 		lossAt := func() float64 {
 			polishForward(ps, base, render, below, bbx, w, h, tau, false)
-			return polishLoss(render, target, weight, w, h, oklab)
+			l := polishLoss(render, target, weight, w, h, oklab)
+			if fe != nil {
+				l += tc.feLambda * fe.total(render, w, h)
+			}
+			return l
 		}
 		eps := 1e-4
 		check := func(name string, get func() *float64, analytic float64) {

@@ -9,8 +9,9 @@ layout(std430, binding = 3) readonly buffer Rb { float render[]; };
 layout(std430, binding = 5)          buffer Db { float dC[]; };
 layout(std430, binding = 8) readonly buffer Tb { float target[]; };
 layout(std430, binding = 9) readonly buffer Wb { float weightb[]; };
+layout(std430, binding = 10) readonly buffer Fb { double feAdj[]; };
 layout(push_constant) uniform PC {
-    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab;
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab; float feLambda;
 } pc;
 
 // dcbrt — double cube root via float seed + 2 Newton steps (see polish_loss.comp).
@@ -33,6 +34,12 @@ void main() {
     int idx = int(gl_GlobalInvocationID.x);
     if (idx >= pc.npix) return;
     int p = idx * 4;
+    // False-edge term (engine falseedge.go): dC RGB seeds gain λ·adj·lumaCoef; alpha carries no luma.
+    double feR = 0.0LF, feG = 0.0LF, feB = 0.0LF;
+    if (pc.feLambda > 0.0) {
+        double a = double(pc.feLambda) * feAdj[idx];
+        feR = a * 0.299LF; feG = a * 0.587LF; feB = a * 0.114LF;
+    }
     if (pc.oklab != 0) {
         double wt = double(weightb[idx]);
         double rr = double(render[p]), rg = double(render[p + 1]), rb = double(render[p + 2]);
@@ -58,12 +65,15 @@ void main() {
         gl /= 3.0LF * dcbrtSq(l);
         gm /= 3.0LF * dcbrtSq(m);
         gs /= 3.0LF * dcbrtSq(s);
-        dC[p + 0] = float(gl * 0.4122214708LF + gm * 0.2119034982LF + gs * 0.0883024619LF);
-        dC[p + 1] = float(gl * 0.5363325363LF + gm * 0.6806995451LF + gs * 0.2817188376LF);
-        dC[p + 2] = float(gl * 0.0514459929LF + gm * 0.1073969566LF + gs * 0.6299787005LF);
+        dC[p + 0] = float(gl * 0.4122214708LF + gm * 0.2119034982LF + gs * 0.0883024619LF + feR);
+        dC[p + 1] = float(gl * 0.5363325363LF + gm * 0.6806995451LF + gs * 0.2817188376LF + feG);
+        dC[p + 2] = float(gl * 0.0514459929LF + gm * 0.1073969566LF + gs * 0.6299787005LF + feB);
         dC[p + 3] = float(2.0LF * wt * (double(render[p + 3]) - double(target[p + 3])));
         return;
     }
-    float wt = weightb[idx];
-    for (int c = 0; c < 4; c++) dC[p + c] = 2.0 * wt * (render[p + c] - target[p + c]);
+    double wt = double(weightb[idx]);
+    dC[p + 0] = float(2.0LF * wt * (double(render[p + 0]) - double(target[p + 0])) + feR);
+    dC[p + 1] = float(2.0LF * wt * (double(render[p + 1]) - double(target[p + 1])) + feG);
+    dC[p + 2] = float(2.0LF * wt * (double(render[p + 2]) - double(target[p + 2])) + feB);
+    dC[p + 3] = float(2.0LF * wt * (double(render[p + 3]) - double(target[p + 3])));
 }

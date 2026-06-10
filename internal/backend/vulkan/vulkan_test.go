@@ -260,16 +260,24 @@ func TestGoldenDiffPolish(t *testing.T) {
 	bg := model.RGBA{R: 0.4, G: 0.4, B: 0.4}
 	tau := 1.5
 
-	for _, mode := range []struct{ ste, oklab bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
-		ste, oklab := mode.ste, mode.oklab
+	for _, mode := range []struct {
+		ste, oklab bool
+		fe         float64
+	}{{false, false, 0}, {true, false, 0}, {false, true, 0}, {true, true, 0}, {false, false, 0.01}, {true, false, 0.01}} {
+		ste, oklab, feLam := mode.ste, mode.oklab, mode.fe
 		if oklab && !gpu.PolishSetOKLab(true) {
 			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
 			continue
 		}
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
+		if feLam > 0 && !gpu.PolishSetFalseEdge(feLam) {
+			t.Log("DLL lacks fp_set_polish_false_edge — skipping the false-edge golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
 		gpu.PolishUpload(ref.P, ref.Col, ref.Kinds, ref.BBX, ref.Boff, ref.BelowTotal)
 		gpu.PolishForward(tau, ref.BBX)
 		lossGPU := gpu.PolishLoss()
@@ -293,13 +301,13 @@ func TestGoldenDiffPolish(t *testing.T) {
 			}
 		}
 		if maxRenderDiff > 2e-3 {
-			t.Errorf("[ste=%v oklab=%v] polish forward render max diff %.5f (cpu vs vk)", ste, oklab, maxRenderDiff)
+			t.Errorf("[ste=%v oklab=%v fe=%g] polish forward render max diff %.5f (cpu vs vk)", ste, oklab, feLam, maxRenderDiff)
 		}
 		if !closeRel(float32(ref.Loss), float32(lossGPU), 2e-3, 1e-3) {
-			t.Errorf("[ste=%v oklab=%v] polish loss: cpu=%.5f vk=%.5f", ste, oklab, ref.Loss, lossGPU)
+			t.Errorf("[ste=%v oklab=%v fe=%g] polish loss: cpu=%.5f vk=%.5f", ste, oklab, feLam, ref.Loss, lossGPU)
 		}
 		if !closeRel(float32(ref.HardLoss), float32(hardGPU), 2e-3, 1e-3) {
-			t.Errorf("[ste=%v oklab=%v] polish HARD loss: cpu=%.5f vk=%.5f", ste, oklab, ref.HardLoss, hardGPU)
+			t.Errorf("[ste=%v oklab=%v fe=%g] polish HARD loss: cpu=%.5f vk=%.5f", ste, oklab, feLam, ref.HardLoss, hardGPU)
 		}
 		var mism int
 		for i := 0; i < ref.N*10; i++ {

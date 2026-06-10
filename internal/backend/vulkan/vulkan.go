@@ -67,7 +67,7 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
-	procPolSetup, procPolSTE, procPolOKLab, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
+	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
 
@@ -125,7 +125,8 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		procPolSync:     proc("fp_polish_sync"),
 		procPolFree:     proc("fp_polish_free"),
 	}
-	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab") // optional: older DLLs lack it (engine falls back to SSE)
+	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
+	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -295,6 +296,17 @@ func (g *Vulkan) PolishSetOKLab(on bool) bool {
 		return false
 	}
 	g.procPolOKLab.Call(uintptr(b2i32(on)))
+	return true
+}
+
+// PolishSetFalseEdge sets the false-edge additive polish loss λ on the device (loss, hard loss
+// and the dC seed fold the term in; λ<=0 disables). Reports whether the DLL supports it — the
+// engine routes a non-zero λ to the CPU polish when false. Call AFTER PolishSetup.
+func (g *Vulkan) PolishSetFalseEdge(lambda float64) bool {
+	if g.procPolFE == nil {
+		return false
+	}
+	g.procPolFE.Call(uintptr(unsafe.Pointer(&lambda)))
 	return true
 }
 

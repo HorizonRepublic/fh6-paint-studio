@@ -269,16 +269,24 @@ func TestGoldenDiffPolish(t *testing.T) {
 	// Run both coverage modes: soft (the original) and STE (hard forward + soft surrogate
 	// gradient). The mixed scene's optGeo shapes have edges inside their expanded bbox, so
 	// the STE split-guard outer-band geometry gradient is exercised.
-	for _, mode := range []struct{ ste, oklab bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
-		ste, oklab := mode.ste, mode.oklab
+	for _, mode := range []struct {
+		ste, oklab bool
+		fe         float64
+	}{{false, false, 0}, {true, false, 0}, {false, true, 0}, {true, true, 0}, {false, false, 0.01}, {true, false, 0.01}} {
+		ste, oklab, feLam := mode.ste, mode.oklab, mode.fe
 		if oklab && !gpu.PolishSetOKLab(true) {
 			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
 			continue
 		}
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
+		if feLam > 0 && !gpu.PolishSetFalseEdge(feLam) {
+			t.Log("DLL lacks fp_set_polish_false_edge — skipping the false-edge golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
 		gpu.PolishUpload(ref.P, ref.Col, ref.Kinds, ref.BBX, ref.Boff, ref.BelowTotal)
 		gpu.PolishForward(tau, ref.BBX)
 		lossGPU := gpu.PolishLoss()
@@ -306,15 +314,15 @@ func TestGoldenDiffPolish(t *testing.T) {
 			}
 		}
 		if maxRenderDiff > 2e-3 {
-			t.Errorf("[ste=%v oklab=%v] polish forward render max diff %.5f (cpu vs cuda)", ste, oklab, maxRenderDiff)
+			t.Errorf("[ste=%v oklab=%v fe=%g] polish forward render max diff %.5f (cpu vs cuda)", ste, oklab, feLam, maxRenderDiff)
 		}
-		// Loss: weighted SSE, double both.
+		// Loss: weighted SSE (+ the λ·FE term when set), double both.
 		if !closeRel(float32(ref.Loss), float32(lossGPU), 2e-3, 1e-3) {
-			t.Errorf("[ste=%v] polish loss: cpu=%.5f cuda=%.5f", ste, ref.Loss, lossGPU)
+			t.Errorf("[ste=%v fe=%g] polish loss: cpu=%.5f cuda=%.5f", ste, feLam, ref.Loss, lossGPU)
 		}
 		// Hard loss: hard render is float32 composite both sides -> tight rel tol.
 		if !closeRel(float32(ref.HardLoss), float32(hardGPU), 2e-3, 1e-3) {
-			t.Errorf("[ste=%v] polish HARD loss: cpu=%.5f cuda=%.5f", ste, ref.HardLoss, hardGPU)
+			t.Errorf("[ste=%v fe=%g] polish HARD loss: cpu=%.5f cuda=%.5f", ste, feLam, ref.HardLoss, hardGPU)
 		}
 		// Gradients: device dC is float32 (CPU float64) so allow a looser rel tol.
 		var mism int

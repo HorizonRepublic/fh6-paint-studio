@@ -85,6 +85,7 @@ func main() {
 	polishTau0 := flag.Float64("polish-tau0", 2.0, "polish initial edge softness (px); higher = coarser early")
 	polishTau1 := flag.Float64("polish-tau1", 0.08, "polish final edge softness (px); lower = sharper, smaller soft->hard snap gap. DEFAULT is content-adaptive (set below unless given): flat/cutout 0.06, organic 0.08. ~0.06-0.08 is the sweet spot across content; the gradient vanishes below ~0.05.")
 	polishOKLab := flag.Bool("polish-oklab", false, "EXPERIMENT (default off): compute the polish loss/gradient in OKLab (perceptual colour distance) instead of raw channel SSE - hue/chroma errors cost what the eye charges, targeting the standout-colour artifact. Greedy scoring is untouched; the accept gate still measures plain SSE. Validate by EYE end-to-end (metrics may diverge).")
+	polishFalseEdge := flag.Float64("polish-false-edge", 0, "EXPERIMENT (0=off): add lambda*relu(|grad recon|-|grad target|) (Sobel on luma - the standout detector) to the polish loss, pressing shapes whose rims draw edges the target lacks DOWN during the descent instead of post-hoc. Additive-only per the OKLab lesson; CPU polish driver only (a non-zero lambda routes polish off the GPU). Judge by EYE + FalseEdges metric.")
 	polishSTE := flag.Bool("polish-ste", false, "polish straight-through estimator: HARD-coverage forward composite (optimizes the EXACT shipped hard render, closing the soft->hard snap gap) with the soft surrogate gradient for geometry. Biggest win on flat/vector content where the snap gap is largest. Default off (soft polish).")
 	polishEarly := flag.Bool("polish-early", true, "early-stop the polish loop on diminishing returns (a late-phase check adds <2% of the total hard-loss gain so far, 3x); the best-hard point is still shipped, so this only drops a genuinely-wasteful tail. Inert at the tuned iters (polish is still productive there); trims when iters are raised. -polish-early=false runs the full -polish-iters.")
 	backfit := flag.Bool("backfit", false, "back-fitting: remove the lowest-contribution shapes and RE-GREEDY them against the completed-canvas residual (breaks the greedy plateau РІР‚вЂќ each shape was optimal WHEN placed, but later shapes changed the canvas). Gated END-TO-END: polish(greedy) vs polish(backfit(greedy)), keep the winner, so it NEVER regresses. AUTO-ON for flat/logo/line + cutout (where the greedy plateau bites hardest); opt-in elsewhere since it costs ~one extra polish for a smaller gain.")
@@ -233,6 +234,10 @@ func main() {
 	// Boundary-aware radius default (md.Boundary: on anime/character, off flat/photo). -boundary overrides.
 	if !userSet["boundary"] {
 		*boundary = md.Boundary
+	}
+	// False-edge polish term default (md.FalseEdge: anime 0.004, photo/flat 0). -polish-false-edge overrides.
+	if !userSet["polish-false-edge"] {
+		*polishFalseEdge = md.FalseEdge
 	}
 	// Auto-shape-count knee default (md: flat/line-art trims the white-bg ghost-facet over-fill; off for
 	// anime/photo). -shape-tol / -knee-floor override. Same source of truth as the studio (ModeDefaultsFor).
@@ -449,7 +454,7 @@ func main() {
 			Width: prep.W, Height: prep.H, Background: prep.Background, TransparentBG: prep.HasTransparency,
 			RecolorVarSkip: *recolorVar,
 			Polish:         true,
-			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab),
+			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge),
 		}, *out, *preview, *ssaa)
 		return
 	}
@@ -467,7 +472,7 @@ func main() {
 			Width: prep.W, Height: prep.H, Background: prep.Background,
 			StopAt: *shapes, Seed: *seed, TransparentBG: prep.HasTransparency,
 			Gaussian:   true,
-			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false),
+			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0),
 		})
 		applog.Printf("gaussian: %d glows, error %.1f -> %.1f in %.1fs",
 			len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
@@ -524,7 +529,7 @@ func main() {
 		CoarseK:           *coarseK,
 		CoarseFP16:        *coarseFP16,
 		Polish:            *polish,
-		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab),
+		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge),
 		BackFit:           *backfit,
 		BackFitPasses:     *backfitPasses,
 		BackFitFrac:       *backfitFrac,

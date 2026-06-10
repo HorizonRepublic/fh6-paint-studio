@@ -210,7 +210,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		MomentSeed:        true,
 		MomentDetailStart: 0.55,
 		Polish:            sp.polish,
-		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste),
+		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge),
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
@@ -286,6 +286,7 @@ type shapeParams struct {
 	backfit     bool
 	iters       int
 	tau1        float64
+	falseEdge   float64
 	ste         bool
 }
 
@@ -302,6 +303,7 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 		backfit:     md.Backfit,
 		iters:       md.PolishIters,
 		tau1:        md.PolishTau1,
+		falseEdge:   md.FalseEdge,
 		ste:         true,
 	}
 
@@ -455,6 +457,7 @@ type ModeDefaults struct {
 	AspectMax   float32   // max sliver aspect
 	PolishIters int       // joint-polish iterations (perceptual knee)
 	PolishTau1  float64   // final polish edge softness
+	FalseEdge   float64   // false-edge additive polish loss λ (0 = off)
 	Boundary    bool      // boundary-aware radius
 	Backfit     bool      // post-polish back-fitting
 	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
@@ -488,6 +491,14 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		d.WeightStr = 0
 	default: // anime
 		d.WeightStr = 0.15
+		// False-edge additive polish term, anime only (λ·relu(|∇recon|−|∇target|), Sobel on luma —
+		// the standout detector charged DURING the descent). GPU-measured at λ=0.004 across the bank
+		// × seeds 1/7/13: img_22-class (cel, big flats — where polish used to be gate-discarded)
+		// −14..20% weighted with ΔE/SSIM/banding all better; img_5 −0..3% with all metrics better;
+		// img_24/img_25/img_12 tie/inert; eye: smoother skin/hair, line work intact. Photo pays a
+		// consistent +1..2% weighted for the banding drop (OFF); flat is content-scattered (img_1
+		// line-art likes 0.008 — manual flag), so both stay 0.
+		d.FalseEdge = 0.004
 	}
 	if flat {
 		d.AspectMax = 8
@@ -696,7 +707,7 @@ func resolveGaussian(prep imageio.Prepared, c Choices, w, h, shapes int) Resolve
 		Seed:          c.Seed,
 		TransparentBG: prep.HasTransparency,
 		Gaussian:      true,
-		PolishOpts:    polishOpts(iters, 0, 0.08, false),
+		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0),
 	}
 	return Resolved{
 		Options: opt,
@@ -724,7 +735,7 @@ func gaussTrainIters(shapes int) int {
 	return it
 }
 
-func polishOpts(iters int, tau0, tau1 float64, ste bool) engine.PolishOptions {
+func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda float64) engine.PolishOptions {
 	o := engine.DefaultPolishOptions()
 	if iters > 0 {
 		o.Iters = iters
@@ -736,6 +747,7 @@ func polishOpts(iters int, tau0, tau1 float64, ste bool) engine.PolishOptions {
 		o.Tau1 = tau1
 	}
 	o.STE = ste
+	o.FalseEdgeLambda = feLambda
 	return o
 }
 
