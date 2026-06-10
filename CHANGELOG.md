@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.2.0...v1.3.0) (2026-06-10)
+
+
+### Features
+
+* cleaner anime shading and crisper line work — two new perceptual terms in the polishing stage cut visible banding by 10-15% and sharpen fine cel detail ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+* line-art ink strokes now match the source line weight (previously drawn ~3x too thick) ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+* photostock PNGs with a baked-in checkerboard "transparency" are detected and loaded as real cutouts ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+* shapes export with sub-degree rotation — long thin strokes render continuous instead of slightly stair-stepped ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+* smoother tonal ramps in the anime and photo modes ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+
+
+### Bug Fixes
+
+* line-art generations no longer pick up wide soft "gradient" smears from oversized outline stamps ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+* polishing no longer silently stalls on full-budget generations — line art and dense anime finish up to 27% closer to the source ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+* the estimated time remaining is a steady countdown instead of jumping back and forth by seconds ([98e58db](https://github.com/HorizonRepublic/fh6-paint-studio/commit/98e58db43c966af7c50d88d79fe954bb83e9e4ee))
+
 ## [1.2.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.1.0...v1.2.0) (2026-06-09)
 
 
