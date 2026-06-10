@@ -114,6 +114,9 @@ func LoadAutoCropped(path string, maxRes int) (*Prepared, image.Rectangle, error
 	if err != nil {
 		return nil, image.Rectangle{}, err
 	}
+	// Strip a baked checkerboard BEFORE the crop: the lattice needs the full perimeter to be
+	// detected, and the crop then trims to the real (now transparent) content. Inert otherwise.
+	img = stripBakedChecker(img)
 	rect := AutoCropRect(img)
 	if rect.Eq(img.Bounds()) {
 		return PrepareFromImage(img, maxRes), rect, nil // nothing to trim
