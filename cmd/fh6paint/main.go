@@ -56,6 +56,7 @@ func main() {
 	shapeTol := flag.Float64("shape-tol", 0, "auto-shape-count: stop placing shapes when the relative marginal improvement rate r=РћвЂќErr/(windowР’В·currentErr) per shape stays below this (0=off, fill -shapes budget). Adapts the count per image: saturated flat/logo stop early (~175-400), detailed photo/anime/cartoon fill the budget. -shapes is the ceiling. Recommended auto value: 0.0002 (conservative; trims only genuinely-saturated content). 0.0005 = aggressive/draft.")
 	kneeFloor := flag.Float64("knee-floor", 0, "with -shape-tol: floor the knee denominator at this fraction of the INITIAL error so the same tol also trips on near-SOLVED content (clean line-art / fully-filled flats) where Р“В·currentErr blows up and never stops. 0=off (pure relative). ~0.02 = treat <2% residual as solved. Detailed photos (currentErr РІвЂ°В« floor) are unaffected.")
 	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (РІв‚¬вЂ™score/area) is below this РІР‚вЂќ a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small РІР‚вЂќ try ~1e-4..1e-3.")
+	zswap := flag.Int("zswap", 0, "z-order local swap EXPERIMENT (0=off): after polish, try swapping up to N z-adjacent overlapping shape pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render -- keep N modest (~200). Aimed at opaque/flat content where stack order owns contested pixels.")
 	compact := flag.Bool("compact", true, "bias the per-shape pick toward compact shapes (cleaner coarse stage)")
 	mode := flag.String("mode", "anime", "content PRESET (3 manual): anime | photo | flat. Legacy names (logo/line/illustration/cutout/auto) collapse to one of the 3 via preset.PresetMode. anime/photo = semi-transparent + triangle-rich + STE; flat = opaque + rect/triangle by palette + boundary + backfit. Transparency is auto-detected (forces opaque). Explicit flags override.")
 	weightV2 := flag.Bool("weight-v2", false, "force the richer dilated ink-aware saliency map (WeightMapV2) on/off; default is auto (on for flat/logo/line/cutout, off for photo/anime). V2 protects 1-2px black contours from being smeared by flat-fill shapes.")
@@ -508,6 +509,7 @@ func main() {
 		BoundaryStart:       float32(*boundaryStart),
 		CanvasPad:           float32(*canvasPad),
 		StandoutTol:         *standout,
+		ZSwapTrials:         *zswap,
 		// Compact-shape bias is SSE-neutral on opaque content but mildly HURTS cutouts (it
 		// early-stops short of the budget РІР‚вЂќ forcing small shapes fights the large flat fills
 		// a cutout's object needs). So apply it only to opaque images.

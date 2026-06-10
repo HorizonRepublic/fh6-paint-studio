@@ -20,6 +20,7 @@ func postPasses() []pass {
 		backfitPass{},
 		polishPass{},
 		annealPass{},
+		zswapPass{},
 		standoutPass{},
 	}
 }
