@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/model"
 )
@@ -34,6 +35,8 @@ type Options struct {
 	BoundaryStart                 float32           // progress at which the cap engages, ramping to full by progress 1 (0 -> 0.42). Earlier = tighter silhouettes sooner, but constrains the coarse base.
 	CanvasPad                     float32           // canvas-edge radius clamp: shrink any ellipse/rect whose rotated bbox extends past the canvas by more than CanvasPad*min(w,h) px on a side. Stops shapes ballooning outside the image rectangle (visible in-game, clipped in the preview) + saves budget on near-out-of-frame shapes. 0 = off. ~0.04 keeps a small edge bleed; helps opaque/busy content most.
 	StandoutTol                   float64           // post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. Opt-in (0 = off). The metric will NOT show the win — validate by eye; the gate only bounds the loss. ~0.005 = conservative.
+	ZSwapTrials                   int               // z-order local swap EXPERIMENT (opt-in, 0 = off): after polish, try swapping up to this many z-adjacent overlapping pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render — keep the cap modest. Aimed at opaque/flat content where stack order owns contested pixels.
+	PersistGain                   float64           // persistent-error sampling EXPERIMENT (opt-in, 0 = off): upweight sampling cells whose error stagnates across refreshes by (1 + gain·stagnation), so small stubborn details (a saturated iris) stop losing the importance lottery to big soft regions. Sampling-only — the accept gate, knee and progress stay on the raw grid. See persist.go.
 	CompactPenalty                bool              // bias the per-shape pick toward compact shapes (esp. the first few) — cleaner coarse stage
 	OnDeviceSearch                bool              // run the random-candidate phase entirely on the GPU if the backend supports it; falls back to the host path otherwise
 	MomentSeed                    bool              // moment-seeding: replace the blind random candidate batch with a closed-form covariance-ellipse seed (fitted from the residual error grid) plus a small LOCALISED refine pool. Far fewer candidates per shape -> large eval speedup; quality is held by the seed being the maximum-likelihood ellipse the random search targets anyway. Works on CPU+CUDA (bypasses on-device random; Evaluate/Apply untouched -> golden-diff safe). Opt-in for A/B.
@@ -163,9 +166,22 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	t0 := time.Now()
 	// Use the GPU polish primitives when the backend provides them (CUDA), else the pure-Go
 	// reference. Both run the same algorithm; the GPU path just moves forward/loss/backward
-	// onto the device.
+	// onto the device. A non-zero false-edge λ needs the device-side term (fp_set_polish_false_edge);
+	// when the backend lacks it the CPU driver carries the experiment.
+	feOK := opt.PolishOpts.FalseEdgeLambda == 0
+	if !feOK {
+		if s, ok := be.(interface{ PolishSetFalseEdge(lambda float64) bool }); ok {
+			feOK = s.PolishSetFalseEdge(0) // capability probe; PolishWithBackend sets the real λ after setup
+		}
+	}
+	ssimOK := opt.PolishOpts.SSIMLambda == 0
+	if !ssimOK {
+		if s, ok := be.(interface{ PolishSetSSIM(lambda float64) bool }); ok {
+			ssimOK = s.PolishSetSSIM(0)
+		}
+	}
 	var pr PolishResult
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() {
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)
@@ -177,6 +193,9 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	}
 	g2, _, _, _ := be.ErrorGrid()
 	postErr := sumGrid(g2)
+	if polishDebug {
+		applog.Printf("polish-debug gate: in=%.1f polished=%.1f (pre-soft=%.1f post-soft=%.1f) -> keep=%v", finalErr, postErr, pr.PreLoss, pr.PostLoss, postErr <= finalErr)
+	}
 	if tm != nil {
 		tm.Polish += time.Since(t0)
 		tm.PolishPre, tm.PolishPost = pr.PreLoss, pr.PostLoss

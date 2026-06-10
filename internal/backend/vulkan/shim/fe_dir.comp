@@ -1,0 +1,60 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// fe_dir.comp — false-edge detector (engine feState, falseedge.go): per INTERIOR pixel,
+// d = relu(|∇L_recon| − |∇L_target|) with Sobel on luma; active pixels write their
+// normalised gradient direction into dir (zeroed otherwise) and the excess d into the
+// workgroup's partial (NO atomics — the host/feAddTotal sums partials in fixed order).
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 1) readonly buffer Tb { float tl[]; };
+layout(std430, binding = 2) readonly buffer Rb { float rl[]; };
+layout(std430, binding = 3)          buffer Db { double dir[]; };
+layout(std430, binding = 5)          buffer Pb { double feparts[]; };
+layout(push_constant) uniform PC { int w, h; float feLambda; } pc;
+
+shared double sh[256];
+
+void sobelAt(int i, int w, bool ofR, out double gx, out double gy) {
+    double tl_, tc, tr, ml, mr, bl, bc, br;
+    if (ofR) {
+        tl_ = rl[i - w - 1]; tc = rl[i - w]; tr = rl[i - w + 1];
+        ml = rl[i - 1]; mr = rl[i + 1];
+        bl = rl[i + w - 1]; bc = rl[i + w]; br = rl[i + w + 1];
+    } else {
+        tl_ = tl[i - w - 1]; tc = tl[i - w]; tr = tl[i - w + 1];
+        ml = tl[i - 1]; mr = tl[i + 1];
+        bl = tl[i + w - 1]; bc = tl[i + w]; br = tl[i + w + 1];
+    }
+    gx = (tr + 2.0LF * mr + br) - (tl_ + 2.0LF * ml + bl);
+    gy = (bl + 2.0LF * bc + br) - (tl_ + 2.0LF * tc + tr);
+}
+
+void main() {
+    int N = pc.w * pc.h;
+    double s = 0.0LF;
+    for (int i = int(gl_GlobalInvocationID.x); i < N; i += int(gl_NumWorkGroups.x) * 256) {
+        int x = i % pc.w, y = i / pc.w;
+        double cx = 0.0LF, cy = 0.0LF;
+        if (x > 0 && x < pc.w - 1 && y > 0 && y < pc.h - 1) {
+            double gx, gy, tx, ty;
+            sobelAt(i, pc.w, true, gx, gy);
+            sobelAt(i, pc.w, false, tx, ty);
+            double gr = sqrt(gx * gx + gy * gy);
+            double d = gr - sqrt(tx * tx + ty * ty);
+            if (d > 0.0LF && gr >= 1e-12LF) {
+                s += d;
+                cx = gx / gr;
+                cy = gy / gr;
+            }
+        }
+        dir[i * 2] = cx;
+        dir[i * 2 + 1] = cy;
+    }
+    sh[gl_LocalInvocationID.x] = s;
+    barrier();
+    for (uint st = 128; st > 0; st >>= 1) {
+        if (gl_LocalInvocationID.x < st) sh[gl_LocalInvocationID.x] += sh[gl_LocalInvocationID.x + st];
+        barrier();
+    }
+    if (gl_LocalInvocationID.x == 0) feparts[gl_WorkGroupID.x] = sh[0];
+}

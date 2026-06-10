@@ -2,11 +2,16 @@ package engine
 
 import (
 	"math"
+	"os"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
 )
+
+// polishDebug (FH6_POLISH_DEBUG=1) traces the best-hard trajectory during the refinement loop.
+var polishDebug = os.Getenv("FH6_POLISH_DEBUG") != ""
 
 // Joint differentiable "polish" pass — breaks the greedy plateau that pure greedy
 // placement cannot. After greedy placement, ALL shapes are refined together by
@@ -28,6 +33,25 @@ const polishDeg2Rad = math.Pi / 180
 // making a sub-margin plateau a real signal to stop.
 const polishEarlyMinProgress = 0.6
 
+// Fine-exploit phase knobs (shared by Polish and PolishWithBackend — see the phase comment in
+// PolishWithBackend): a short low-LR descent from the best point seen, at a fixed near-final tau.
+const (
+	polishFineLRScale = 0.1 // fraction of the main-loop learning rates
+	polishFineTauMin  = 0.2 // gradient-surrogate softness floor (STE keeps the forward hard regardless)
+	polishFineCheck   = 5   // hard-render best-tracking cadence (iters)
+
+	// Adaptive continuation: past the base budget the phase keeps going in chunks as long as
+	// each chunk still earns its keep — the fine descent is often still productive at the base
+	// boundary (measured: anime@3000 hard still falling at the last base iter). A chunk that
+	// gains < polishFineExtMargin of the polish's TOTAL gain so far is the plateau signal.
+	polishFineExtChunk  = 25   // extension chunk length (iters; 5 best-tracking checks)
+	polishFineExtMargin = 0.02 // min chunk gain as a fraction of total gain to continue
+	polishFineExtCap    = 3    // hard cap: at most this multiple of the base fine budget
+)
+
+// polishFineIters sizes the fine-exploit phase from the main-loop budget.
+func polishFineIters(iters int) int { return maxInt(30, iters/2) }
+
 // PolishOptions configures the joint refinement. Zero value -> DefaultPolishOptions.
 type PolishOptions struct {
 	Iters    int
@@ -39,7 +63,19 @@ type PolishOptions struct {
 	LRColor  float64 // Adam lr for R,G,B
 	LRAlpha  float64 // Adam lr for A
 	GradClip float64 // per-shape per-param gradient L2 cap (0 = none)
-	STE      bool    // straight-through estimator: FORWARD composites HARD coverage (the exact deliverable), BACKWARD keeps the SOFT surrogate dcov/dsdf for the geometry chain only. Closes the soft->hard snap gap (optimizes the shipped hard SSE directly). Default false (soft polish).
+	OKLab    bool    // perceptual colour loss: compute the polish loss/gradient in OKLab (cube-root LMS of the linear working space) instead of raw channel SSE — hue/chroma errors cost what the eye charges (the "standout colour" failure). Loss, backward seed AND best-hard tracking all switch together so the optimisation is self-consistent; the caller's accept gate still measures backend SSE. Greedy scoring is untouched. Default false (CLI -polish-oklab).
+
+	// FalseEdgeLambda adds λ·relu(|∇recon|−|∇target|) (Sobel on luma — the standout detector) to the
+	// polish loss so shapes whose rims draw edges the target lacks are pressed DOWN during the descent
+	// instead of by the post-hoc standout pass. EXPERIMENT, additive-only per the OKLab lesson; CPU
+	// polish driver only (the option routes applyPolish off the GPU path). 0 = off (CLI -polish-false-edge).
+	FalseEdgeLambda float64
+
+	// SSIMLambda adds λ·Σ(1−SSIM_local) (uniform 8×8 luma windows — see ssimterm.go) to the polish
+	// loss so local contrast/structure errors SSE undercharges are pressed during the descent.
+	// EXPERIMENT, additive-only per the OKLab lesson; 0 = off (CLI -polish-ssim).
+	SSIMLambda float64
+	STE        bool // straight-through estimator: FORWARD composites HARD coverage (the exact deliverable), BACKWARD keeps the SOFT surrogate dcov/dsdf for the geometry chain only. Closes the soft->hard snap gap (optimizes the shipped hard SSE directly). Default false (soft polish).
 
 	// Early-stop: break the loop once the polish hits DIMINISHING RETURNS — when the best-HARD
 	// improvement in one check falls below EarlyStopMargin × (total improvement so far) for
@@ -168,7 +204,7 @@ type PolishProbeResult struct {
 
 // PolishStepProbe runs ONE CPU forward+loss+backward at the given tau and returns the
 // result + layout. It is the reference the GPU polish primitives must match bit-for-bit.
-func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, bg model.RGBA, transparent bool, tau float64, ste bool) PolishProbeResult {
+func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, bg model.RGBA, transparent bool, tau float64, ste, oklab bool, feLambda, ssimLambda float64) PolishProbeResult {
 	base := make([]float32, w*h*4)
 	if !transparent {
 		for i := 0; i < w*h; i++ {
@@ -196,11 +232,36 @@ func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, b
 	dC := make([]float64, w*h*4)
 	below := make([][]float32, n)
 	bbx := make([][4]int, n)
+	var fe *feState
+	var feAdj []float64
+	if feLambda > 0 {
+		fe = newFEState(target, w, h)
+		feAdj = fe.adj
+	}
+	var ss *ssimState
+	var ssimAdj []float64
+	if ssimLambda > 0 {
+		if ss = newSSIMState(target, w, h); ss != nil {
+			ssimAdj = ss.adj
+		}
+	}
 	polishForward(ps, base, render, below, bbx, w, h, tau, ste)
-	loss := polishLoss(render, target, weight, w, h)
-	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, ste)
+	loss := polishLoss(render, target, weight, w, h, oklab)
+	if fe != nil {
+		loss += feLambda * fe.adjoint(render, w, h)
+	}
+	if ss != nil {
+		loss += ssimLambda * ss.adjoint(render, w, h)
+	}
+	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, ste, oklab, feAdj, feLambda, ssimAdj, ssimLambda)
 	hardScratch := make([]float32, w*h*4)
-	hardLoss := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+	hardLoss := polishHardLoss(ps, base, target, weight, hardScratch, w, h, oklab, false)
+	if fe != nil {
+		hardLoss += feLambda * fe.total(hardScratch, w, h)
+	}
+	if ss != nil {
+		hardLoss += ssimLambda * ss.total(hardScratch, w, h)
+	}
 
 	res := PolishProbeResult{N: n, Base: base, Render: render, Loss: loss, HardLoss: hardLoss,
 		Grad: make([]float64, n*10), P: make([]float64, n*6), Col: make([]float64, n*4),
@@ -266,6 +327,33 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	n := len(ps)
 	accel.PolishSetup(base, n)
 	accel.PolishSetSTE(opt.STE)
+	// OKLab steers ONLY the fine-exploit phase's gradient (toggled around its backward calls);
+	// the loss, hard loss and best-tracking stay on plain SSE — the gate's metric — so the
+	// perceptual nudge can never ship an SSE regression. Optional device capability
+	// (type-asserted, like the backend search extras); no support (old DLL) -> SSE-only pass.
+	var okSetter interface{ PolishSetOKLab(on bool) bool }
+	if opt.OKLab {
+		if s, ok := accel.(interface{ PolishSetOKLab(on bool) bool }); ok && s.PolishSetOKLab(false) {
+			okSetter = s
+		} else {
+			applog.Printf("polish: OKLab requested but the device lacks fp_set_polish_oklab — falling back to SSE")
+			opt.OKLab = false
+		}
+	}
+	// False-edge λ: ALWAYS set when the capability exists (0 resets a previous run's value — the
+	// shim global outlives a polish). The device folds λ·FE into loss/hard-loss/dC, so the loop
+	// below needs no FE-specific work. applyPolish routes λ>0 to the CPU driver on old DLLs.
+	if s, ok := accel.(interface{ PolishSetFalseEdge(lambda float64) bool }); ok {
+		if !s.PolishSetFalseEdge(opt.FalseEdgeLambda) && opt.FalseEdgeLambda > 0 {
+			applog.Printf("polish: false-edge λ requested but the device lacks fp_set_polish_false_edge — term disabled")
+		}
+	}
+	// SSIM λ: same contract as false-edge (always reset, device folds the term in).
+	if s, ok := accel.(interface{ PolishSetSSIM(lambda float64) bool }); ok {
+		if !s.PolishSetSSIM(opt.SSIMLambda) && opt.SSIMLambda > 0 {
+			applog.Printf("polish: SSIM λ requested but the device lacks fp_set_polish_ssim — term disabled")
+		}
+	}
 	defer accel.PolishFree()
 
 	// Reused host staging buffers for the per-iter upload.
@@ -276,8 +364,9 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	hOff := make([]int64, n)
 	hGrad := make([]float64, n*10)
 
-	// upload packs current params + the expanded-bbox/below layout and ships them.
-	upload := func(tau float64) {
+	// upload packs current params + the expanded-bbox/below layout and ships them. quant
+	// rounds params/colours to the export precision first (hard checks measure the deliverable).
+	upload := func(tau float64, quant bool) {
 		var off int64
 		for i := range ps {
 			bb := expandedBBox(ps[i], w, h, tau)
@@ -289,6 +378,9 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 			for k := 0; k < 4; k++ {
 				hCol[i*4+k] = ps[i].col[k]
 			}
+			if quant {
+				quantizeExport(ps[i].kind, hP[i*6:i*6+6], hCol[i*4:i*4+4])
+			}
 			hOff[i] = off
 			bw := int64(bb[2] - bb[0] + 1)
 			bh := int64(bb[3] - bb[1] + 1)
@@ -299,7 +391,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		accel.PolishUpload(hP, hCol, hKind, hBBX, hOff, off)
 	}
 
-	upload(opt.Tau0)
+	upload(opt.Tau0, false)
 	accel.PolishForward(opt.Tau0, hBBX)
 	pre := accel.PolishLoss()
 
@@ -309,12 +401,12 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	hardScratch := make([]float32, w*h*4)
 	hardLoss := func(tau float64, reupload bool) float64 {
 		if reupload {
-			upload(tau) // ship the CURRENT (post-Adam) params so the device hard render matches
+			upload(tau, true) // ship the CURRENT (post-Adam) params at EXPORT precision
 		}
 		if hl, ok := accel.PolishHardLoss(hBBX); ok {
 			return hl
 		}
-		return polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+		return polishHardLoss(ps, base, target, weight, hardScratch, w, h, false, true)
 	}
 	bestHard := hardLoss(opt.Tau0, false)
 	bestP := snapshotParams(ps)
@@ -354,7 +446,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		t := float64(it) / float64(maxInt(1, opt.Iters-1))
 		tau := opt.Tau0 * math.Pow(opt.Tau1/opt.Tau0, t)
 		last := it == opt.Iters-1
-		tick(&tUpload, func() { upload(tau) })
+		tick(&tUpload, func() { upload(tau, false) })
 		// Kernel launches are async; sync inside the tick so the GPU time is attributed to
 		// forward/backward (not hidden in the next sync). Net overhead ~0 — the work must
 		// complete before readgrad anyway; the sync just moves the wait into the timer.
@@ -379,12 +471,15 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 				copy(ps[i].grad[:], hGrad[i*10:i*10+10])
 			}
 		})
-		tick(&tAdam, func() { adamStep(ps, opt, it+1, w, h) })
+		tick(&tAdam, func() { adamStep(ps, opt, it+1, w, h, 1) })
 		if (it+1)%checkEvery == 0 || last {
 			tick(&tHard, func() {
 				// Re-upload: Adam just mutated ps on the host; the device still holds this
 				// iter's pre-Adam params, so refresh them before the GPU hard render.
 				hl := hardLoss(tau, true)
+				if polishDebug {
+					applog.Printf("polish-debug it=%d tau=%.3f hard=%.1f best=%.1f", it+1, tau, hl, bestHard)
+				}
 				if hl < bestHard {
 					bestHard = hl
 					bestP = snapshotParams(ps)
@@ -411,6 +506,91 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 			}
 		}
 	}
+	// FINE-EXPLOIT phase — restart from the best point seen and descend gently: fresh Adam
+	// moments, a small LR, and a fixed near-final tau. The main loop's tau anneal is a coarse
+	// soft excursion: worth it while the input leaves headroom, but on a tightly-fitted canvas
+	// (full-budget greedy) it wanders too far from the optimum to return within the budget —
+	// polish never re-beats its own input and the caller's gate discards the whole pass as a
+	// silent no-op. Exploiting from the best-known point (on a saturated input that IS the
+	// input itself) harvests the small colour/alpha and sub-pixel geometry wins the hard render
+	// still allows; on winning runs it squeezes a little further. Best-hard tracking continues
+	// throughout, so the phase can never lose ground.
+	restoreParams(ps, bestP)
+	for i := range ps {
+		ps[i].m, ps[i].v = [10]float64{}, [10]float64{}
+	}
+	fineIters := polishFineIters(opt.Iters)
+	fineCap := fineIters * polishFineExtCap
+	fineTau := math.Max(opt.Tau1, polishFineTauMin)
+	fineOpt := opt
+	fineOpt.Iters = fineIters // keys adamStep's warmup ramp to the fine budget
+	fineGained, fineZero := false, 0
+	chunkBest := bestHard // best at the previous chunk boundary (adaptive-continuation gate)
+	fineDone := fineCap
+	for it := 0; it < fineCap; it++ {
+		last := it == fineCap-1
+		tick(&tUpload, func() { upload(fineTau, false) })
+		tick(&tFwd, func() { accel.PolishForward(fineTau, hBBX); accel.PolishSync() })
+		if prevRd != nil && time.Since(lastPrev) >= opt.previewInterval() {
+			lastPrev = time.Now()
+			prevRd.PolishReadRender(prevBuf)
+			opt.OnPreview(prevBuf, w, h)
+		}
+		if opt.OnProgress != nil {
+			opt.OnProgress(doneIters+it+1, doneIters+fineCap)
+		}
+		tick(&tBwd, func() {
+			if okSetter != nil {
+				okSetter.PolishSetOKLab(true) // perceptual gradient for the fine step only
+			}
+			accel.PolishBackward(fineTau, hBBX)
+			accel.PolishSync()
+			if okSetter != nil {
+				okSetter.PolishSetOKLab(false) // loss/hard calls below stay on the gate's SSE metric
+			}
+		})
+		tick(&tGrad, func() {
+			accel.PolishReadGrad(hGrad)
+			for i := range ps {
+				copy(ps[i].grad[:], hGrad[i*10:i*10+10])
+			}
+		})
+		tick(&tAdam, func() { adamStep(ps, fineOpt, it+1, w, h, polishFineLRScale) })
+		if (it+1)%polishFineCheck == 0 || last {
+			tick(&tHard, func() {
+				hl := hardLoss(fineTau, true)
+				if polishDebug {
+					applog.Printf("polish-debug fine it=%d hard=%.1f best=%.1f", it+1, hl, bestHard)
+				}
+				if hl < bestHard {
+					bestHard = hl
+					bestP = snapshotParams(ps)
+					fineGained, fineZero = true, 0
+				} else {
+					fineZero++
+				}
+			})
+			// Give-up: a truly saturated input (greedy already at the budget-bound optimum) yields
+			// nothing here either — if the first several checks bring zero gain, stop burning time.
+			// Once ANY fine gain lands the phase runs to completion (it is in productive terrain).
+			if !fineGained && fineZero >= 6 {
+				fineDone = it + 1
+				break
+			}
+		}
+		// Adaptive continuation: past the base budget, keep descending in chunks while each
+		// chunk still gains ≥ polishFineExtMargin of the TOTAL polish gain (the descent is often
+		// still productive at the base boundary); a sub-margin chunk is the plateau — stop.
+		if (it+1)%polishFineExtChunk == 0 && !last {
+			total := initHard - bestHard
+			if it+1 >= fineIters && (total <= 1e-9 || chunkBest-bestHard < polishFineExtMargin*total) {
+				fineDone = it + 1
+				break
+			}
+			chunkBest = bestHard
+		}
+	}
+	doneIters += fineDone
 	restoreParams(ps, bestP)
 
 	out := make([]model.Shape, 0, len(shapes))
@@ -465,8 +645,27 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	below := make([][]float32, len(ps))
 	bbx := make([][4]int, len(ps)) // xMin,yMin,xMax,yMax per shape
 
+	// False-edge additive term (see falseedge.go): the descent AND the best-hard tracking both use
+	// SSE + λ·FE so the optimisation is self-consistent; the caller's gate stays pure SSE.
+	var fe *feState
+	feLambda := opt.FalseEdgeLambda
+	var feAdj []float64
+	if feLambda > 0 {
+		fe = newFEState(target, w, h)
+		feAdj = fe.adj
+	}
+	// SSIM additive term (see ssimterm.go) — same contract as FE: descent + best-hard combined,
+	// gate pure SSE. nil state (canvas smaller than a window) degrades to term=0.
+	var ss *ssimState
+	ssimLambda := opt.SSIMLambda
+	var ssimAdj []float64
+	if ssimLambda > 0 {
+		if ss = newSSIMState(target, w, h); ss != nil {
+			ssimAdj = ss.adj
+		}
+	}
 	polishForward(ps, base, render, below, bbx, w, h, opt.Tau0, opt.STE)
-	pre := polishLoss(render, target, weight, w, h)
+	pre := polishLoss(render, target, weight, w, h, false)
 
 	// Best-HARD tracking — the fix for the soft->hard "snap gap". The gradient
 	// descent minimises the SOFT (sigmoid-coverage) render, whose loss keeps falling,
@@ -476,7 +675,22 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	// the HARD snap periodically and keep the params with the lowest hard loss seen.
 	// Baseline = the greedy input itself (so polish can NEVER return worse than greedy).
 	hardScratch := make([]float32, w*h*4)
-	bestHard := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+	hardCheck := func() float64 {
+		hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false, true)
+		if fe != nil {
+			hl += feLambda * fe.total(hardScratch, w, h)
+		}
+		if ss != nil {
+			hl += ssimLambda * ss.total(hardScratch, w, h)
+		}
+		return hl
+	}
+	bestHard := hardCheck()
+	if polishDebug && fe != nil {
+		sse0 := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false, true)
+		applog.Printf("polish-debug(cpu) false-edge: sse0=%.1f fe0=%.1f lambda=%g (term=%.1f, %.1f%% of sse)",
+			sse0, (bestHard-sse0)/feLambda, feLambda, bestHard-sse0, 100*(bestHard-sse0)/sse0)
+	}
 	bestP := snapshotParams(ps)
 	checkEvery := maxInt(1, opt.Iters/25)
 	earlyMargin := opt.EarlyStopMargin
@@ -502,12 +716,21 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		if opt.OnProgress != nil {
 			opt.OnProgress(it+1, opt.Iters)
 		}
-		post = polishLoss(render, target, weight, w, h)
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE)
-		adamStep(ps, opt, it+1, w, h)
+		post = polishLoss(render, target, weight, w, h, false)
+		if fe != nil {
+			post += feLambda * fe.adjoint(render, w, h)
+		}
+		if ss != nil {
+			post += ssimLambda * ss.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE, false, feAdj, feLambda, ssimAdj, ssimLambda)
+		adamStep(ps, opt, it+1, w, h, 1)
 		last := it == opt.Iters-1
 		if (it+1)%checkEvery == 0 || last {
-			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+			hl := hardCheck()
+			if polishDebug {
+				applog.Printf("polish-debug(cpu) it=%d tau=%.3f hard=%.1f best=%.1f soft=%.1f", it+1, tau, hl, bestHard, post)
+			}
 			if hl < bestHard {
 				bestHard = hl
 				bestP = snapshotParams(ps)
@@ -530,6 +753,69 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 			}
 		}
 	}
+	// FINE-EXPLOIT phase — mirrors PolishWithBackend (see the comment there): restart from the
+	// best point seen with fresh moments, a small LR, and a fixed near-final tau, so saturated
+	// inputs (where the tau-anneal excursion never pays back) still harvest the careful wins.
+	restoreParams(ps, bestP)
+	for i := range ps {
+		ps[i].m, ps[i].v = [10]float64{}, [10]float64{}
+	}
+	fineIters := polishFineIters(opt.Iters)
+	fineCap := fineIters * polishFineExtCap
+	fineTau := math.Max(opt.Tau1, polishFineTauMin)
+	fineOpt := opt
+	fineOpt.Iters = fineIters // keys adamStep's warmup ramp to the fine budget
+	fineGained, fineZero := false, 0
+	chunkBest := bestHard // best at the previous chunk boundary (adaptive-continuation gate)
+	fineDone := fineCap
+	for it := 0; it < fineCap; it++ {
+		polishForward(ps, base, render, below, bbx, w, h, fineTau, opt.STE)
+		if opt.OnPreview != nil && time.Since(lastPrevCPU) >= opt.previewInterval() {
+			lastPrevCPU = time.Now()
+			opt.OnPreview(render, w, h)
+		}
+		if opt.OnProgress != nil {
+			opt.OnProgress(doneIters+it+1, doneIters+fineCap)
+		}
+		if fe != nil {
+			fe.adjoint(render, w, h)
+		}
+		if ss != nil {
+			ss.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, fineTau, opt.STE, opt.OKLab, feAdj, feLambda, ssimAdj, ssimLambda)
+		adamStep(ps, fineOpt, it+1, w, h, polishFineLRScale)
+		if (it+1)%polishFineCheck == 0 || it == fineCap-1 {
+			hl := hardCheck()
+			if polishDebug {
+				applog.Printf("polish-debug(cpu) fine it=%d hard=%.1f best=%.1f", it+1, hl, bestHard)
+			}
+			if hl < bestHard {
+				bestHard = hl
+				bestP = snapshotParams(ps)
+				fineGained, fineZero = true, 0
+			} else {
+				fineZero++
+			}
+			// Give-up mirror of PolishWithBackend: zero gain across the first several checks on a
+			// saturated input — stop burning time; any gain → run the phase to completion.
+			if !fineGained && fineZero >= 6 {
+				fineDone = it + 1
+				break
+			}
+		}
+		// Adaptive continuation — mirrors PolishWithBackend: continue past the base budget in
+		// chunks while each one still gains ≥ polishFineExtMargin of the total polish gain.
+		if (it+1)%polishFineExtChunk == 0 && it != fineCap-1 {
+			total := initHard - bestHard
+			if it+1 >= fineIters && (total <= 1e-9 || chunkBest-bestHard < polishFineExtMargin*total) {
+				fineDone = it + 1
+				break
+			}
+			chunkBest = bestHard
+		}
+	}
+	doneIters += fineDone
 	restoreParams(ps, bestP) // ship the best HARD point, not the final soft one
 
 	// Snap back to hard, game-representable shapes.
@@ -563,15 +849,21 @@ func restoreParams(ps []pshape, snap [][10]float64) {
 // "over" — exactly the engine's Apply — into render (scratch), and returns the
 // weighted SSE vs target. This is the loss we actually ship, so the polish optimises
 // toward it via best-hard tracking even though its gradients come from the soft render.
-func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h int) float64 {
+func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h int, oklab, quant bool) float64 {
 	copy(render, base)
 	for si := range ps {
+		var P [6]float64
+		copy(P[:], ps[si].P[:])
+		col := [4]float64{ps[si].col[0], ps[si].col[1], ps[si].col[2], clampF64(ps[si].col[3], 0, 1)}
+		if quant {
+			quantizeExport(ps[si].kind, P[:], col[:])
+		}
 		var fp [6]float32
 		for i := 0; i < 6; i++ {
-			fp[i] = float32(ps[si].P[i])
+			fp[i] = float32(P[i])
 		}
-		a := float32(clampF64(ps[si].col[3], 0, 1))
-		cr, cg, cb := float32(ps[si].col[0]), float32(ps[si].col[1]), float32(ps[si].col[2])
+		a := float32(col[3])
+		cr, cg, cb := float32(col[0]), float32(col[1]), float32(col[2])
 		isGrad := raster.IsGradient(ps[si].kind)
 		xMin, yMin, xMax, yMax := raster.BBox(ps[si].kind, fp, w, h)
 		for y := yMin; y <= yMax; y++ {
@@ -600,7 +892,7 @@ func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h in
 			}
 		}
 	}
-	return polishLoss(render, target, weight, w, h)
+	return polishLoss(render, target, weight, w, h, oklab)
 }
 
 func maxIntF(a, b float64) float64 {
@@ -752,11 +1044,16 @@ func sigmoidCov(sdf, tau float64) float64 {
 }
 
 // polishLoss returns the weighted SSE of render vs target over all 4 channels.
-func polishLoss(render, target, weight []float32, w, h int) float64 {
+func polishLoss(render, target, weight []float32, w, h int, oklab bool) float64 {
 	var sum float64
 	for idx := 0; idx < w*h; idx++ {
 		wt := float64(weight[idx])
 		p := idx * 4
+		if oklab {
+			sum += okLabPixelLoss(float64(render[p]), float64(render[p+1]), float64(render[p+2]), float64(render[p+3]),
+				float64(target[p]), float64(target[p+1]), float64(target[p+2]), float64(target[p+3]), wt)
+			continue
+		}
 		for c := 0; c < 4; c++ {
 			d := float64(render[p+c] - target[p+c])
 			sum += wt * d * d
@@ -767,14 +1064,34 @@ func polishLoss(render, target, weight []float32, w, h int) float64 {
 
 // polishBackward accumulates dLoss/dparam into each pshape's grad slice,
 // recomputing per-pixel gradients in a reverse (top-to-bottom) pass.
-func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste bool) {
+func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste, oklab bool, feAdj []float64, feLambda float64, ssimAdj []float64, ssimLambda float64) {
 	_ = base
-	// dL/dC_final = 2*weight*(C-target), per channel.
+	// dL/dC_final = 2*weight*(C-target) per channel (OKLab mode: 2*weight*Jᵀ*ΔLab — see oklab.go).
+	// The false-edge term (feAdj from feState.adjoint, same forward render) chains through
+	// dLuma/dchannel into the RGB seeds; alpha carries no luma.
 	for idx := 0; idx < w*h; idx++ {
 		wt := float64(weight[idx])
 		p := idx * 4
-		for c := 0; c < 4; c++ {
-			dC[p+c] = 2 * wt * float64(render[p+c]-target[p+c])
+		if oklab {
+			dC[p+0], dC[p+1], dC[p+2], dC[p+3] = okLabPixelDC(
+				float64(render[p]), float64(render[p+1]), float64(render[p+2]), float64(render[p+3]),
+				float64(target[p]), float64(target[p+1]), float64(target[p+2]), float64(target[p+3]), wt)
+		} else {
+			for c := 0; c < 4; c++ {
+				dC[p+c] = 2 * wt * float64(render[p+c]-target[p+c])
+			}
+		}
+		if feAdj != nil || ssimAdj != nil {
+			var a float64
+			if feAdj != nil {
+				a = feLambda * feAdj[idx]
+			}
+			if ssimAdj != nil {
+				a += ssimLambda * ssimAdj[idx]
+			}
+			dC[p+0] += a * feLumaR
+			dC[p+1] += a * feLumaG
+			dC[p+2] += a * feLumaB
 		}
 	}
 	for si := len(ps) - 1; si >= 0; si-- {
@@ -878,10 +1195,21 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 // adamStep applies one Adam update to every shape's parameters using the
 // gradients computed by polishBackward, with per-group learning rates and the
 // stability clamps from the design.
-func adamStep(ps []pshape, opt PolishOptions, step int, w, h int) {
+func adamStep(ps []pshape, opt PolishOptions, step int, w, h int, lrScale float64) {
 	const b1, b2, eps = 0.9, 0.999, 1e-8
 	bc1 := 1 - math.Pow(b1, float64(step))
 	bc2 := 1 - math.Pow(b2, float64(step))
+	// LR warmup. Adam's bias-corrected first step is ±lr regardless of the gradient magnitude
+	// (m̂/√v̂ = g/|g| at step 1), so iteration 1 kicks EVERY param of EVERY shape by its full
+	// learning rate at once. On a tightly-fitted greedy canvas (full-budget runs) that explodes
+	// the hard loss ~3× and the whole iteration budget is spent crawling back — polish never
+	// re-beats its own input, the gate discards it, and the pass is a silent no-op. Ramping the
+	// LR linearly over the first ~5% of the run keeps the early steps proportional while the
+	// moment estimates learn real directions, so the descent starts FROM the input basin.
+	warmup := 1.0
+	if ws := maxInt(5, opt.Iters/20); step < ws {
+		warmup = float64(step) / float64(ws)
+	}
 	for si := range ps {
 		s := &ps[si]
 		g := s.grad
@@ -907,7 +1235,7 @@ func adamStep(ps []pshape, opt PolishOptions, step int, w, h int) {
 			s.v[k] = b2*s.v[k] + (1-b2)*g[k]*g[k]
 			mh := s.m[k] / bc1
 			vh := s.v[k] / bc2
-			upd := lr[k] * mh / (math.Sqrt(vh) + eps)
+			upd := warmup * lrScale * lr[k] * mh / (math.Sqrt(vh) + eps)
 			if k < 6 {
 				s.P[k] -= upd
 			} else {
@@ -966,6 +1294,23 @@ func clampF64(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// quantizeExport rounds a shape's optimisable params to the EXPORT precision — what ToShape
+// actually ships: colours through the sRGB-byte round-trip (EncByte/DecChan), the rotation of
+// angle-carrying kinds to 0.01° (normAngle). Best-hard tracking measures THIS render, so the
+// polish picks the state that is best AFTER the snap instead of a continuous optimum whose
+// sub-quantum micro-gains evaporate at export (and the fine phase's adaptive continuation
+// stops as soon as quantized gains plateau, not when un-shippable continuous ones do).
+func quantizeExport(kind model.ShapeKind, P, col []float64) {
+	switch kind {
+	case model.KindEllipse, model.KindRectangle, model.KindGlow, model.KindDisk:
+		P[4] = math.Round(P[4]*100) / 100
+	}
+	for c := 0; c < 3; c++ {
+		col[c] = float64(model.DecChan(model.EncByte(float32(col[c]))))
+	}
+	col[3] = float64(model.F2B(float32(col[3]))) / 255
 }
 
 // snapShape converts a refined pshape back to a hard, game-representable Shape,

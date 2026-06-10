@@ -26,7 +26,7 @@ func emitOutline(loop [][2]float64, ox, oy int, halfW float64, col []int, cfg Co
 			j = growArc(P, i, cfg)
 		}
 		if cfg.Arcs && j-i >= 2 {
-			if s, ok := placeArc(P, i, j, col, cfg); ok {
+			if s, ok := placeArc(P, i, j, halfW, col, cfg); ok {
 				*out = append(*out, s)
 				i = j
 				continue
@@ -66,8 +66,11 @@ func growArc(P [][2]float64, i int, cfg Config) int {
 
 // placeArc picks the dictionary arc whose sweep best matches the run i..j and solves the similarity
 // (pos, rotation, uniform scale, mirror) that lands the word's arc endpoints on the run's endpoints,
-// bowing the same way. Returns false if the run is too shallow or no arc is close enough.
-func placeArc(P [][2]float64, i, j int, col []int, cfg Config) (model.Shape, bool) {
+// bowing the same way. Returns false if the run is too shallow, no arc is close enough, or the
+// solved scale would render the arc's stroke visibly fatter than the run's measured half-width —
+// a big-scale stamp draws a wide SOFT band (upscaled mask edges read as a gradient), the
+// line-art "gradient lines" artifact; the thin-rect fallback keeps the correct weight instead.
+func placeArc(P [][2]float64, i, j int, halfW float64, col []int, cfg Config) (model.Shape, bool) {
 	sweep := runSweep(P, i, j)
 	if sweep < cfg.MinSweep*deg2rad {
 		return model.Shape{}, false
@@ -94,6 +97,9 @@ func placeArc(P [][2]float64, i, j int, col []int, cfg Config) (model.Shape, boo
 			return model.Shape{}, false
 		}
 		s := math.Hypot(dS[0], dS[1]) / lW
+		if aw.strokeHW > 0 && s*aw.strokeHW > 2*halfW+0.25 {
+			return model.Shape{}, false
+		}
 		rot := math.Atan2(dS[1], dS[0]) - math.Atan2(dW[1], dW[0])
 		c, sn := math.Cos(rot), math.Sin(rot)
 		pos := [2]float64{Pi[0] - s*(c*A[0]-sn*A[1]), Pi[1] - s*(sn*A[0]+c*A[1])}

@@ -100,7 +100,7 @@ func TestResolvePhotoMode(t *testing.T) {
 
 func TestResolveTransparentForcesOpaque(t *testing.T) {
 	// A transparent image is classified by CONTENT (not a blanket "cutout"), but transparency must
-	// still force opaque shapes + the transparent-bg pipeline regardless of the classified mode —
+	// still force opaque shapes + the transparent-bg pipeline regardless of the classified mode вЂ”
 	// so a smooth anime cutout gets its content's soft treatment while staying solid on the car.
 	r := Resolve(fixture(true), DefaultChoices()) // auto: classify content, force opaque
 
@@ -175,10 +175,24 @@ func TestHardwiredPresets(t *testing.T) {
 		if o.RecolorVarSkip != 0.03 {
 			t.Errorf("%s RecolorVarSkip=%v want 0.03 (universal)", mode, o.RecolorVarSkip)
 		}
+		wantFE := 0.0
+		if mode == "anime" {
+			wantFE = 0.004 // false-edge polish term: anime-only default (GPU-measured, seed-replicated)
+		}
+		if o.PolishOpts.FalseEdgeLambda != wantFE {
+			t.Errorf("%s FalseEdgeLambda=%v want %v", mode, o.PolishOpts.FalseEdgeLambda, wantFE)
+		}
+		wantSSIM := 0.0
+		if mode == "anime" {
+			wantSSIM = 0.006 // SSIM polish term: anime-only default (GPU λ-grid, seed-replicated)
+		}
+		if o.PolishOpts.SSIMLambda != wantSSIM {
+			t.Errorf("%s SSIMLambda=%v want %v", mode, o.PolishOpts.SSIMLambda, wantSSIM)
+		}
 	}
-	check("anime", true, 0.40, false, false) // organic: alpha, alphaMin .40, boundary OFF, no backfit
-	check("photo", true, 0.40, false, false)
-	check("flat", false, 0, true, true) // opaque, boundary ON, backfit ON
+	check("anime", true, 0.30, false, false) // organic: alpha, alphaMin .30 (replicated floor grid), boundary OFF, no backfit
+	check("photo", true, 0.30, false, false) // photo: LOWER alpha floor (smoother tonal ramps; measured on cat+car)
+	check("flat", false, 0, true, true)      // opaque, boundary ON, backfit ON
 	// legacy names collapse
 	if m := Resolve(fixture(false), Choices{Mode: "logo"}).Mode; m != "flat" {
 		t.Errorf("logo should collapse to flat preset, got %q", m)

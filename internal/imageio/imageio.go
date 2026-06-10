@@ -167,6 +167,9 @@ func UnpadCanvas(img *image.NRGBA, padPx, w, h int) *image.NRGBA {
 
 // PrepareFromImage converts an image.Image to a Prepared, downscaling if needed.
 func PrepareFromImage(img image.Image, maxRes int) *Prepared {
+	// Photostock PNGs with the editor checkerboard BAKED in become real cutouts here (see
+	// checker.go) — before the downscale blurs the lattice past detection. Inert otherwise.
+	img = stripBakedChecker(img)
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	if maxRes > 0 && (w > maxRes || h > maxRes) {

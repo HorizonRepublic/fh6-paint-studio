@@ -45,57 +45,95 @@ func TestPolishGradientFD(t *testing.T) {
 	bbx := make([][4]int, len(ps))
 	tau := 1.2
 
-	// Analytic gradients at the unperturbed params (soft mode — the FD check validates the
-	// true soft-render gradient; STE's gradient is a deliberate surrogate, not FD-checkable).
-	polishForward(ps, base, render, below, bbx, w, h, tau, false)
-	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false)
-	ana := make([][10]float64, len(ps))
-	for i := range ps {
-		ana[i] = ps[i].grad
-	}
-
-	lossAt := func() float64 {
+	cases := []struct {
+		name       string
+		oklab      bool
+		feLambda   float64
+		ssimLambda float64
+	}{{"sse", false, 0, 0}, {"oklab", true, 0, 0}, {"false-edge", false, 0.5, 0}, {"ssim", false, 0, 0.5}}
+	for _, tc := range cases {
+		tc := tc
+		// Analytic gradients at the unperturbed params (soft mode — the FD check validates the
+		// true soft-render gradient; STE's gradient is a deliberate surrogate, not FD-checkable).
+		// The oklab pass additionally validates the OKLab Jacobian chain (okLabPixelDC); the
+		// false-edge pass validates the Sobel-adjoint chain (feState.adjoint + the dC luma seed);
+		// the ssim pass validates the window-moment chain (ssimState.adjoint, same dC seed).
+		oklab := tc.oklab
+		var fe *feState
+		var feAdj []float64
+		if tc.feLambda > 0 {
+			fe = newFEState(target, w, h)
+			feAdj = fe.adj
+		}
+		var ssim *ssimState
+		var ssimAdj []float64
+		if tc.ssimLambda > 0 {
+			ssim = newSSIMState(target, w, h)
+			ssimAdj = ssim.adj
+		}
 		polishForward(ps, base, render, below, bbx, w, h, tau, false)
-		return polishLoss(render, target, weight, w, h)
-	}
-	eps := 1e-4
-	check := func(name string, get func() *float64, analytic float64) {
-		p := get()
-		save := *p
-		*p = save + eps
-		lp := lossAt()
-		*p = save - eps
-		lm := lossAt()
-		*p = save
-		num := (lp - lm) / (2 * eps)
-		den := math.Max(1, math.Max(math.Abs(num), math.Abs(analytic)))
-		// Tolerance ~1.5e-2: the forward render buffer is float32, so the central
-		// difference has a ~1e-2 relative noise floor; the analytic gradient (float64)
-		// is the accurate one. This still catches any real derivation error (those
-		// show up as large, systematic mismatches).
-		if math.Abs(num-analytic)/den > 1.5e-2 {
-			t.Errorf("%s: analytic=%.6f numeric=%.6f (rel %.4f)", name, analytic, num, math.Abs(num-analytic)/den)
+		if fe != nil {
+			fe.adjoint(render, w, h)
 		}
-	}
+		if ssim != nil {
+			ssim.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda, ssimAdj, tc.ssimLambda)
+		ana := make([][10]float64, len(ps))
+		for i := range ps {
+			ana[i] = ps[i].grad
+		}
 
-	for si := range ps {
-		for k := 0; k < 6; k++ { // 6 geo slots (ellipse/rect leave slot 5 = 0; triangle uses all 6)
-			k := k
-			si := si
-			check(
-				labelf("shape", si, "P", k),
-				func() *float64 { return &ps[si].P[k] },
-				ana[si][k],
-			)
+		lossAt := func() float64 {
+			polishForward(ps, base, render, below, bbx, w, h, tau, false)
+			l := polishLoss(render, target, weight, w, h, oklab)
+			if fe != nil {
+				l += tc.feLambda * fe.total(render, w, h)
+			}
+			if ssim != nil {
+				l += tc.ssimLambda * ssim.total(render, w, h)
+			}
+			return l
 		}
-		for c := 0; c < 4; c++ {
-			c := c
-			si := si
-			check(
-				labelf("shape", si, "col", c),
-				func() *float64 { return &ps[si].col[c] },
-				ana[si][6+c],
-			)
+		eps := 1e-4
+		check := func(name string, get func() *float64, analytic float64) {
+			p := get()
+			save := *p
+			*p = save + eps
+			lp := lossAt()
+			*p = save - eps
+			lm := lossAt()
+			*p = save
+			num := (lp - lm) / (2 * eps)
+			den := math.Max(1, math.Max(math.Abs(num), math.Abs(analytic)))
+			// Tolerance ~1.5e-2: the forward render buffer is float32, so the central
+			// difference has a ~1e-2 relative noise floor; the analytic gradient (float64)
+			// is the accurate one. This still catches any real derivation error (those
+			// show up as large, systematic mismatches).
+			if math.Abs(num-analytic)/den > 1.5e-2 {
+				t.Errorf("%s: analytic=%.6f numeric=%.6f (rel %.4f)", name, analytic, num, math.Abs(num-analytic)/den)
+			}
+		}
+
+		for si := range ps {
+			for k := 0; k < 6; k++ { // 6 geo slots (ellipse/rect leave slot 5 = 0; triangle uses all 6)
+				k := k
+				si := si
+				check(
+					labelf("shape", si, "P", k),
+					func() *float64 { return &ps[si].P[k] },
+					ana[si][k],
+				)
+			}
+			for c := 0; c < 4; c++ {
+				c := c
+				si := si
+				check(
+					labelf("shape", si, "col", c),
+					func() *float64 { return &ps[si].col[c] },
+					ana[si][6+c],
+				)
+			}
 		}
 	}
 }

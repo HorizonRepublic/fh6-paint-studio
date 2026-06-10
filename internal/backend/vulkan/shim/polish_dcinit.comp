@@ -2,20 +2,82 @@
 #extension GL_ARB_gpu_shader_fp64 : require
 // polish_dcinit.comp — dC[p] = 2*weight*(render-target) per channel, the backward
 // pass seed (dLoss/dC_final). Mirrors the head of engine.polishBackward.
+// pc.oklab = 2*weight*J^T*dLab for the colour channels (engine.okLabPixelDC).
 
 layout(local_size_x = 256) in;
 layout(std430, binding = 3) readonly buffer Rb { float render[]; };
 layout(std430, binding = 5)          buffer Db { float dC[]; };
 layout(std430, binding = 8) readonly buffer Tb { float target[]; };
 layout(std430, binding = 9) readonly buffer Wb { float weightb[]; };
+layout(std430, binding = 10) readonly buffer Fb { double feAdj[]; };
+layout(std430, binding = 11) readonly buffer Sb { double ssimAdj[]; };
 layout(push_constant) uniform PC {
-    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau;
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab; float feLambda; float ssimLambda;
 } pc;
+
+// dcbrt — double cube root via float seed + 2 Newton steps (see polish_loss.comp).
+double dcbrt(double x) {
+    if (x < 1e-30) return 0.0LF;
+    double c = double(pow(float(x), 0.33333334));
+    c -= (c * c * c - x) / (3.0LF * c * c);
+    c -= (c * c * c - x) / (3.0LF * c * c);
+    return c;
+}
+
+// dcbrtSq — cbrt(max(x,eps))^2, the clamped cube-root-derivative denominator (engine.cbrtSq).
+double dcbrtSq(double x) {
+    if (x < 1e-7LF) x = 1e-7LF;
+    double c = dcbrt(x);
+    return c * c;
+}
 
 void main() {
     int idx = int(gl_GlobalInvocationID.x);
     if (idx >= pc.npix) return;
-    float wt = weightb[idx];
     int p = idx * 4;
-    for (int c = 0; c < 4; c++) dC[p + c] = 2.0 * wt * (render[p + c] - target[p + c]);
+    // False-edge + SSIM terms (engine falseedge.go / ssimterm.go): both chain through the luma
+    // coefficients into the dC RGB seeds; alpha carries no luma.
+    double feR = 0.0LF, feG = 0.0LF, feB = 0.0LF;
+    if (pc.feLambda > 0.0 || pc.ssimLambda > 0.0) {
+        double a = 0.0LF;
+        if (pc.feLambda > 0.0) a = double(pc.feLambda) * feAdj[idx];
+        if (pc.ssimLambda > 0.0) a += double(pc.ssimLambda) * ssimAdj[idx];
+        feR = a * 0.299LF; feG = a * 0.587LF; feB = a * 0.114LF;
+    }
+    if (pc.oklab != 0) {
+        double wt = double(weightb[idx]);
+        double rr = double(render[p]), rg = double(render[p + 1]), rb = double(render[p + 2]);
+        double l = 0.4122214708LF * rr + 0.5363325363LF * rg + 0.0514459929LF * rb;
+        double m = 0.2119034982LF * rr + 0.6806995451LF * rg + 0.1073969566LF * rb;
+        double s = 0.0883024619LF * rr + 0.2817188376LF * rg + 0.6299787005LF * rb;
+        double lc = dcbrt(l), mc = dcbrt(m), sc = dcbrt(s);
+        double rL = 0.2104542553LF * lc + 0.7936177850LF * mc - 0.0040720468LF * sc;
+        double rA = 1.9779984951LF * lc - 2.4285922050LF * mc + 0.4505937099LF * sc;
+        double rB = 0.0259040371LF * lc + 0.7827717662LF * mc - 0.8086757660LF * sc;
+        double tr = double(target[p]), tg = double(target[p + 1]), tb = double(target[p + 2]);
+        double l2 = 0.4122214708LF * tr + 0.5363325363LF * tg + 0.0514459929LF * tb;
+        double m2 = 0.2119034982LF * tr + 0.6806995451LF * tg + 0.1073969566LF * tb;
+        double s2 = 0.0883024619LF * tr + 0.2817188376LF * tg + 0.6299787005LF * tb;
+        double lc2 = dcbrt(l2), mc2 = dcbrt(m2), sc2 = dcbrt(s2);
+        double tL = 0.2104542553LF * lc2 + 0.7936177850LF * mc2 - 0.0040720468LF * sc2;
+        double tA = 1.9779984951LF * lc2 - 2.4285922050LF * mc2 + 0.4505937099LF * sc2;
+        double tB = 0.0259040371LF * lc2 + 0.7827717662LF * mc2 - 0.8086757660LF * sc2;
+        double dL = 2.0LF * wt * (rL - tL), dA = 2.0LF * wt * (rA - tA), dB = 2.0LF * wt * (rB - tB);
+        double gl = dL * 0.2104542553LF + dA * 1.9779984951LF + dB * 0.0259040371LF;
+        double gm = dL * 0.7936177850LF - dA * 2.4285922050LF + dB * 0.7827717662LF;
+        double gs = -dL * 0.0040720468LF + dA * 0.4505937099LF - dB * 0.8086757660LF;
+        gl /= 3.0LF * dcbrtSq(l);
+        gm /= 3.0LF * dcbrtSq(m);
+        gs /= 3.0LF * dcbrtSq(s);
+        dC[p + 0] = float(gl * 0.4122214708LF + gm * 0.2119034982LF + gs * 0.0883024619LF + feR);
+        dC[p + 1] = float(gl * 0.5363325363LF + gm * 0.6806995451LF + gs * 0.2817188376LF + feG);
+        dC[p + 2] = float(gl * 0.0514459929LF + gm * 0.1073969566LF + gs * 0.6299787005LF + feB);
+        dC[p + 3] = float(2.0LF * wt * (double(render[p + 3]) - double(target[p + 3])));
+        return;
+    }
+    double wt = double(weightb[idx]);
+    dC[p + 0] = float(2.0LF * wt * (double(render[p + 0]) - double(target[p + 0])) + feR);
+    dC[p + 1] = float(2.0LF * wt * (double(render[p + 1]) - double(target[p + 1])) + feG);
+    dC[p + 2] = float(2.0LF * wt * (double(render[p + 2]) - double(target[p + 2])) + feB);
+    dC[p + 3] = float(2.0LF * wt * (double(render[p + 3]) - double(target[p + 3])));
 }

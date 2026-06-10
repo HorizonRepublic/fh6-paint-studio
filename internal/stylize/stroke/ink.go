@@ -29,6 +29,7 @@ type InkConfig struct {
 	Darken       float64 `json:"darken"`     // ink = sampled dark colour × this
 	Width        float64 `json:"width"`      // min stroke half-width (px)
 	MaxWidth     float64 `json:"maxWidth"`   // max half-width; >Width = vary line weight by local ink thickness (DT)
+	WidthBias    float64 `json:"widthBias"`  // added to the measured DT median before clamping (px). The DT measures centre-of-ink-pixel to background-pixel-centre, overshooting the true half-width by ~0.5px — a -0.5 bias renders strokes at the SOURCE's weight (the hybrid uses it; the standalone stylizer keeps 0 = its eye-tuned heavier look)
 	Arcs         bool    `json:"arcs"`       // fit dictionary arcs to curved runs
 	ArcTol       float64 `json:"arcTol"`
 	MinSweep     float64 `json:"minSweep"`
@@ -41,6 +42,7 @@ type InkConfig struct {
 	SuppressBg   bool    `json:"suppressBg"`   // skip lines sitting mostly in the border-connected light background (no stray edge marks in the white margin)
 	BgLuma       float64 `json:"bgLuma"`       // luma threshold for "background light" (used by SuppressBg)
 	StitchTurn   float64 `json:"stitchTurn"`   // through-junction stitch: max bend (deg from straight) a stroke may take crossing a node (0=off); merges fragmented branches into long coherent strokes
+	RidgeOnly    float64 `json:"ridgeOnly"`    // only ink what the artist inked (0=off): drop a polyline unless ≥ this fraction of its samples sit on a true luma RIDGE of the source (darker than BOTH sides along the normal). FDoG also responds to one-sided STEP edges — the rim of a bright glow on a dark face — which a drawn line is not; this gates those invented outlines out. ~0.4-0.6.
 }
 
 func inkDefaults() InkConfig {
@@ -113,8 +115,12 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 	if e.cfg.SuppressBg {
 		bg = stylize.BackgroundMask(src, e.cfg.BgLuma)
 	}
+	var srcLuma []float64
+	if e.cfg.RidgeOnly > 0 {
+		srcLuma = lumaOf(src)
+	}
 	var shapes []model.Shape
-	skipped := 0
+	skipped, ridgeSkipped := 0, 0
 	for _, poly := range polys {
 		if len(shapes) >= budget {
 			break
@@ -122,10 +128,14 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 		if bg != nil && polyInBg(poly, bg, src.W, src.H) > 0.7 {
 			continue // a faint edge line in the light background → drop it (clean margin, free budget)
 		}
-		hw := branchHalfWidth(dt, poly, src.W, e.cfg.Width, e.cfg.MaxWidth)
+		hw := branchHalfWidth(dt, poly, src.W, e.cfg.Width, e.cfg.MaxWidth, e.cfg.WidthBias)
 		sp := simplify(smoothPolyline(poly, e.cfg.LineSmooth), e.cfg.Simplify)
 		if len(sp) < 2 {
 			continue
+		}
+		if srcLuma != nil && ridgeFraction(srcLuma, src.W, src.H, sp, hw) < e.cfg.RidgeOnly {
+			ridgeSkipped++
+			continue // a step-edge response (glow rim, soft contrast boundary) — the source drew no line here
 		}
 		// Coverage dedup: a polyline already mostly painted by earlier (longer) lines is a redundant
 		// retrace / parallel branch — skip it, freeing its budget for un-drawn lines.
@@ -139,7 +149,7 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 		emitOutline(sp, 0, 0, hw, ink, scfg, &shapes, budget)
 	}
 	if os.Getenv("INK_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "[ink] raw=%d stitched=%d shapes=%d dedup-skipped=%d\n", rawPolys, len(polys), len(shapes), skipped)
+		fmt.Fprintf(os.Stderr, "[ink] raw=%d stitched=%d shapes=%d dedup-skipped=%d ridge-skipped=%d\n", rawPolys, len(polys), len(shapes), skipped, ridgeSkipped)
 	}
 	return shapes, nil
 }
@@ -157,6 +167,39 @@ func polyInBg(poly [][2]float64, bg []bool, w, h int) float64 {
 		}
 	}
 	return float64(in) / float64(len(poly))
+}
+
+// ridgeFraction returns the fraction of polyline samples (≈2px steps) sitting on a true luma RIDGE
+// of the source — darker than BOTH sides at ±(2·hw+1) px along the local segment normal. A drawn
+// ink line is a ridge; the rim of a bright glow on a dark face is a one-sided STEP edge and fails.
+func ridgeFraction(luma []float64, w, h int, sp [][2]float64, hw float64) float64 {
+	const margin = 0.05
+	d := math.Max(2.5, 2*hw+1)
+	total, ridge := 0, 0
+	for i := 1; i < len(sp); i++ {
+		ax, ay, bx, by := sp[i-1][0], sp[i-1][1], sp[i][0], sp[i][1]
+		segLen := math.Hypot(bx-ax, by-ay)
+		if segLen < 1e-9 {
+			continue
+		}
+		nx, ny := -(by-ay)/segLen, (bx-ax)/segLen
+		steps := int(segLen/2) + 1
+		for s := 0; s <= steps; s++ {
+			t := float64(s) / float64(steps)
+			cx, cy := ax+(bx-ax)*t, ay+(by-ay)*t
+			lc := sampleBilinearPlane(luma, w, h, cx, cy)
+			l1 := sampleBilinearPlane(luma, w, h, cx+nx*d, cy+ny*d)
+			l2 := sampleBilinearPlane(luma, w, h, cx-nx*d, cy-ny*d)
+			total++
+			if lc < l1-margin && lc < l2-margin {
+				ridge++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(ridge) / float64(total)
 }
 
 // polyInkedFraction samples the polyline (≈1px steps) and returns the fraction of samples whose footprint
@@ -311,7 +354,7 @@ func inkDT(mask []bool, w, h int) []float32 {
 
 // branchHalfWidth returns the median DT along a branch (≈ its half stroke width), clamped to
 // [minHW,maxHW]. maxHW<=minHW disables the variation (uniform minHW).
-func branchHalfWidth(dt []float32, poly [][2]float64, w int, minHW, maxHW float64) float64 {
+func branchHalfWidth(dt []float32, poly [][2]float64, w int, minHW, maxHW, bias float64) float64 {
 	if maxHW <= minHW || len(poly) == 0 {
 		return minHW
 	}
@@ -326,7 +369,7 @@ func branchHalfWidth(dt []float32, poly [][2]float64, w int, minHW, maxHW float6
 		return minHW
 	}
 	sort.Float64s(vals)
-	hw := vals[len(vals)/2]
+	hw := vals[len(vals)/2] + bias
 	if hw < minHW {
 		hw = minHW
 	}

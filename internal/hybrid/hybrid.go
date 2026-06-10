@@ -9,6 +9,7 @@ import (
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/raster"
 	"fh6-paint-studio/internal/stylize"
 	_ "fh6-paint-studio/internal/stylize/presets" // register the "ink-fdog" preset (side-effect)
 )
@@ -42,11 +43,17 @@ func AutoInkCeiling(prep *imageio.Prepared, total int, mode string) int {
 // Ink runs the stylizer's FDoG ink engine over the source and returns its clean centerlines (the hybrid's
 // designed-outline layer, up to inkBudget lines), dropping the stylizer background shape. Append these
 // AFTER the geometrize fill so they composite on top. Returns nil on error or inkBudget<=0.
-func Ink(prep *imageio.Prepared, inkBudget int) []model.Shape {
+// ridgeOnly switches to the faithful variant: only lines the source actually drew (luma ridges) —
+// step-edge responses like the rim of a bright glow on a dark face are dropped instead of outlined.
+func Ink(prep *imageio.Prepared, inkBudget int, ridgeOnly bool) []model.Shape {
 	if inkBudget <= 0 {
 		return nil
 	}
-	geo, err := stylize.Run(prepToStylize(prep), "ink-fdog", inkBudget)
+	preset := "ink-fdog"
+	if ridgeOnly {
+		preset = "ink-fdog-ridge"
+	}
+	geo, err := stylize.Run(prepToStylize(prep), preset, inkBudget)
 	if err != nil {
 		applog.Printf("hybrid-ink: %v (skipping lines)", err)
 		return nil
@@ -66,4 +73,99 @@ func prepToStylize(prep *imageio.Prepared) *stylize.SrcImage {
 		sp[i] = model.RGBA{R: src[i*4], G: src[i*4+1], B: src[i*4+2], A: src[i*4+3]}
 	}
 	return &stylize.SrcImage{W: prep.W, H: prep.H, Pix: sp}
+}
+
+// SuppressLines returns a Prepared copy whose pixels UNDER the drawn ink lines are inpainted from
+// their surroundings, so the geometrize fill stops competing with the ink layer for the same
+// strokes — the source of the hybrid's double-line/ghosting artifact (the fill reconstructs a
+// soft copy of every source line, then the FDoG line lands next to it slightly offset). Each
+// DRAWN line claims its pixels; lines the ink budget did not draw stay in the target and the
+// fill keeps reproducing them, so nothing vanishes from the result.
+func SuppressLines(prep *imageio.Prepared, lines []model.Shape) *imageio.Prepared {
+	if len(lines) == 0 {
+		return prep
+	}
+	w, h := prep.W, prep.H
+	masked := make([]bool, w*h)
+	for _, s := range lines {
+		kind := model.KindFromType(s.Type)
+		p := model.ParamsFromShape(s)
+		xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
+		for y := yMin; y <= yMax; y++ {
+			for x := xMin; x <= xMax; x++ {
+				if raster.Inside(kind, p, x, y) {
+					masked[y*w+x] = true
+				}
+			}
+		}
+	}
+	// 1px dilation: claim the anti-aliased rim of the source line too, not just its core.
+	dil := make([]bool, w*h)
+	copy(dil, masked)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if !masked[y*w+x] {
+				continue
+			}
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					xx, yy := x+dx, y+dy
+					if xx >= 0 && yy >= 0 && xx < w && yy < h {
+						dil[yy*w+xx] = true
+					}
+				}
+			}
+		}
+	}
+	// Iterative inpaint: every claimed pixel takes the mean of its already-known neighbours,
+	// peeling the claimed band from its edges inward (lines are a few px wide -> a few passes).
+	px := append([]float32(nil), prep.Pixels...)
+	known := make([]bool, w*h)
+	for i := range known {
+		known[i] = !dil[i]
+	}
+	for pass := 0; pass < 16; pass++ {
+		changed := false
+		next := append([]bool(nil), known...)
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				i := y*w + x
+				if known[i] {
+					continue
+				}
+				var r, g, b, a float32
+				var n int
+				for dy := -1; dy <= 1; dy++ {
+					for dx := -1; dx <= 1; dx++ {
+						xx, yy := x+dx, y+dy
+						if xx < 0 || yy < 0 || xx >= w || yy >= h {
+							continue
+						}
+						j := yy*w + xx
+						if known[j] {
+							r += px[j*4]
+							g += px[j*4+1]
+							b += px[j*4+2]
+							a += px[j*4+3]
+							n++
+						}
+					}
+				}
+				if n > 0 {
+					fn := float32(n)
+					px[i*4], px[i*4+1], px[i*4+2], px[i*4+3] = r/fn, g/fn, b/fn, a/fn
+					next[i] = true
+					changed = true
+				}
+			}
+		}
+		known = next
+		if !changed {
+			break
+		}
+	}
+	out := *prep
+	out.Pixels = px
+	applog.Printf("hybrid-claim: %d drawn lines claimed their pixels from the fill target", len(lines))
+	return &out
 }

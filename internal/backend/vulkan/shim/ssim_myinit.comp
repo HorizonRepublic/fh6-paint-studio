@@ -1,0 +1,25 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// ssim_myinit.comp — target window means from the target's own h-pass (plane 0 = Σy,
+// plane 1 = Σy²). Run ONCE at set-lambda on setT (engine newSSIMState / shim.cu ssMyInit).
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 3) readonly buffer Hb { double hsum[]; };
+layout(std430, binding = 4)          buffer Mb { double my[]; };
+layout(push_constant) uniform PC { int w, h, mw, mh, writeG; float lambda; } pc;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    int nwin = pc.mw * pc.mh;
+    if (i >= nwin) return;
+    int gy = i / pc.mw, gx = i % pc.mw;
+    int hp = pc.mw * pc.h;
+    double sy = 0.0LF, syy = 0.0LF;
+    for (int k = 0; k < 8; k++) {
+        int row = (gy + k) * pc.mw;
+        sy += hsum[row + gx];
+        syy += hsum[hp + row + gx];
+    }
+    my[i] = sy * 0.015625LF;
+    my[nwin + i] = syy * 0.015625LF;
+}

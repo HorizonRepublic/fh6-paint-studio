@@ -53,6 +53,7 @@ type run struct {
 	gw         int
 	gh         int
 	sampler    *ErrorSampler
+	persist    *persistCtx
 	initialErr float64
 	finalErr   float64
 }
@@ -120,6 +121,11 @@ func newRun(be backend.Backend, opt Options) *run {
 	grid, gw, gh, _ := be.ErrorGrid()
 	initialErr := sumGrid(grid)
 	sampler := NewErrorSampler(grid, gw, gh, w, h)
+	var persist *persistCtx
+	if opt.PersistGain > 0 {
+		persist = newPersistCtx(opt.PersistGain, gw*gh)
+		persist.update(grid)
+	}
 
 	diag := math.Sqrt(float64(w*w + h*h))
 	moveStep := float32(math.Max(mutateStepFloor, diag*mutateMoveFrac))
@@ -243,7 +249,7 @@ func newRun(be backend.Backend, opt Options) *run {
 		orient:      orient, detailGrid: detailGrid, boundCtx: boundCtx,
 		devSearch: devSearch, devMoment: devMoment, src: newShapeSource(opt),
 		initCanvas: initCanvas, shapes: shapes, grid: grid, gw: gw, gh: gh,
-		sampler: sampler, initialErr: initialErr,
+		sampler: sampler, persist: persist, initialErr: initialErr,
 	}
 }
 
@@ -281,6 +287,12 @@ func (r *run) greedy() {
 				r.sampler = NewErrorSampler(sampGrid, r.gw, r.gh, r.w, r.h)
 			}
 		}
+		// Persistent-error upweight (see persist.go): folds into sampGrid so the device search
+		// and the host sampler stay identical; the raw grid (gate/knee/progress) is untouched.
+		if r.persist != nil {
+			sampGrid = r.persist.apply(sampGrid)
+			r.sampler = NewErrorSampler(sampGrid, r.gw, r.gh, r.w, r.h)
+		}
 		best, bestScore := r.searchOne(progress, sampGrid, penalty)
 		// bestScore is the backend's PROGRESSIVELY-SAMPLED ΔSSE (SampleBudget pixels), not the exact
 		// full-res delta, so "every accepted shape strictly lowers the hard error" is statistical, not
@@ -314,6 +326,9 @@ func (r *run) greedy() {
 		r.tm.ErrorGrid += time.Since(t0)
 		t0 = time.Now()
 		r.sampler = NewErrorSampler(r.grid, r.gw, r.gh, r.w, r.h)
+		if r.persist != nil {
+			r.persist.update(r.grid)
+		}
 		r.tm.Sampler += time.Since(t0)
 		curErr := sumGrid(r.grid)
 		if r.opt.Progress != nil {

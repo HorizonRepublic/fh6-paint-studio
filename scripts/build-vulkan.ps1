@@ -50,6 +50,14 @@ $shaders = [ordered]@{
     'polish_loss'     = 'p_loss_spv'
     'polish_dcwalk_tiled'    = 'pt_dcwalk_spv'
     'polish_backward_reduce' = 'pt_breduce_spv'
+    'fe_luma'         = 'fe_luma_spv'
+    'fe_dir'          = 'fe_dir_spv'
+    'fe_adj'          = 'fe_adj_spv'
+    'ssim_h'          = 'ssim_h_spv'
+    'ssim_myinit'     = 'ssim_myinit_spv'
+    'ssim_map'        = 'ssim_map_spv'
+    'ssim_gh'         = 'ssim_gh_spv'
+    'ssim_adj'        = 'ssim_adj_spv'
 }
 foreach ($s in $shaders.Keys) {
     & $glsl -V --target-env vulkan1.2 (Join-Path $shim "$s.comp") --vn $shaders[$s] -o (Join-Path $shim "$s.spv.h")

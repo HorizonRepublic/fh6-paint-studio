@@ -1,0 +1,16 @@
+#version 450
+// fe_luma.comp — Rec.601 luma plane of an RGBA canvas (engine lumaOf / metric.Luma).
+// Bound twice: once with src=target (writes the fixed target-luma plane at set-lambda),
+// once with src=render (per polish iteration / loss eval).
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Sb { float src[]; };
+layout(std430, binding = 2)          buffer Lb { float luma[]; };
+layout(push_constant) uniform PC { int w, h; float feLambda; } pc;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.w * pc.h) return;
+    int p = i * 4;
+    luma[i] = 0.299 * src[p] + 0.587 * src[p + 1] + 0.114 * src[p + 2];
+}

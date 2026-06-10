@@ -49,9 +49,14 @@ type RunStats struct {
 	etaPerShape    float64
 	etaLastShapes  int
 	etaLastElapsed time.Duration
+	etaPrevTick    time.Duration // elapsed at the previous UpdateETA call (the display countdown step)
 }
 
-// UpdateETA refreshes ETA from a recent-rate EMA of seconds/shape, called once per progress tick.
+// UpdateETA refreshes ETA once per progress tick. The RATE is a recent EMA of seconds/shape; the
+// DISPLAYED value is a smooth countdown: it ticks down with the wall clock and converges toward the
+// raw rate×remaining estimate at 1/6 of the gap per tick — the raw estimate wobbles ±5-10s tick to
+// tick (per-shape cost is bursty), and showing it directly made the countdown jump back and forth.
+// A genuine slowdown still pulls the display up, just over ~10 ticks instead of instantly.
 func (s *RunStats) UpdateETA(shapes, total int, elapsed time.Duration) {
 	if shapes > s.etaLastShapes {
 		dt := (elapsed - s.etaLastElapsed).Seconds()
@@ -67,11 +72,23 @@ func (s *RunStats) UpdateETA(shapes, total int, elapsed time.Duration) {
 		s.etaLastShapes = shapes
 		s.etaLastElapsed = elapsed
 	}
-	if remaining := total - shapes; remaining > 0 && s.etaPerShape > 0 {
-		s.ETA = time.Duration(s.etaPerShape * float64(remaining) * float64(time.Second))
-	} else {
+	wallDelta := elapsed - s.etaPrevTick
+	s.etaPrevTick = elapsed
+	remaining := total - shapes
+	if remaining <= 0 || s.etaPerShape <= 0 {
 		s.ETA = 0
+		return
 	}
+	raw := time.Duration(s.etaPerShape * float64(remaining) * float64(time.Second))
+	if s.ETA <= 0 {
+		s.ETA = raw
+		return
+	}
+	eta := s.ETA - wallDelta
+	if eta < time.Second {
+		eta = time.Second // floor while shapes are still pending (never shows 00:00 mid-run)
+	}
+	s.ETA = eta + (raw-eta)/6
 }
 
 type UpdateInfo struct {

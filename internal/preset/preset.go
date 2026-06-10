@@ -210,7 +210,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		MomentSeed:        true,
 		MomentDetailStart: 0.55,
 		Polish:            sp.polish,
-		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste),
+		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim),
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
@@ -286,6 +286,8 @@ type shapeParams struct {
 	backfit     bool
 	iters       int
 	tau1        float64
+	falseEdge   float64
+	ssim        float64
 	ste         bool
 }
 
@@ -302,6 +304,8 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 		backfit:     md.Backfit,
 		iters:       md.PolishIters,
 		tau1:        md.PolishTau1,
+		falseEdge:   md.FalseEdge,
+		ssim:        md.SSIM,
 		ste:         true,
 	}
 
@@ -455,6 +459,8 @@ type ModeDefaults struct {
 	AspectMax   float32   // max sliver aspect
 	PolishIters int       // joint-polish iterations (perceptual knee)
 	PolishTau1  float64   // final polish edge softness
+	FalseEdge   float64   // false-edge additive polish loss λ (0 = off)
+	SSIM        float64   // SSIM additive polish loss λ (0 = off)
 	Boundary    bool      // boundary-aware radius
 	Backfit     bool      // post-polish back-fitting
 	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
@@ -467,7 +473,13 @@ type ModeDefaults struct {
 func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDefaults {
 	flat := PresetMode(resolvedMode) == "flat"
 	d := ModeDefaults{
-		AlphaMin:    0.40,
+		// Alpha floor 0.30 for ALL organic content (was 0.40). Photo: monotone-better downward on
+		// both photo bench imgs (smoother tonal ramps, all metrics agree). Anime: 0.30 vs 0.40
+		// replicated across 5 bank imgs × 3 seeds = 6 wins / 4 ties / 0 losses (img_5 wins on every
+		// seed, typically −5%); the seed-to-seed variance dwarfs finer tuning, and the eye shows
+		// smoother iris/skin ramps with no crispness loss. A cel/painterly auto-split was probed
+		// and REFUTED — no Analyze feature separates the preferences; it is one default, just lower.
+		AlphaMin:    0.30,
 		KindWeights: []float32{0.5, 0.4, 0.1}, // organic + textured flat: triangle-rich
 		AspectMax:   6,
 		PolishIters: 200,
@@ -482,6 +494,22 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		d.WeightStr = 0
 	default: // anime
 		d.WeightStr = 0.15
+		// False-edge additive polish term, anime only (λ·relu(|∇recon|−|∇target|), Sobel on luma —
+		// the standout detector charged DURING the descent). GPU-measured at λ=0.004 across the bank
+		// × seeds 1/7/13: img_22-class (cel, big flats — where polish used to be gate-discarded)
+		// −14..20% weighted with ΔE/SSIM/banding all better; img_5 −0..3% with all metrics better;
+		// img_24/img_25/img_12 tie/inert; eye: smoother skin/hair, line work intact. Photo pays a
+		// consistent +1..2% weighted for the banding drop (OFF); flat is content-scattered (img_1
+		// line-art likes 0.008 — manual flag), so both stay 0.
+		d.FalseEdge = 0.004
+		// SSIM additive polish term (λ·Σ(1−SSIM_8×8) on luma — local contrast/structure SSE
+		// undercharges), anime only. GPU λ-grid {1e-4..0.02} × img_5/img_22/img_24 × seeds 1/2/3:
+		// SSIM/banding improve monotonically with λ (band −10..16%) but ΔE drifts past ~0.006;
+		// 0.006 = the balanced point (band −10..12%, SSIM +0.003..0.010, ΔE ≤ +0.06, term ≈2% SSE).
+		// Eye at the 0.01 bracket: cel lash/lid lines crisper, pupil highlight cleaner, no colour
+		// damage; painterly (img_24) a coin toss. Photo pays real colour (cat ΔE 2.87→3.08, +7%
+		// weighted at 0.01) — OFF; flat thin evidence (one image) — OFF, manual -polish-ssim.
+		d.SSIM = 0.006
 	}
 	if flat {
 		d.AspectMax = 8
@@ -690,7 +718,7 @@ func resolveGaussian(prep imageio.Prepared, c Choices, w, h, shapes int) Resolve
 		Seed:          c.Seed,
 		TransparentBG: prep.HasTransparency,
 		Gaussian:      true,
-		PolishOpts:    polishOpts(iters, 0, 0.08, false),
+		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0, 0),
 	}
 	return Resolved{
 		Options: opt,
@@ -718,7 +746,7 @@ func gaussTrainIters(shapes int) int {
 	return it
 }
 
-func polishOpts(iters int, tau0, tau1 float64, ste bool) engine.PolishOptions {
+func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda float64) engine.PolishOptions {
 	o := engine.DefaultPolishOptions()
 	if iters > 0 {
 		o.Iters = iters
@@ -730,6 +758,8 @@ func polishOpts(iters int, tau0, tau1 float64, ste bool) engine.PolishOptions {
 		o.Tau1 = tau1
 	}
 	o.STE = ste
+	o.FalseEdgeLambda = feLambda
+	o.SSIMLambda = ssimLambda
 	return o
 }
 

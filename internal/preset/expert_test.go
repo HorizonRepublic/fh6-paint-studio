@@ -87,7 +87,7 @@ func TestResolveAlphaMinSentinelKeepsModeFloor(t *testing.T) {
 	allow := true
 	c.Alpha = &allow
 	r := Resolve(prep, c)
-	if r.Options.AlphaMin != 0.40 {
-		t.Errorf("Options.AlphaMin = %v, want mode floor 0.40", r.Options.AlphaMin)
+	if r.Options.AlphaMin != 0.30 {
+		t.Errorf("Options.AlphaMin = %v, want mode floor 0.30", r.Options.AlphaMin)
 	}
 }
