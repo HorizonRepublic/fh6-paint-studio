@@ -27,9 +27,13 @@ func init() {
 		{Engine: "ink"},
 	}})
 	// ink-fdog — FDoG coherent ink centerlines only (no fill), the clean designed-outline layer for the
-	// HYBRID (geometrize colour/detail fill + these crisp lines on top). Same line config as `anime`.
+	// HYBRID (geometrize colour/detail fill + these crisp lines on top). Unlike `anime` (whose heavier
+	// eye-tuned weight REPLACES the source lines over flattened fills), the hybrid's lines land on a
+	// fill that already reproduces the source — so they carry the SOURCE's weight: width floor 0.5
+	// (1px strokes render 1px) + the -0.5 DT bias (the transform overshoots true half-width by ~0.5px).
+	// Measured on img_1: the old config drew the line layer ~3× the source's median stroke width.
 	stylize.RegisterPreset(stylize.Preset{Name: "ink-fdog", Stages: []stylize.Stage{
-		{Engine: "ink", Config: json.RawMessage(`{"method":"fdog","thresh":0.75}`)},
+		{Engine: "ink", Config: json.RawMessage(`{"method":"fdog","thresh":0.75,"width":0.5,"widthBias":-0.5}`)},
 	}})
 	// outline — the older region-boundary stroke engine, kept as an alternative line source.
 	stylize.RegisterPreset(stylize.Preset{Name: "outline", Smooth: dtSmooth, Stages: []stylize.Stage{

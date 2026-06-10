@@ -29,6 +29,7 @@ type InkConfig struct {
 	Darken       float64 `json:"darken"`     // ink = sampled dark colour × this
 	Width        float64 `json:"width"`      // min stroke half-width (px)
 	MaxWidth     float64 `json:"maxWidth"`   // max half-width; >Width = vary line weight by local ink thickness (DT)
+	WidthBias    float64 `json:"widthBias"`  // added to the measured DT median before clamping (px). The DT measures centre-of-ink-pixel to background-pixel-centre, overshooting the true half-width by ~0.5px — a -0.5 bias renders strokes at the SOURCE's weight (the hybrid uses it; the standalone stylizer keeps 0 = its eye-tuned heavier look)
 	Arcs         bool    `json:"arcs"`       // fit dictionary arcs to curved runs
 	ArcTol       float64 `json:"arcTol"`
 	MinSweep     float64 `json:"minSweep"`
@@ -122,7 +123,7 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 		if bg != nil && polyInBg(poly, bg, src.W, src.H) > 0.7 {
 			continue // a faint edge line in the light background → drop it (clean margin, free budget)
 		}
-		hw := branchHalfWidth(dt, poly, src.W, e.cfg.Width, e.cfg.MaxWidth)
+		hw := branchHalfWidth(dt, poly, src.W, e.cfg.Width, e.cfg.MaxWidth, e.cfg.WidthBias)
 		sp := simplify(smoothPolyline(poly, e.cfg.LineSmooth), e.cfg.Simplify)
 		if len(sp) < 2 {
 			continue
@@ -311,7 +312,7 @@ func inkDT(mask []bool, w, h int) []float32 {
 
 // branchHalfWidth returns the median DT along a branch (≈ its half stroke width), clamped to
 // [minHW,maxHW]. maxHW<=minHW disables the variation (uniform minHW).
-func branchHalfWidth(dt []float32, poly [][2]float64, w int, minHW, maxHW float64) float64 {
+func branchHalfWidth(dt []float32, poly [][2]float64, w int, minHW, maxHW, bias float64) float64 {
 	if maxHW <= minHW || len(poly) == 0 {
 		return minHW
 	}
@@ -326,7 +327,7 @@ func branchHalfWidth(dt []float32, poly [][2]float64, w int, minHW, maxHW float6
 		return minHW
 	}
 	sort.Float64s(vals)
-	hw := vals[len(vals)/2]
+	hw := vals[len(vals)/2] + bias
 	if hw < minHW {
 		hw = minHW
 	}

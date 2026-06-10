@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"flag"
@@ -101,6 +101,7 @@ func main() {
 	fh6Score := flag.String("fh6-score", "", "comparison mode: render a geometry JSON the way the GAME composites it (LINEAR light) and report SSE vs -input (sRGB), then exit. Measures real in-game fidelity (the semi-transparent pop). Set -max-res to the JSON canvas size; -ss for AA; saves the in-game render to -preview.")
 	stylizeMode := flag.String("stylize", "", "STYLIZER mode: run a stylizer preset (auto|anime|poster|ink) instead of the geometrize engine, writing injectable geometry to -output (+ -preview). 'auto' analyses the image's style (line-art/cel/hatched/busy) and picks the line+fill+smooth knobs per content. Uses -max-res as the working resolution and -shapes as the budget.")
 	stylizeLibrary := flag.Bool("stylize-library", false, "with -stylize: also save the result as a Studio library entry (~/FH6PaintStudio/library) so it injects from the studio's Library tab via the normal word-only path вЂ” no GUI run needed.")
+	hybridClaim := flag.Bool("hybrid-claim", false, "EXPERIMENT (with -hybrid-ink, default off): the drawn FDoG lines CLAIM their pixels from the fill target (inpainted from the surroundings), so the geometrize fill stops reproducing a soft offset copy of every inked stroke under the ink layer (the hybrid double-line/ghosting artifact). Lines the ink budget does not draw stay in the target and render via the fill as before. Judge by eye.")
 	hybridInk := flag.Int("hybrid-ink", 0, "HYBRID: after the geometrize run, lay up to N clean FDoG ink lines (stylizer) ON TOP вЂ” the optimized colour/detail fill (alive eyes) + the designed anime outline. N>0: -shapes is the fill budget, total = -shapes + N. N=-1: AUTO вЂ” split -shapes by content (photoв†’no lines; line-artв†’line-heavy 35%; celв†’fill-heavy 12%; else 20%). 0=off.")
 	saveLib := flag.Bool("library", false, "save the final geometry as a Studio library entry (~/FH6PaintStudio/library) for one-click word-only in-game inject from the Library tab (works for the geometrize + hybrid path).")
 	metrics := flag.Bool("metrics", false, "print perceptual quality of the final render vs the source (О”E76 mean/p95, SSIM, banding) вЂ” the offline quality harness; the WYSIWYG render is in-game-faithful so these correlate with the eye.")
@@ -212,6 +213,9 @@ func main() {
 	var inkShapes []model.Shape
 	if inkCeiling > 0 {
 		inkShapes = hybrid.Ink(prep, inkCeiling)
+		if *hybridClaim && len(inkShapes) > 0 {
+			prep = hybrid.SuppressLines(prep, inkShapes) // drawn lines claim their pixels from the fill target
+		}
 	}
 	fillBudget := *shapes
 	if *hybridInk < 0 { // auto: ink + fill share the -shapes total (no overflow, no waste)
