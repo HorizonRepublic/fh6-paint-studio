@@ -67,7 +67,7 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
-	procPolSetup, procPolSTE, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
+	procPolSetup, procPolSTE, procPolOKLab, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
 
@@ -125,6 +125,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		procPolSync:     proc("fp_polish_sync"),
 		procPolFree:     proc("fp_polish_free"),
 	}
+	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab") // optional: older DLLs lack it (engine falls back to SSE)
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -284,6 +285,17 @@ func (g *Vulkan) PolishSetSTE(on bool) {
 	if g.procPolSTE != nil {
 		g.procPolSTE.Call(uintptr(b2i32(on)))
 	}
+}
+
+// PolishSetOKLab switches the device polish loss/dcinit kernels to the perceptual OKLab
+// colour metric; reports whether the DLL supports it (the engine falls back to plain SSE
+// when false so the host/device objectives stay consistent).
+func (g *Vulkan) PolishSetOKLab(on bool) bool {
+	if g.procPolOKLab == nil {
+		return false
+	}
+	g.procPolOKLab.Call(uintptr(b2i32(on)))
+	return true
 }
 
 func (g *Vulkan) PolishSync() {

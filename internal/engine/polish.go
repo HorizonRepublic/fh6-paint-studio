@@ -55,6 +55,7 @@ type PolishOptions struct {
 	LRColor  float64 // Adam lr for R,G,B
 	LRAlpha  float64 // Adam lr for A
 	GradClip float64 // per-shape per-param gradient L2 cap (0 = none)
+	OKLab    bool    // perceptual colour loss: compute the polish loss/gradient in OKLab (cube-root LMS of the linear working space) instead of raw channel SSE — hue/chroma errors cost what the eye charges (the "standout colour" failure). Loss, backward seed AND best-hard tracking all switch together so the optimisation is self-consistent; the caller's accept gate still measures backend SSE. Greedy scoring is untouched. Default false (CLI -polish-oklab).
 	STE      bool    // straight-through estimator: FORWARD composites HARD coverage (the exact deliverable), BACKWARD keeps the SOFT surrogate dcov/dsdf for the geometry chain only. Closes the soft->hard snap gap (optimizes the shipped hard SSE directly). Default false (soft polish).
 
 	// Early-stop: break the loop once the polish hits DIMINISHING RETURNS — when the best-HARD
@@ -184,7 +185,7 @@ type PolishProbeResult struct {
 
 // PolishStepProbe runs ONE CPU forward+loss+backward at the given tau and returns the
 // result + layout. It is the reference the GPU polish primitives must match bit-for-bit.
-func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, bg model.RGBA, transparent bool, tau float64, ste bool) PolishProbeResult {
+func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, bg model.RGBA, transparent bool, tau float64, ste, oklab bool) PolishProbeResult {
 	base := make([]float32, w*h*4)
 	if !transparent {
 		for i := 0; i < w*h; i++ {
@@ -213,10 +214,10 @@ func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, b
 	below := make([][]float32, n)
 	bbx := make([][4]int, n)
 	polishForward(ps, base, render, below, bbx, w, h, tau, ste)
-	loss := polishLoss(render, target, weight, w, h)
-	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, ste)
+	loss := polishLoss(render, target, weight, w, h, oklab)
+	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, ste, oklab)
 	hardScratch := make([]float32, w*h*4)
-	hardLoss := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+	hardLoss := polishHardLoss(ps, base, target, weight, hardScratch, w, h, oklab)
 
 	res := PolishProbeResult{N: n, Base: base, Render: render, Loss: loss, HardLoss: hardLoss,
 		Grad: make([]float64, n*10), P: make([]float64, n*6), Col: make([]float64, n*4),
@@ -282,6 +283,19 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	n := len(ps)
 	accel.PolishSetup(base, n)
 	accel.PolishSetSTE(opt.STE)
+	// OKLab steers ONLY the fine-exploit phase's gradient (toggled around its backward calls);
+	// the loss, hard loss and best-tracking stay on plain SSE — the gate's metric — so the
+	// perceptual nudge can never ship an SSE regression. Optional device capability
+	// (type-asserted, like the backend search extras); no support (old DLL) -> SSE-only pass.
+	var okSetter interface{ PolishSetOKLab(on bool) bool }
+	if opt.OKLab {
+		if s, ok := accel.(interface{ PolishSetOKLab(on bool) bool }); ok && s.PolishSetOKLab(false) {
+			okSetter = s
+		} else {
+			applog.Printf("polish: OKLab requested but the device lacks fp_set_polish_oklab — falling back to SSE")
+			opt.OKLab = false
+		}
+	}
 	defer accel.PolishFree()
 
 	// Reused host staging buffers for the per-iter upload.
@@ -330,7 +344,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		if hl, ok := accel.PolishHardLoss(hBBX); ok {
 			return hl
 		}
-		return polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+		return polishHardLoss(ps, base, target, weight, hardScratch, w, h, false)
 	}
 	bestHard := hardLoss(opt.Tau0, false)
 	bestP := snapshotParams(ps)
@@ -460,7 +474,16 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		if opt.OnProgress != nil {
 			opt.OnProgress(doneIters+it+1, doneIters+fineIters)
 		}
-		tick(&tBwd, func() { accel.PolishBackward(fineTau, hBBX); accel.PolishSync() })
+		tick(&tBwd, func() {
+			if okSetter != nil {
+				okSetter.PolishSetOKLab(true) // perceptual gradient for the fine step only
+			}
+			accel.PolishBackward(fineTau, hBBX)
+			accel.PolishSync()
+			if okSetter != nil {
+				okSetter.PolishSetOKLab(false) // loss/hard calls below stay on the gate's SSE metric
+			}
+		})
 		tick(&tGrad, func() {
 			accel.PolishReadGrad(hGrad)
 			for i := range ps {
@@ -549,7 +572,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	bbx := make([][4]int, len(ps)) // xMin,yMin,xMax,yMax per shape
 
 	polishForward(ps, base, render, below, bbx, w, h, opt.Tau0, opt.STE)
-	pre := polishLoss(render, target, weight, w, h)
+	pre := polishLoss(render, target, weight, w, h, false)
 
 	// Best-HARD tracking — the fix for the soft->hard "snap gap". The gradient
 	// descent minimises the SOFT (sigmoid-coverage) render, whose loss keeps falling,
@@ -559,7 +582,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	// the HARD snap periodically and keep the params with the lowest hard loss seen.
 	// Baseline = the greedy input itself (so polish can NEVER return worse than greedy).
 	hardScratch := make([]float32, w*h*4)
-	bestHard := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+	bestHard := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false)
 	bestP := snapshotParams(ps)
 	checkEvery := maxInt(1, opt.Iters/25)
 	earlyMargin := opt.EarlyStopMargin
@@ -585,12 +608,12 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		if opt.OnProgress != nil {
 			opt.OnProgress(it+1, opt.Iters)
 		}
-		post = polishLoss(render, target, weight, w, h)
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE)
+		post = polishLoss(render, target, weight, w, h, false)
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE, false)
 		adamStep(ps, opt, it+1, w, h, 1)
 		last := it == opt.Iters-1
 		if (it+1)%checkEvery == 0 || last {
-			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false)
 			if polishDebug {
 				applog.Printf("polish-debug(cpu) it=%d tau=%.3f hard=%.1f best=%.1f soft=%.1f", it+1, tau, hl, bestHard, post)
 			}
@@ -637,10 +660,10 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		if opt.OnProgress != nil {
 			opt.OnProgress(doneIters+it+1, doneIters+fineIters)
 		}
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, fineTau, opt.STE)
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, fineTau, opt.STE, opt.OKLab)
 		adamStep(ps, fineOpt, it+1, w, h, polishFineLRScale)
 		if (it+1)%polishFineCheck == 0 || it == fineIters-1 {
-			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false)
 			if polishDebug {
 				applog.Printf("polish-debug(cpu) fine it=%d hard=%.1f best=%.1f", it+1, hl, bestHard)
 			}
@@ -695,7 +718,7 @@ func restoreParams(ps []pshape, snap [][10]float64) {
 // "over" — exactly the engine's Apply — into render (scratch), and returns the
 // weighted SSE vs target. This is the loss we actually ship, so the polish optimises
 // toward it via best-hard tracking even though its gradients come from the soft render.
-func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h int) float64 {
+func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h int, oklab bool) float64 {
 	copy(render, base)
 	for si := range ps {
 		var fp [6]float32
@@ -732,7 +755,7 @@ func polishHardLoss(ps []pshape, base, target, weight, render []float32, w, h in
 			}
 		}
 	}
-	return polishLoss(render, target, weight, w, h)
+	return polishLoss(render, target, weight, w, h, oklab)
 }
 
 func maxIntF(a, b float64) float64 {
@@ -884,11 +907,16 @@ func sigmoidCov(sdf, tau float64) float64 {
 }
 
 // polishLoss returns the weighted SSE of render vs target over all 4 channels.
-func polishLoss(render, target, weight []float32, w, h int) float64 {
+func polishLoss(render, target, weight []float32, w, h int, oklab bool) float64 {
 	var sum float64
 	for idx := 0; idx < w*h; idx++ {
 		wt := float64(weight[idx])
 		p := idx * 4
+		if oklab {
+			sum += okLabPixelLoss(float64(render[p]), float64(render[p+1]), float64(render[p+2]), float64(render[p+3]),
+				float64(target[p]), float64(target[p+1]), float64(target[p+2]), float64(target[p+3]), wt)
+			continue
+		}
 		for c := 0; c < 4; c++ {
 			d := float64(render[p+c] - target[p+c])
 			sum += wt * d * d
@@ -899,12 +927,18 @@ func polishLoss(render, target, weight []float32, w, h int) float64 {
 
 // polishBackward accumulates dLoss/dparam into each pshape's grad slice,
 // recomputing per-pixel gradients in a reverse (top-to-bottom) pass.
-func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste bool) {
+func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste, oklab bool) {
 	_ = base
-	// dL/dC_final = 2*weight*(C-target), per channel.
+	// dL/dC_final = 2*weight*(C-target) per channel (OKLab mode: 2*weight*Jᵀ*ΔLab — see oklab.go).
 	for idx := 0; idx < w*h; idx++ {
 		wt := float64(weight[idx])
 		p := idx * 4
+		if oklab {
+			dC[p+0], dC[p+1], dC[p+2], dC[p+3] = okLabPixelDC(
+				float64(render[p]), float64(render[p+1]), float64(render[p+2]), float64(render[p+3]),
+				float64(target[p]), float64(target[p+1]), float64(target[p+2]), float64(target[p+3]), wt)
+			continue
+		}
 		for c := 0; c < 4; c++ {
 			dC[p+c] = 2 * wt * float64(render[p+c]-target[p+c])
 		}

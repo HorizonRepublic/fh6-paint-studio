@@ -100,7 +100,7 @@ Buf g_seeds;
 int g_momentCap = 0;
 
 // ---- joint-polish state (built lazily by fp_polish_setup, freed by fp_polish_free) ----
-struct PolishPC { int32_t shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; };
+struct PolishPC { int32_t shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int32_t oklab; };
 const int PLOSS_GROUPS = 64; // loss reduction workgroups (host sums the partials)
 
 VkDescriptorSetLayout g_pDSL = VK_NULL_HANDLE;
@@ -109,7 +109,7 @@ VkPipeline g_pDcinit = VK_NULL_HANDLE, g_pLoss = VK_NULL_HANDLE; // shared-DSL p
 VkDescriptorPool g_pPool = VK_NULL_HANDLE;
 VkDescriptorSet  g_pSet  = VK_NULL_HANDLE;
 Buf g_pbase, g_prender, g_pbelow, g_pdC, g_pP, g_pcol, g_pkinds, g_ppgrad, g_ppartials;
-int g_pn = 0, g_pste = 0;
+int g_pn = 0, g_pste = 0, g_poklab = 0;
 VkDeviceSize g_belowCap = 0;
 
 // ---- tiled polish forward/hard: ONE dispatch, no barriers (its own DSL/PL/pool/set so it
@@ -615,7 +615,7 @@ double computeLoss() {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pLoss);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
-    PolishPC pc{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, 0.0f};
+    PolishPC pc{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, 0.0f, g_poklab};
     vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, PLOSS_GROUPS, 1, 1);
     flushBarrier();
@@ -988,6 +988,10 @@ API void fp_polish_setup(const float* base, int n) {
 
 API void fp_set_polish_ste(int on) { g_pste = on ? 1 : 0; }
 
+// fp_set_polish_oklab toggles the perceptual OKLab colour metric in the polish loss and
+// backward seed together (one flag keeps the optimisation self-consistent). Mirrors shim.cu.
+API void fp_set_polish_oklab(int on) { g_poklab = on ? 1 : 0; }
+
 API void fp_polish_upload(const double* P, const double* col, const int* kinds,
                           const int* bbx, const long long* boff, long long belowTotal) {
     if (!g_device || g_pn < 1) return;
@@ -1076,7 +1080,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     // dC = 2*weight*(render-target) — full image, shared polish DSL
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pDcinit);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
-    PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau};
+    PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab};
     vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcd), &pcd);
     vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
     cmdBarrierRW();

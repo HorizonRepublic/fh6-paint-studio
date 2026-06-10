@@ -260,8 +260,13 @@ func TestGoldenDiffPolish(t *testing.T) {
 	bg := model.RGBA{R: 0.4, G: 0.4, B: 0.4}
 	tau := 1.5
 
-	for _, ste := range []bool{false, true} {
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste)
+	for _, mode := range []struct{ ste, oklab bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		ste, oklab := mode.ste, mode.oklab
+		if oklab && !gpu.PolishSetOKLab(true) {
+			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
+			continue
+		}
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
@@ -278,6 +283,7 @@ func TestGoldenDiffPolish(t *testing.T) {
 			t.Fatal("DLL lacks fp_polish_hard_loss")
 		}
 		gpu.PolishFree()
+		gpu.PolishSetOKLab(false)
 
 		var maxRenderDiff float64
 		for i := range ref.Render {
@@ -287,13 +293,13 @@ func TestGoldenDiffPolish(t *testing.T) {
 			}
 		}
 		if maxRenderDiff > 2e-3 {
-			t.Errorf("[ste=%v] polish forward render max diff %.5f (cpu vs vk)", ste, maxRenderDiff)
+			t.Errorf("[ste=%v oklab=%v] polish forward render max diff %.5f (cpu vs vk)", ste, oklab, maxRenderDiff)
 		}
 		if !closeRel(float32(ref.Loss), float32(lossGPU), 2e-3, 1e-3) {
-			t.Errorf("[ste=%v] polish loss: cpu=%.5f vk=%.5f", ste, ref.Loss, lossGPU)
+			t.Errorf("[ste=%v oklab=%v] polish loss: cpu=%.5f vk=%.5f", ste, oklab, ref.Loss, lossGPU)
 		}
 		if !closeRel(float32(ref.HardLoss), float32(hardGPU), 2e-3, 1e-3) {
-			t.Errorf("[ste=%v] polish HARD loss: cpu=%.5f vk=%.5f", ste, ref.HardLoss, hardGPU)
+			t.Errorf("[ste=%v oklab=%v] polish HARD loss: cpu=%.5f vk=%.5f", ste, oklab, ref.HardLoss, hardGPU)
 		}
 		var mism int
 		for i := 0; i < ref.N*10; i++ {
@@ -302,7 +308,7 @@ func TestGoldenDiffPolish(t *testing.T) {
 			m := math.Max(math.Abs(a), math.Abs(b))
 			if d > 1e-4 && d > 1.5e-2*m {
 				if mism++; mism <= 12 {
-					t.Errorf("[ste=%v] polish grad[%d] (shape %d slot %d): cpu=%.6f vk=%.6f", ste, i, i/10, i%10, a, b)
+					t.Errorf("[ste=%v oklab=%v] polish grad[%d] (shape %d slot %d): cpu=%.6f vk=%.6f", ste, oklab, i, i/10, i%10, a, b)
 				}
 			}
 		}

@@ -3,6 +3,7 @@
 // polish_loss.comp — weighted SSE of render vs target, reduced in double. Each of the
 // G workgroups strides its share of pixels (fixed-order, deterministic), writes one
 // partial; the host sums the G partials. Mirrors engine.polishLoss.
+// pc.oklab = the perceptual variant: w*(dL^2+da^2+db^2+dalpha^2) in OKLab (engine.okLabPixelLoss).
 
 layout(local_size_x = 128) in;
 layout(std430, binding = 3) readonly  buffer Rb { float render[]; };
@@ -10,10 +11,31 @@ layout(std430, binding = 7) writeonly buffer Lb { double partials[]; };
 layout(std430, binding = 8) readonly  buffer Tb { float target[]; };
 layout(std430, binding = 9) readonly  buffer Wb { float weightb[]; };
 layout(push_constant) uniform PC {
-    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau;
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab;
 } pc;
 
 shared double sh[128];
+
+// dcbrt — double cube root: GLSL fp64 has no transcendental builtins, so seed from the
+// float pow and Newton-refine twice in double (~1e-15 rel, golden-diff-tight vs math.Cbrt).
+double dcbrt(double x) {
+    if (x < 1e-30) return 0.0LF;
+    double c = double(pow(float(x), 0.33333334));
+    c -= (c * c * c - x) / (3.0LF * c * c);
+    c -= (c * c * c - x) / (3.0LF * c * c);
+    return c;
+}
+
+// toOKLab — OKLab from the linear working space (mirrors engine.linearToOKLab).
+dvec3 toOKLab(double r, double g, double b) {
+    double l = 0.4122214708LF * r + 0.5363325363LF * g + 0.0514459929LF * b;
+    double m = 0.2119034982LF * r + 0.6806995451LF * g + 0.1073969566LF * b;
+    double s = 0.0883024619LF * r + 0.2817188376LF * g + 0.6299787005LF * b;
+    double lc = dcbrt(l), mc = dcbrt(m), sc = dcbrt(s);
+    return dvec3(0.2104542553LF * lc + 0.7936177850LF * mc - 0.0040720468LF * sc,
+                 1.9779984951LF * lc - 2.4285922050LF * mc + 0.4505937099LF * sc,
+                 0.0259040371LF * lc + 0.7827717662LF * mc - 0.8086757660LF * sc);
+}
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
@@ -22,6 +44,14 @@ void main() {
     for (int idx = int(gl_GlobalInvocationID.x); idx < pc.npix; idx += stride) {
         double wt = double(weightb[idx]);
         int p = idx * 4;
+        if (pc.oklab != 0) {
+            dvec3 rl = toOKLab(double(render[p]), double(render[p + 1]), double(render[p + 2]));
+            dvec3 tl = toOKLab(double(target[p]), double(target[p + 1]), double(target[p + 2]));
+            dvec3 d3 = rl - tl;
+            double dAl = double(render[p + 3]) - double(target[p + 3]);
+            acc += wt * (d3.x * d3.x + d3.y * d3.y + d3.z * d3.z + dAl * dAl);
+            continue;
+        }
         for (int c = 0; c < 4; c++) {
             double d = double(render[p + c]) - double(target[p + c]);
             acc += wt * d * d;

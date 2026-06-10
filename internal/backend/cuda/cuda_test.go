@@ -269,8 +269,13 @@ func TestGoldenDiffPolish(t *testing.T) {
 	// Run both coverage modes: soft (the original) and STE (hard forward + soft surrogate
 	// gradient). The mixed scene's optGeo shapes have edges inside their expanded bbox, so
 	// the STE split-guard outer-band geometry gradient is exercised.
-	for _, ste := range []bool{false, true} {
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste)
+	for _, mode := range []struct{ ste, oklab bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+		ste, oklab := mode.ste, mode.oklab
+		if oklab && !gpu.PolishSetOKLab(true) {
+			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
+			continue
+		}
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
@@ -290,6 +295,7 @@ func TestGoldenDiffPolish(t *testing.T) {
 			t.Fatal("DLL lacks fp_polish_hard_loss (rebuild fh6cuda.dll)")
 		}
 		gpu.PolishFree()
+		gpu.PolishSetOKLab(false)
 
 		// Forward render: float32 composite on both -> tight.
 		var maxRenderDiff float64
@@ -300,7 +306,7 @@ func TestGoldenDiffPolish(t *testing.T) {
 			}
 		}
 		if maxRenderDiff > 2e-3 {
-			t.Errorf("[ste=%v] polish forward render max diff %.5f (cpu vs cuda)", ste, maxRenderDiff)
+			t.Errorf("[ste=%v oklab=%v] polish forward render max diff %.5f (cpu vs cuda)", ste, oklab, maxRenderDiff)
 		}
 		// Loss: weighted SSE, double both.
 		if !closeRel(float32(ref.Loss), float32(lossGPU), 2e-3, 1e-3) {

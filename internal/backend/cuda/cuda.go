@@ -61,6 +61,7 @@ type CUDA struct {
 	procSetOrient  *windows.Proc // optional: fp_set_orient
 	procSetBound   *windows.Proc // optional: fp_set_boundary_dist (boundary-aware radius)
 	procPolSTE     *windows.Proc // optional: fp_set_polish_ste (straight-through coverage)
+	procPolOKLab   *windows.Proc // optional: fp_set_polish_oklab (perceptual OKLab polish loss)
 	procPolSync    *windows.Proc // optional: fp_polish_sync (cudaDeviceSynchronize, for phase profiling)
 	procPolHard    *windows.Proc // optional: fp_polish_hard_loss (GPU best-hard render; nil -> CPU fallback)
 	// optional: joint-polish device primitives (nil on older DLLs)
@@ -143,6 +144,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procPolSync, _ = dll.FindProc("fp_polish_sync")
 	g.procPolHard, _ = dll.FindProc("fp_polish_hard_loss")
 	g.procPolSTE, _ = dll.FindProc("fp_set_polish_ste")
+	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")
 	g.procWarpEval, _ = dll.FindProc("fp_set_warp_eval")
 	g.procGradients, _ = dll.FindProc("fp_set_gradients")
 	g.procCoarse, _ = dll.FindProc("fp_set_coarse")
@@ -466,6 +468,17 @@ func (g *CUDA) PolishSetSTE(on bool) {
 	if g.procPolSTE != nil {
 		g.procPolSTE.Call(uintptr(b2i32(on)))
 	}
+}
+
+// PolishSetOKLab switches the device polish loss/dcinit/hard kernels to the perceptual
+// OKLab colour metric. Reports whether the DLL supports it (the engine falls back to the
+// plain SSE loss when false, keeping host and device objectives consistent).
+func (g *CUDA) PolishSetOKLab(on bool) bool {
+	if g.procPolOKLab == nil {
+		return false
+	}
+	g.procPolOKLab.Call(uintptr(b2i32(on)))
+	return true
 }
 
 // PolishSync blocks until all queued polish kernels finish (cudaDeviceSynchronize) so the

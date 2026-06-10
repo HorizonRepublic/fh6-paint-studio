@@ -1235,17 +1235,47 @@ static float* d_pdcsnap = nullptr;           // tiled backward Pass A: dC-as-see
 static int  g_pN = 0;
 static long g_pbelowCap = 0;
 static int  g_polishSTE = 0; // straight-through: hard forward coverage, soft surrogate gradient
+static int  g_polishOKLab = 0; // perceptual loss: OKLab colour distance in loss/dcinit/hard (mirrors engine/oklab.go)
+
+// d_linearToOKLab — OKLab from the linear working space (Ottosson 2020). Mirrors
+// engine.linearToOKLab; double precision so the golden-diff stays tight.
+__device__ inline void d_linearToOKLab(double r, double g, double b, double* L, double* A, double* B) {
+    double l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    double m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    double s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+    double lc = cbrt(l), mc = cbrt(m), sc = cbrt(s);
+    *L = 0.2104542553 * lc + 0.7936177850 * mc - 0.0040720468 * sc;
+    *A = 1.9779984951 * lc - 2.4285922050 * mc + 0.4505937099 * sc;
+    *B = 0.0259040371 * lc + 0.7827717662 * mc - 0.8086757660 * sc;
+}
+
+// d_cbrtSq — cbrt(max(x,eps))^2, the clamped cube-root-derivative denominator (engine.cbrtSq).
+__device__ inline double d_cbrtSq(double x) {
+    if (x < 1e-7) x = 1e-7;
+    double c = cbrt(x);
+    return c * c;
+}
 
 // polishLossReduce sums the weighted 4-channel SSE of render vs the (eval-shared) target,
 // writing each block's partial to lpartial[blockIdx.x] (NO atomic). polishLossFinal then sums
 // the partials in fixed block order — deterministic (the old atomicAdd into a scalar jittered).
+// oklab = the perceptual variant: w*(dL^2+da^2+db^2+dalpha^2) (engine.okLabPixelLoss).
 __global__ void polishLossReduce(const float* render, const float* target, const float* weight,
-                                 int N, double* lpartial) {
+                                 int N, double* lpartial, int oklab) {
     __shared__ double sh[BLOCK];
     double s = 0.0;
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < N; idx += gridDim.x * blockDim.x) {
         double wt = (double)weight[idx];
         int p = idx * 4;
+        if (oklab) {
+            double rL, rA, rB, tL, tA, tB;
+            d_linearToOKLab((double)render[p], (double)render[p + 1], (double)render[p + 2], &rL, &rA, &rB);
+            d_linearToOKLab((double)target[p], (double)target[p + 1], (double)target[p + 2], &tL, &tA, &tB);
+            double dL = rL - tL, dA = rA - tA, dB = rB - tB;
+            double dAl = (double)render[p + 3] - (double)target[p + 3];
+            s += wt * (dL * dL + dA * dA + dB * dB + dAl * dAl);
+            continue;
+        }
         for (int c = 0; c < 4; c++) {
             double d = (double)render[p + c] - (double)target[p + c];
             s += wt * d * d;
@@ -1270,12 +1300,37 @@ __global__ void polishLossFinal(const double* lpartial, int blocks, double* loss
 
 // polishDCInit sets dC = 2*weight*(render-target) per channel (the loss gradient
 // w.r.t. the final composited color). Mirrors the head of polish.go polishBackward.
+// oklab = 2*weight*J^T*dLab for the colour channels (engine.okLabPixelDC).
 __global__ void polishDCInit(const float* render, const float* target, const float* weight,
-                            int N, float* dC) {
+                            int N, float* dC, int oklab) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
     double wt = (double)weight[idx];
     int p = idx * 4;
+    if (oklab) {
+        double rr = (double)render[p], rg = (double)render[p + 1], rb = (double)render[p + 2];
+        double l = 0.4122214708 * rr + 0.5363325363 * rg + 0.0514459929 * rb;
+        double m = 0.2119034982 * rr + 0.6806995451 * rg + 0.1073969566 * rb;
+        double s = 0.0883024619 * rr + 0.2817188376 * rg + 0.6299787005 * rb;
+        double lc = cbrt(l), mc = cbrt(m), sc = cbrt(s);
+        double rL = 0.2104542553 * lc + 0.7936177850 * mc - 0.0040720468 * sc;
+        double rA = 1.9779984951 * lc - 2.4285922050 * mc + 0.4505937099 * sc;
+        double rB = 0.0259040371 * lc + 0.7827717662 * mc - 0.8086757660 * sc;
+        double tL, tA, tB;
+        d_linearToOKLab((double)target[p], (double)target[p + 1], (double)target[p + 2], &tL, &tA, &tB);
+        double dL = 2.0 * wt * (rL - tL), dA = 2.0 * wt * (rA - tA), dB = 2.0 * wt * (rB - tB);
+        double gl = dL * 0.2104542553 + dA * 1.9779984951 + dB * 0.0259040371;
+        double gm = dL * 0.7936177850 - dA * 2.4285922050 + dB * 0.7827717662;
+        double gs = -dL * 0.0040720468 + dA * 0.4505937099 - dB * 0.8086757660;
+        gl /= 3.0 * d_cbrtSq(l);
+        gm /= 3.0 * d_cbrtSq(m);
+        gs /= 3.0 * d_cbrtSq(s);
+        dC[p + 0] = (float)(gl * 0.4122214708 + gm * 0.2119034982 + gs * 0.0883024619);
+        dC[p + 1] = (float)(gl * 0.5363325363 + gm * 0.6806995451 + gs * 0.2817188376);
+        dC[p + 2] = (float)(gl * 0.0514459929 + gm * 0.1073969566 + gs * 0.6299787005);
+        dC[p + 3] = (float)(2.0 * wt * ((double)render[p + 3] - (double)target[p + 3]));
+        return;
+    }
     for (int c = 0; c < 4; c++)
         dC[p + c] = (float)(2.0 * wt * ((double)render[p + c] - (double)target[p + c]));
 }
@@ -1570,6 +1625,10 @@ API void fp_set_coarse_fp16(int on) { g_coarseFP16 = on ? 1 : 0; }
 // forward composite (the exact deliverable) with the soft surrogate gradient, 0 = soft.
 API void fp_set_polish_ste(int on) { g_polishSTE = on ? 1 : 0; }
 
+// fp_set_polish_oklab toggles the perceptual OKLab colour metric in the polish loss, hard loss
+// and backward seed together (one flag, so the optimisation stays self-consistent).
+API void fp_set_polish_oklab(int on) { g_polishOKLab = on ? 1 : 0; }
+
 // fp_set_orient uploads the per-pixel edge-orientation map (len w*h, degrees) used
 // by genKernel to seed elongated shapes along local edges. Called once by the engine
 // before the greedy loop (the map is fixed for a run).
@@ -1798,7 +1857,7 @@ API void fp_polish_loss(double* out) {
     int npix = g_w * g_h;
     int blocks = (npix + BLOCK - 1) / BLOCK;
     if (blocks > 1024) blocks = 1024;
-    polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npix, d_ploss_partial);
+    polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npix, d_ploss_partial, g_polishOKLab);
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
@@ -1816,7 +1875,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     int npx = g_w * g_h;
     int blocks = (npx + BLOCK - 1) / BLOCK;
     if (blocks > 1024) blocks = 1024;
-    polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npx, d_ploss_partial);
+    polishLossReduce<<<blocks, BLOCK>>>(d_prender, d_target, d_weight, npx, d_ploss_partial, g_polishOKLab);
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
@@ -1831,7 +1890,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     // gradient partials default to 0 (empty (shape,block) slots write 0 themselves, but keep the
     // memset defensive for degenerate shapes / the fixed-order sum).
     cudaMemset(d_pgrad_partial, 0, (size_t)g_pN * PMAXBLK * 10 * sizeof(double));
-    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC);
+    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab);
     // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
     int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
     polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
