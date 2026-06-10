@@ -306,7 +306,7 @@ func loop(w *app.Window) error {
 				case runner.Done:
 					shapes, canvas := ev.Result.Shapes, ev.Canvas
 					if hybridInk > 0 && curGen != nil { // hybrid: lay the FDoG designed outline ON TOP of the fill
-						if lines := hybrid.Ink(curGen, hybridInk); len(lines) > 0 {
+						if lines := hybrid.Ink(curGen, hybridInk, false); len(lines) > 0 {
 							shapes = append(shapes, lines...)
 							buf := imageio.RenderFH6(shapes, curGen.HasTransparency, curGen.W, curGen.H, 2)
 							img := image.NewNRGBA(image.Rect(0, 0, curGen.W, curGen.H))

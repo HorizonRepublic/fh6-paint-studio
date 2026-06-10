@@ -42,6 +42,7 @@ type InkConfig struct {
 	SuppressBg   bool    `json:"suppressBg"`   // skip lines sitting mostly in the border-connected light background (no stray edge marks in the white margin)
 	BgLuma       float64 `json:"bgLuma"`       // luma threshold for "background light" (used by SuppressBg)
 	StitchTurn   float64 `json:"stitchTurn"`   // through-junction stitch: max bend (deg from straight) a stroke may take crossing a node (0=off); merges fragmented branches into long coherent strokes
+	RidgeOnly    float64 `json:"ridgeOnly"`    // only ink what the artist inked (0=off): drop a polyline unless ≥ this fraction of its samples sit on a true luma RIDGE of the source (darker than BOTH sides along the normal). FDoG also responds to one-sided STEP edges — the rim of a bright glow on a dark face — which a drawn line is not; this gates those invented outlines out. ~0.4-0.6.
 }
 
 func inkDefaults() InkConfig {
@@ -114,8 +115,12 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 	if e.cfg.SuppressBg {
 		bg = stylize.BackgroundMask(src, e.cfg.BgLuma)
 	}
+	var srcLuma []float64
+	if e.cfg.RidgeOnly > 0 {
+		srcLuma = lumaOf(src)
+	}
 	var shapes []model.Shape
-	skipped := 0
+	skipped, ridgeSkipped := 0, 0
 	for _, poly := range polys {
 		if len(shapes) >= budget {
 			break
@@ -127,6 +132,10 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 		sp := simplify(smoothPolyline(poly, e.cfg.LineSmooth), e.cfg.Simplify)
 		if len(sp) < 2 {
 			continue
+		}
+		if srcLuma != nil && ridgeFraction(srcLuma, src.W, src.H, sp, hw) < e.cfg.RidgeOnly {
+			ridgeSkipped++
+			continue // a step-edge response (glow rim, soft contrast boundary) — the source drew no line here
 		}
 		// Coverage dedup: a polyline already mostly painted by earlier (longer) lines is a redundant
 		// retrace / parallel branch — skip it, freeing its budget for un-drawn lines.
@@ -140,7 +149,7 @@ func (e *inkEngine) Generate(ctx *stylize.Context) ([]model.Shape, error) {
 		emitOutline(sp, 0, 0, hw, ink, scfg, &shapes, budget)
 	}
 	if os.Getenv("INK_DEBUG") != "" {
-		fmt.Fprintf(os.Stderr, "[ink] raw=%d stitched=%d shapes=%d dedup-skipped=%d\n", rawPolys, len(polys), len(shapes), skipped)
+		fmt.Fprintf(os.Stderr, "[ink] raw=%d stitched=%d shapes=%d dedup-skipped=%d ridge-skipped=%d\n", rawPolys, len(polys), len(shapes), skipped, ridgeSkipped)
 	}
 	return shapes, nil
 }
@@ -158,6 +167,39 @@ func polyInBg(poly [][2]float64, bg []bool, w, h int) float64 {
 		}
 	}
 	return float64(in) / float64(len(poly))
+}
+
+// ridgeFraction returns the fraction of polyline samples (≈2px steps) sitting on a true luma RIDGE
+// of the source — darker than BOTH sides at ±(2·hw+1) px along the local segment normal. A drawn
+// ink line is a ridge; the rim of a bright glow on a dark face is a one-sided STEP edge and fails.
+func ridgeFraction(luma []float64, w, h int, sp [][2]float64, hw float64) float64 {
+	const margin = 0.05
+	d := math.Max(2.5, 2*hw+1)
+	total, ridge := 0, 0
+	for i := 1; i < len(sp); i++ {
+		ax, ay, bx, by := sp[i-1][0], sp[i-1][1], sp[i][0], sp[i][1]
+		segLen := math.Hypot(bx-ax, by-ay)
+		if segLen < 1e-9 {
+			continue
+		}
+		nx, ny := -(by-ay)/segLen, (bx-ax)/segLen
+		steps := int(segLen/2) + 1
+		for s := 0; s <= steps; s++ {
+			t := float64(s) / float64(steps)
+			cx, cy := ax+(bx-ax)*t, ay+(by-ay)*t
+			lc := sampleBilinearPlane(luma, w, h, cx, cy)
+			l1 := sampleBilinearPlane(luma, w, h, cx+nx*d, cy+ny*d)
+			l2 := sampleBilinearPlane(luma, w, h, cx-nx*d, cy-ny*d)
+			total++
+			if lc < l1-margin && lc < l2-margin {
+				ridge++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(ridge) / float64(total)
 }
 
 // polyInkedFraction samples the polyline (≈1px steps) and returns the fraction of samples whose footprint

@@ -43,11 +43,17 @@ func AutoInkCeiling(prep *imageio.Prepared, total int, mode string) int {
 // Ink runs the stylizer's FDoG ink engine over the source and returns its clean centerlines (the hybrid's
 // designed-outline layer, up to inkBudget lines), dropping the stylizer background shape. Append these
 // AFTER the geometrize fill so they composite on top. Returns nil on error or inkBudget<=0.
-func Ink(prep *imageio.Prepared, inkBudget int) []model.Shape {
+// ridgeOnly switches to the faithful variant: only lines the source actually drew (luma ridges) —
+// step-edge responses like the rim of a bright glow on a dark face are dropped instead of outlined.
+func Ink(prep *imageio.Prepared, inkBudget int, ridgeOnly bool) []model.Shape {
 	if inkBudget <= 0 {
 		return nil
 	}
-	geo, err := stylize.Run(prepToStylize(prep), "ink-fdog", inkBudget)
+	preset := "ink-fdog"
+	if ridgeOnly {
+		preset = "ink-fdog-ridge"
+	}
+	geo, err := stylize.Run(prepToStylize(prep), preset, inkBudget)
 	if err != nil {
 		applog.Printf("hybrid-ink: %v (skipping lines)", err)
 		return nil

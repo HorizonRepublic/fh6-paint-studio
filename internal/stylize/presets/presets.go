@@ -35,6 +35,12 @@ func init() {
 	stylize.RegisterPreset(stylize.Preset{Name: "ink-fdog", Stages: []stylize.Stage{
 		{Engine: "ink", Config: json.RawMessage(`{"method":"fdog","thresh":0.75,"width":0.5,"widthBias":-0.5}`)},
 	}})
+	// ink-fdog-ridge — ink-fdog + the ridge gate: only lines the SOURCE actually drew (luma ridges);
+	// one-sided step edges (glow rims, soft contrast boundaries) are dropped instead of outlined.
+	// The faithful variant for owner A/B vs the stylised invented-outline default.
+	stylize.RegisterPreset(stylize.Preset{Name: "ink-fdog-ridge", Stages: []stylize.Stage{
+		{Engine: "ink", Config: json.RawMessage(`{"method":"fdog","thresh":0.75,"width":0.5,"widthBias":-0.5,"ridgeOnly":0.5}`)},
+	}})
 	// outline — the older region-boundary stroke engine, kept as an alternative line source.
 	stylize.RegisterPreset(stylize.Preset{Name: "outline", Smooth: dtSmooth, Stages: []stylize.Stage{
 		{Engine: "stroke"},
