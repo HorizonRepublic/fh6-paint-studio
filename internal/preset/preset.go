@@ -467,7 +467,13 @@ type ModeDefaults struct {
 func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDefaults {
 	flat := PresetMode(resolvedMode) == "flat"
 	d := ModeDefaults{
-		AlphaMin:    0.40,
+		// Alpha floor 0.30 for ALL organic content (was 0.40). Photo: monotone-better downward on
+		// both photo bench imgs (smoother tonal ramps, all metrics agree). Anime: 0.30 vs 0.40
+		// replicated across 5 bank imgs × 3 seeds = 6 wins / 4 ties / 0 losses (img_5 wins on every
+		// seed, typically −5%); the seed-to-seed variance dwarfs finer tuning, and the eye shows
+		// smoother iris/skin ramps with no crispness loss. A cel/painterly auto-split was probed
+		// and REFUTED — no Analyze feature separates the preferences; it is one default, just lower.
+		AlphaMin:    0.30,
 		KindWeights: []float32{0.5, 0.4, 0.1}, // organic + textured flat: triangle-rich
 		AspectMax:   6,
 		PolishIters: 200,
@@ -478,13 +484,6 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 	switch PresetMode(resolvedMode) {
 	case "photo":
 		d.WeightStr = 0.40
-		// Photo gradients want a LOWER alpha floor than cel art: more very-translucent layers build
-		// smoother tonal ramps at the same budget. Measured monotone across the floor grid on both
-		// photo bench images (cat: weighted −2.1%, ΔE/SSIM/image-SSE all better at 0.2-0.3; car:
-		// −4.1% weighted at 0.3) — restoring the per-content split the 3-preset unification lost.
-		// anime keeps 0.40: its content SPLITS (cel img_5 prefers 0.55 — crisper; painterly img_24
-		// prefers 0.25 — smoother), so the middle stays the right single default there.
-		d.AlphaMin = 0.30
 	case "flat":
 		d.WeightStr = 0
 	default: // anime
