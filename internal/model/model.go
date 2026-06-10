@@ -115,9 +115,14 @@ func (c Candidate) ToShape(score float64) Shape {
 	}
 }
 
-// normAngle rounds degrees into [0,360) (collapsing IEEE-754 -0 to +0).
+// normAngle rounds degrees to 0.01° into [0,360) (collapsing IEEE-754 -0 to +0). Sub-degree
+// precision is kept on purpose: the in-game rotation field is a float (the mask path already
+// injects fractional rot), and whole-degree rounding measurably costs quality — the polish
+// optimises continuous angles, and rounding 3000 of them to integers raised the re-rendered
+// error ~6-9% (the "snap gap"). 0.01° is far below sub-pixel at any canvas size while keeping
+// the exported JSON compact.
 func normAngle(deg float32) float64 {
-	a := math.Mod(math.Round(float64(deg)), 360)
+	a := math.Mod(math.Round(float64(deg)*100)/100, 360)
 	if a < 0 {
 		a += 360
 	}
