@@ -2,11 +2,16 @@ package engine
 
 import (
 	"math"
+	"os"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
 )
+
+// polishDebug (FH6_POLISH_DEBUG=1) traces the best-hard trajectory during the refinement loop.
+var polishDebug = os.Getenv("FH6_POLISH_DEBUG") != ""
 
 // Joint differentiable "polish" pass — breaks the greedy plateau that pure greedy
 // placement cannot. After greedy placement, ALL shapes are refined together by
@@ -27,6 +32,17 @@ const polishDeg2Rad = math.Pi / 180
 // before the payoff. Only past this progress fraction does the hard loss genuinely converge,
 // making a sub-margin plateau a real signal to stop.
 const polishEarlyMinProgress = 0.6
+
+// Fine-exploit phase knobs (shared by Polish and PolishWithBackend — see the phase comment in
+// PolishWithBackend): a short low-LR descent from the best point seen, at a fixed near-final tau.
+const (
+	polishFineLRScale = 0.1 // fraction of the main-loop learning rates
+	polishFineTauMin  = 0.2 // gradient-surrogate softness floor (STE keeps the forward hard regardless)
+	polishFineCheck   = 5   // hard-render best-tracking cadence (iters)
+)
+
+// polishFineIters sizes the fine-exploit phase from the main-loop budget.
+func polishFineIters(iters int) int { return maxInt(30, iters/2) }
 
 // PolishOptions configures the joint refinement. Zero value -> DefaultPolishOptions.
 type PolishOptions struct {
@@ -379,12 +395,15 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 				copy(ps[i].grad[:], hGrad[i*10:i*10+10])
 			}
 		})
-		tick(&tAdam, func() { adamStep(ps, opt, it+1, w, h) })
+		tick(&tAdam, func() { adamStep(ps, opt, it+1, w, h, 1) })
 		if (it+1)%checkEvery == 0 || last {
 			tick(&tHard, func() {
 				// Re-upload: Adam just mutated ps on the host; the device still holds this
 				// iter's pre-Adam params, so refresh them before the GPU hard render.
 				hl := hardLoss(tau, true)
+				if polishDebug {
+					applog.Printf("polish-debug it=%d tau=%.3f hard=%.1f best=%.1f", it+1, tau, hl, bestHard)
+				}
 				if hl < bestHard {
 					bestHard = hl
 					bestP = snapshotParams(ps)
@@ -409,6 +428,70 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 				doneIters = it + 1
 				break // diminishing returns in the late phase — drop the wasteful tail
 			}
+		}
+	}
+	// FINE-EXPLOIT phase — restart from the best point seen and descend gently: fresh Adam
+	// moments, a small LR, and a fixed near-final tau. The main loop's tau anneal is a coarse
+	// soft excursion: worth it while the input leaves headroom, but on a tightly-fitted canvas
+	// (full-budget greedy) it wanders too far from the optimum to return within the budget —
+	// polish never re-beats its own input and the caller's gate discards the whole pass as a
+	// silent no-op. Exploiting from the best-known point (on a saturated input that IS the
+	// input itself) harvests the small colour/alpha and sub-pixel geometry wins the hard render
+	// still allows; on winning runs it squeezes a little further. Best-hard tracking continues
+	// throughout, so the phase can never lose ground.
+	restoreParams(ps, bestP)
+	for i := range ps {
+		ps[i].m, ps[i].v = [10]float64{}, [10]float64{}
+	}
+	fineIters := polishFineIters(opt.Iters)
+	fineTau := math.Max(opt.Tau1, polishFineTauMin)
+	fineOpt := opt
+	fineOpt.Iters = fineIters // keys adamStep's warmup ramp to the fine budget
+	fineGained, fineZero := false, 0
+	for it := 0; it < fineIters; it++ {
+		last := it == fineIters-1
+		tick(&tUpload, func() { upload(fineTau) })
+		tick(&tFwd, func() { accel.PolishForward(fineTau, hBBX); accel.PolishSync() })
+		if prevRd != nil && time.Since(lastPrev) >= opt.previewInterval() {
+			lastPrev = time.Now()
+			prevRd.PolishReadRender(prevBuf)
+			opt.OnPreview(prevBuf, w, h)
+		}
+		if opt.OnProgress != nil {
+			opt.OnProgress(doneIters+it+1, doneIters+fineIters)
+		}
+		tick(&tBwd, func() { accel.PolishBackward(fineTau, hBBX); accel.PolishSync() })
+		tick(&tGrad, func() {
+			accel.PolishReadGrad(hGrad)
+			for i := range ps {
+				copy(ps[i].grad[:], hGrad[i*10:i*10+10])
+			}
+		})
+		tick(&tAdam, func() { adamStep(ps, fineOpt, it+1, w, h, polishFineLRScale) })
+		if (it+1)%polishFineCheck == 0 || last {
+			tick(&tHard, func() {
+				hl := hardLoss(fineTau, true)
+				if polishDebug {
+					applog.Printf("polish-debug fine it=%d hard=%.1f best=%.1f", it+1, hl, bestHard)
+				}
+				if hl < bestHard {
+					bestHard = hl
+					bestP = snapshotParams(ps)
+					fineGained, fineZero = true, 0
+				} else {
+					fineZero++
+				}
+			})
+			// Give-up: a truly saturated input (greedy already at the budget-bound optimum) yields
+			// nothing here either — if the first several checks bring zero gain, stop burning time.
+			// Once ANY fine gain lands the phase runs to completion (it is in productive terrain).
+			if !fineGained && fineZero >= 6 {
+				doneIters += it + 1
+				break
+			}
+		}
+		if last {
+			doneIters += fineIters
 		}
 	}
 	restoreParams(ps, bestP)
@@ -504,10 +587,13 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		}
 		post = polishLoss(render, target, weight, w, h)
 		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE)
-		adamStep(ps, opt, it+1, w, h)
+		adamStep(ps, opt, it+1, w, h, 1)
 		last := it == opt.Iters-1
 		if (it+1)%checkEvery == 0 || last {
 			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+			if polishDebug {
+				applog.Printf("polish-debug(cpu) it=%d tau=%.3f hard=%.1f best=%.1f soft=%.1f", it+1, tau, hl, bestHard, post)
+			}
 			if hl < bestHard {
 				bestHard = hl
 				bestP = snapshotParams(ps)
@@ -528,6 +614,52 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 				doneIters = it + 1
 				break // diminishing returns in the late phase — drop the wasteful tail
 			}
+		}
+	}
+	// FINE-EXPLOIT phase — mirrors PolishWithBackend (see the comment there): restart from the
+	// best point seen with fresh moments, a small LR, and a fixed near-final tau, so saturated
+	// inputs (where the tau-anneal excursion never pays back) still harvest the careful wins.
+	restoreParams(ps, bestP)
+	for i := range ps {
+		ps[i].m, ps[i].v = [10]float64{}, [10]float64{}
+	}
+	fineIters := polishFineIters(opt.Iters)
+	fineTau := math.Max(opt.Tau1, polishFineTauMin)
+	fineOpt := opt
+	fineOpt.Iters = fineIters // keys adamStep's warmup ramp to the fine budget
+	fineGained, fineZero := false, 0
+	for it := 0; it < fineIters; it++ {
+		polishForward(ps, base, render, below, bbx, w, h, fineTau, opt.STE)
+		if opt.OnPreview != nil && time.Since(lastPrevCPU) >= opt.previewInterval() {
+			lastPrevCPU = time.Now()
+			opt.OnPreview(render, w, h)
+		}
+		if opt.OnProgress != nil {
+			opt.OnProgress(doneIters+it+1, doneIters+fineIters)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, fineTau, opt.STE)
+		adamStep(ps, fineOpt, it+1, w, h, polishFineLRScale)
+		if (it+1)%polishFineCheck == 0 || it == fineIters-1 {
+			hl := polishHardLoss(ps, base, target, weight, hardScratch, w, h)
+			if polishDebug {
+				applog.Printf("polish-debug(cpu) fine it=%d hard=%.1f best=%.1f", it+1, hl, bestHard)
+			}
+			if hl < bestHard {
+				bestHard = hl
+				bestP = snapshotParams(ps)
+				fineGained, fineZero = true, 0
+			} else {
+				fineZero++
+			}
+			// Give-up mirror of PolishWithBackend: zero gain across the first several checks on a
+			// saturated input — stop burning time; any gain → run the phase to completion.
+			if !fineGained && fineZero >= 6 {
+				doneIters += it + 1
+				break
+			}
+		}
+		if it == fineIters-1 {
+			doneIters += fineIters
 		}
 	}
 	restoreParams(ps, bestP) // ship the best HARD point, not the final soft one
@@ -878,10 +1010,21 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 // adamStep applies one Adam update to every shape's parameters using the
 // gradients computed by polishBackward, with per-group learning rates and the
 // stability clamps from the design.
-func adamStep(ps []pshape, opt PolishOptions, step int, w, h int) {
+func adamStep(ps []pshape, opt PolishOptions, step int, w, h int, lrScale float64) {
 	const b1, b2, eps = 0.9, 0.999, 1e-8
 	bc1 := 1 - math.Pow(b1, float64(step))
 	bc2 := 1 - math.Pow(b2, float64(step))
+	// LR warmup. Adam's bias-corrected first step is ±lr regardless of the gradient magnitude
+	// (m̂/√v̂ = g/|g| at step 1), so iteration 1 kicks EVERY param of EVERY shape by its full
+	// learning rate at once. On a tightly-fitted greedy canvas (full-budget runs) that explodes
+	// the hard loss ~3× and the whole iteration budget is spent crawling back — polish never
+	// re-beats its own input, the gate discards it, and the pass is a silent no-op. Ramping the
+	// LR linearly over the first ~5% of the run keeps the early steps proportional while the
+	// moment estimates learn real directions, so the descent starts FROM the input basin.
+	warmup := 1.0
+	if ws := maxInt(5, opt.Iters/20); step < ws {
+		warmup = float64(step) / float64(ws)
+	}
 	for si := range ps {
 		s := &ps[si]
 		g := s.grad
@@ -907,7 +1050,7 @@ func adamStep(ps []pshape, opt PolishOptions, step int, w, h int) {
 			s.v[k] = b2*s.v[k] + (1-b2)*g[k]*g[k]
 			mh := s.m[k] / bc1
 			vh := s.v[k] / bc2
-			upd := lr[k] * mh / (math.Sqrt(vh) + eps)
+			upd := warmup * lrScale * lr[k] * mh / (math.Sqrt(vh) + eps)
 			if k < 6 {
 				s.P[k] -= upd
 			} else {

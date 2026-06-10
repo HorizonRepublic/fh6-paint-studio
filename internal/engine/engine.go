@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/model"
 )
@@ -177,6 +178,9 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	}
 	g2, _, _, _ := be.ErrorGrid()
 	postErr := sumGrid(g2)
+	if polishDebug {
+		applog.Printf("polish-debug gate: in=%.1f polished=%.1f (pre-soft=%.1f post-soft=%.1f) -> keep=%v", finalErr, postErr, pr.PreLoss, pr.PostLoss, postErr <= finalErr)
+	}
 	if tm != nil {
 		tm.Polish += time.Since(t0)
 		tm.PolishPre, tm.PolishPost = pr.PreLoss, pr.PostLoss
