@@ -71,6 +71,9 @@ func Run(be backend.Backend, opt Options) Result {
 			r.greedy() // ...then greedy fills the remaining budget with detail (two-phase economy)
 		}
 	} else {
+		if r.opt.GlyphPrepass && r.glyphs {
+			r.glyphPrepass()
+		}
 		r.greedy()
 	}
 	r.postProcess()
@@ -243,7 +246,7 @@ func newRun(be backend.Backend, opt Options) *run {
 	tm.Setup = time.Since(setupStart)
 
 	glyphs := false
-	if opt.GlyphDict {
+	if opt.GlyphDict || opt.GlyphPrepass {
 		if dme, ok := be.(deviceMaskEvaluator); ok && dme.MasksOnDevice() {
 			glyphs = true
 		}
@@ -363,7 +366,7 @@ func (r *run) greedy() {
 func (r *run) searchOne(progress float32, sampGrid []float32, penalty func(model.Candidate) float32) (model.Candidate, float32) {
 	w, h := r.w, r.h
 	best, bestScore := r.src.search(r, progress, sampGrid, penalty)
-	if r.glyphs {
+	if r.glyphs && r.opt.GlyphDict {
 		t0 := time.Now()
 		if gb, gs, ok := r.glyphPropose(progress, sampGrid, penalty); ok && gs < bestScore {
 			best, bestScore = gb, gs
