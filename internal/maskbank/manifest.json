@@ -324,6 +324,60 @@
    "alpha_w": 127.8,
    "alpha_h": 127.8,
    "file": "m_0068.png"
+  },
+  {
+   "alpha_h": 59.1,
+   "alpha_w": 59.1,
+   "file": "m_08a4.png",
+   "label": "arc-90-thin_08a4",
+   "native_h": 60.54,
+   "native_w": 60.54,
+   "word": 2212
+  },
+  {
+   "alpha_h": 52.6,
+   "alpha_w": 52.6,
+   "file": "m_08b4.png",
+   "label": "arc-90-mid_08b4",
+   "native_h": 53.87,
+   "native_w": 53.87,
+   "word": 2228
+  },
+  {
+   "alpha_h": 63.9,
+   "alpha_w": 63.9,
+   "file": "m_08ac.png",
+   "label": "arc-90-wide_08ac",
+   "native_h": 65.48,
+   "native_w": 65.48,
+   "word": 2220
+  },
+  {
+   "alpha_h": 59.1,
+   "alpha_w": 118.2,
+   "file": "m_08a3.png",
+   "label": "arc-180-thin_08a3",
+   "native_h": 60.54,
+   "native_w": 121,
+   "word": 2211
+  },
+  {
+   "alpha_h": 52.6,
+   "alpha_w": 105.2,
+   "file": "m_08b3.png",
+   "label": "arc-180-mid_08b3",
+   "native_h": 53.87,
+   "native_w": 107.74,
+   "word": 2227
+  },
+  {
+   "alpha_h": 63.9,
+   "alpha_w": 127.9,
+   "file": "m_08ab.png",
+   "label": "arc-180-wide_08ab",
+   "native_h": 65.48,
+   "native_w": 130.97,
+   "word": 2219
   }
  ]
 }

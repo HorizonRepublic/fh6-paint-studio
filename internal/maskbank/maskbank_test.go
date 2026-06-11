@@ -8,8 +8,8 @@ import (
 
 func TestBankLoaded(t *testing.T) {
 	all := All()
-	if len(all) != 36 {
-		t.Fatalf("bank has %d masks, want 36", len(all))
+	if len(all) != 42 {
+		t.Fatalf("bank has %d masks, want 42", len(all))
 	}
 	seen := map[uint16]bool{}
 	for _, e := range all {

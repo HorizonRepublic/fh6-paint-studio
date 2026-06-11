@@ -35,6 +35,12 @@ var arcWordHex = []uint16{
 	0x08a6, // arc-J1     — J curve
 	0x08ae, // arc-sweep  — long sweep
 	0x0145, // arc-J2     — tall J curve
+	0x08a4, // arc-90-thin  — quarter, fine stroke (fits the width cap on thin lines)
+	0x08b4, // arc-90-mid
+	0x08ac, // arc-90-wide
+	0x08a3, // arc-180-thin — half, fine stroke
+	0x08b3, // arc-180-mid
+	0x08ab, // arc-180-wide
 }
 
 var (
