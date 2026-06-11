@@ -462,6 +462,14 @@ func loop(w *app.Window) error {
 				st.Log = nil
 				// The working source IS the (optionally cropped) image, so generate on curPrep directly.
 				genPrep := curPrep
+				ch := st.Choices()
+				// Hi-res fit (flat/anime): re-decode the ENGINE input at up to genMaxRes — thin strokes
+				// at the display resolution degrade to ~1px of gray AA the search can neither detect nor
+				// cover. The display (and crop UI) stays at studioMaxRes.
+				if hi := hiResPrep(st, ch.Mode, viewAbs, genPrep.W, genPrep.H); hi != nil {
+					genPrep = hi
+					st.AppendLog(fmt.Sprintf("hi-res fit: engine input %dx%d (display stays at %dpx)", hi.W, hi.H, studioMaxRes))
+				}
 				runPadPx, runOrigW, runOrigH = 0, genPrep.W, genPrep.H
 				// Keep shapes inside image: always wrap the target in a transparent surround so the spill
 				// penalty bounds every shape on all four edges, then map the geometry/canvas back to the
@@ -478,7 +486,6 @@ func loop(w *app.Window) error {
 				runCancelled = false
 				runStart = time.Now()
 				tb.indeterminate() // instant taskbar feedback until the first progress tick
-				ch := st.Choices()
 				r := preset.Resolve(*genPrep, ch)
 				hybridInk = 0
 				if preset.IsHybridMode(ch.Mode) { // reserve part of the budget for the FDoG ink (appended in Done)
@@ -1037,6 +1044,47 @@ func loadCropRegion(path string, abs image.Rectangle) (*imageio.Prepared, *image
 		return nil, nil, err
 	}
 	return prep, nrgbaFromPrep(prep), nil
+}
+
+// genMaxRes is the engine-side fit resolution for the modes that benefit from it. Thin strokes at
+// studioMaxRes degrade to ~1px of gray AA the search can neither detect nor cover; fitting the same
+// budget at up to this long side measured (seed 1, NEXTGEN): line-art 3541px native −69% SSE, flat
+// 1560px −21%, anime 1920px −11% — with no low-view tradeoff and ≤2× wall. Photo measured a wash and
+// stays at studioMaxRes.
+const genMaxRes = 2000
+
+// hiResPrep re-decodes the current view for the ENGINE at genMaxRes when the mode benefits and the
+// source actually has more pixels than the display load kept. Returns nil to fit on the display-
+// resolution prep: photo/gaussian modes, sources at/below studioMaxRes, no source path (demo), or a
+// failed re-decode. The re-derivation mirrors the state exactly: un-cropped views go through the same
+// auto-crop (+checker-strip) pipeline as loadImage; crops re-use the crop tool's absolute-rect
+// primitive, so the engine sees the same content rectangle at a higher resolution.
+func hiResPrep(st *ui.AppState, mode string, viewAbs image.Rectangle, curW, curH int) *imageio.Prepared {
+	switch preset.PresetMode(mode) {
+	case "flat", "anime":
+	default:
+		return nil
+	}
+	if st.ImgPath == "" || (curW < studioMaxRes && curH < studioMaxRes) {
+		return nil // demo source, or the display load never hit the cap — nothing extra to gain
+	}
+	var (
+		prep *imageio.Prepared
+		err  error
+	)
+	if st.Cropped {
+		prep, err = imageio.LoadAbsRegion(st.ImgPath, genMaxRes, viewAbs)
+	} else {
+		prep, _, err = imageio.LoadAutoCropped(st.ImgPath, genMaxRes)
+	}
+	if err != nil {
+		st.AppendLog("hi-res fit unavailable (" + err.Error() + "); fitting at display resolution")
+		return nil
+	}
+	if prep.W <= curW && prep.H <= curH {
+		return nil // source had no extra pixels beyond the display load
+	}
+	return prep
 }
 
 func nrgbaFromPrep(prep *imageio.Prepared) *image.NRGBA {
