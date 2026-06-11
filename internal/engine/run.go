@@ -54,6 +54,7 @@ type run struct {
 	gh         int
 	sampler    *ErrorSampler
 	persist    *persistCtx
+	glyphs     bool // glyph-dictionary proposer active (Options.GlyphDict + a mask-capable backend)
 	initialErr float64
 	finalErr   float64
 }
@@ -240,6 +241,13 @@ func newRun(be backend.Backend, opt Options) *run {
 	kindCDF := buildKindCDF(kinds, kindWeights)
 	tm.Setup = time.Since(setupStart)
 
+	glyphs := false
+	if opt.GlyphDict {
+		if dme, ok := be.(deviceMaskEvaluator); ok && dme.MasksOnDevice() {
+			glyphs = true
+		}
+	}
+
 	return &run{
 		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm,
 		kinds: kinds, kindWeights: kindWeights, kindCDF: kindCDF,
@@ -249,7 +257,7 @@ func newRun(be backend.Backend, opt Options) *run {
 		orient:      orient, detailGrid: detailGrid, boundCtx: boundCtx,
 		devSearch: devSearch, devMoment: devMoment, src: newShapeSource(opt),
 		initCanvas: initCanvas, shapes: shapes, grid: grid, gw: gw, gh: gh,
-		sampler: sampler, persist: persist, initialErr: initialErr,
+		sampler: sampler, persist: persist, glyphs: glyphs, initialErr: initialErr,
 	}
 }
 
@@ -347,6 +355,13 @@ func (r *run) greedy() {
 func (r *run) searchOne(progress float32, sampGrid []float32, penalty func(model.Candidate) float32) (model.Candidate, float32) {
 	w, h := r.w, r.h
 	best, bestScore := r.src.search(r, progress, sampGrid, penalty)
+	if r.glyphs {
+		t0 := time.Now()
+		if gb, gs, ok := r.glyphPropose(progress, sampGrid, penalty); ok && gs < bestScore {
+			best, bestScore = gb, gs
+		}
+		r.tm.Evaluate += time.Since(t0)
+	}
 	for i := 0; i < r.rounds && bestScore < 0; i++ {
 		t0 := time.Now()
 		mut := MutateShape(r.rng, best, r.perRound, float32(w), float32(h), r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin)

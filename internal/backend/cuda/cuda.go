@@ -644,6 +644,10 @@ func (g *CUDA) SetWarpEval(on bool) {
 // SetGradients routes the eval to the block kernel so gradient kinds (KindGlow/KindDisk) get their
 // per-pixel-alpha branch. Call with the run's gradient flag before evaluating. No-op if the DLL
 // predates the export (then gradients require the CPU backend). Returns whether the export exists.
+// MasksOnDevice reports whether the dictionary-mask atlas is live, i.e. mask-word candidates
+// evaluate correctly on this backend (the engine's glyph proposer gates on it).
+func (g *CUDA) MasksOnDevice() bool { return g.masksOn }
+
 func (g *CUDA) SetGradients(on bool) bool {
 	if g.procGradients == nil {
 		return false
