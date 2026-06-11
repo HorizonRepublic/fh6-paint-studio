@@ -54,7 +54,8 @@ type run struct {
 	gh         int
 	sampler    *ErrorSampler
 	persist    *persistCtx
-	glyphs     bool // glyph-dictionary proposer active (Options.GlyphDict + a mask-capable backend)
+	salient    []bool // lazy saliency-quota cell mask (see saliency.go)
+	glyphs     bool   // glyph-dictionary proposer active (Options.GlyphDict + a mask-capable backend)
 	initialErr float64
 	finalErr   float64
 }
@@ -194,7 +195,7 @@ func newRun(be backend.Backend, opt Options) *run {
 	if detailStart <= 0 {
 		detailStart = defaultDetailStart
 	}
-	if opt.DetailStrength > 0 {
+	if opt.DetailStrength > 0 || opt.SaliencyQuota > 0 {
 		detailGrid = metric.DetailGrid(be.Target(), w, h, gw, gh)
 	}
 
@@ -299,6 +300,13 @@ func (r *run) greedy() {
 		// and the host sampler stay identical; the raw grid (gate/knee/progress) is untouched.
 		if r.persist != nil {
 			sampGrid = r.persist.apply(sampGrid)
+			r.sampler = NewErrorSampler(sampGrid, r.gw, r.gh, r.w, r.h)
+		}
+		// Saliency quota: the reserved tail of the budget samples ONLY inside the salient cells —
+		// a hard mask, not a bias, so the per-shape argmax must spend these shapes on the most
+		// visible detail. The error grid still ranks WITHIN the region and the accept gate stays raw.
+		if q := r.opt.SaliencyQuota; q > 0 && r.detailGrid != nil && progress > 1-float32(q) {
+			sampGrid = r.applySalient(sampGrid)
 			r.sampler = NewErrorSampler(sampGrid, r.gw, r.gh, r.w, r.h)
 		}
 		best, bestScore := r.searchOne(progress, sampGrid, penalty)
