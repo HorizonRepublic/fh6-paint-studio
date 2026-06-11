@@ -3,7 +3,7 @@ package model
 import "math"
 
 // ShapeKind identifies a candidate primitive. P-slot meaning is documented per kind.
-type ShapeKind uint8
+type ShapeKind uint16
 
 const (
 	KindEllipse   ShapeKind = iota // P = [cx, cy, rx, ry, thetaDeg, _]

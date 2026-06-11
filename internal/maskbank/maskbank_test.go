@@ -8,13 +8,13 @@ import (
 
 func TestBankLoaded(t *testing.T) {
 	all := All()
-	if len(all) != 42 {
-		t.Fatalf("bank has %d masks, want 42", len(all))
+	if len(all) != 465 {
+		t.Fatalf("bank has %d masks, want 465", len(all))
 	}
 	seen := map[uint16]bool{}
 	for _, e := range all {
-		if e.W != 256 || e.H != 256 {
-			t.Errorf("0x%04x dims %dx%d want 256x256", e.Word, e.W, e.H)
+		if (e.W != 256 || e.H != 256) && (e.W != 128 || e.H != 128) {
+			t.Errorf("0x%04x dims %dx%d want 256 or 128 square", e.Word, e.W, e.H)
 		}
 		if len(e.Cov) != e.W*e.H {
 			t.Errorf("0x%04x cov len %d want %d", e.Word, len(e.Cov), e.W*e.H)
