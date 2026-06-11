@@ -150,10 +150,10 @@ func wordForType(t int, p [6]float32) (uint16, bool) {
 	case model.TypeGradDisk:
 		return WordGradDisk, true
 	}
-	if t >= 0 && t <= 0xFFFF { // KindMask: Type is the dictionary word itself
-		if _, ok := model.MaskKind(uint16(t)); ok {
-			return uint16(t), true
-		}
+	// Raw/calibration is the word-probing path: any in-range word id passes verbatim, including
+	// ones not (yet) in the mask bank — probing unmapped catalog ranges is what calibration is for.
+	if t > 0 && t <= 0xFFFF {
+		return uint16(t), true
 	}
 	return 0, false
 }
