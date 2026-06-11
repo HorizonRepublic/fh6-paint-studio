@@ -139,8 +139,8 @@ func (s *AppState) settingsCard(gtx C) D {
 		layout.Rigid(s.budgetRow),
 		layout.Rigid(GapV(10).Layout),
 		layout.Rigid(func(gtx C) D {
-			return s.toggleRow(gtx, &s.Mono, "Single colour (logo / decal)", &s.MonoHint,
-				"For a FLAT single-colour brand logo or decal. Forces every shape to ONE solid colour (auto-detected from the logo) on a clean cutout, so there are no grey antialiased-edge shapes and no background box — just the crisp single-colour silhouette. Pairs with a low shape budget. Leave OFF for normal multi-colour images.")
+			return s.toggleRow(gtx, &s.SourceRes, "Use source resolution", &s.SourceResHint,
+				"OFF by default — large images are fitted at a fast working resolution. ON: the engine fits at the image's ORIGINAL resolution, so fine lines and small detail survive on big sources. Generation can take several times longer; use it when you want maximum quality. No effect on images at or below the working size.")
 		}),
 		layout.Rigid(func(gtx C) D {
 			if !preset.IsHybridMode(s.baseMode) { // the Artist line/fill dial only applies to the hybrids
@@ -258,8 +258,8 @@ func (s *AppState) advancedSection(gtx C) D {
 		}),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
-			return s.toggleRow(gtx, &s.SourceRes, "Use source resolution", &s.SourceResHint,
-				"OFF by default — large images are fitted at a fast working resolution. ON: the engine fits at the image's ORIGINAL resolution, so fine lines and small detail survive on big sources. Generation can take several times longer; use it when you want maximum quality. No effect on images at or below the working size.")
+			return s.toggleRow(gtx, &s.Mono, "Single colour (logo / decal)", &s.MonoHint,
+				"For a FLAT single-colour brand logo or decal. Forces every shape to ONE solid colour (auto-detected from the logo) on a clean cutout, so there are no grey antialiased-edge shapes and no background box — just the crisp single-colour silhouette. Pairs with a low shape budget. Leave OFF for normal multi-colour images.")
 		}),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
