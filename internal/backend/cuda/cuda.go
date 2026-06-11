@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
 
 	"golang.org/x/sys/windows"
@@ -66,6 +67,9 @@ type CUDA struct {
 	procPolSSIM    *windows.Proc // optional: fp_set_polish_ssim (SSIM additive polish loss term)
 	procPolSync    *windows.Proc // optional: fp_polish_sync (cudaDeviceSynchronize, for phase profiling)
 	procPolHard    *windows.Proc // optional: fp_polish_hard_loss (GPU best-hard render; nil -> CPU fallback)
+	procSetMasks   *windows.Proc // optional: fp_set_masks (dictionary-mask atlas; nil on older DLLs)
+	masksOn        bool          // atlas uploaded — mask-word candidates evaluate on device
+	gradOn         bool          // shadow of fp_set_gradients (block-kernel routing)
 	// optional: joint-polish device primitives (nil on older DLLs)
 	procPolSetup, procPolUpload, procPolFwd, procPolLoss, procPolBwd, procPolRdGrad, procPolRdRender, procPolFree *windows.Proc
 }
@@ -153,6 +157,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procGradients, _ = dll.FindProc("fp_set_gradients")
 	g.procCoarse, _ = dll.FindProc("fp_set_coarse")
 	g.procCoarseFP16, _ = dll.FindProc("fp_set_coarse_fp16")
+	g.procSetMasks, _ = dll.FindProc("fp_set_masks")
 	initProc, err := dll.FindProc("fp_init")
 	if err != nil {
 		g.Close()
@@ -166,7 +171,40 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 		g.Close() // fp_free releases any partial device allocations, then the DLL handle
 		return nil, fmt.Errorf("fp_init failed (code %d) — check GPU/CUDA", ret)
 	}
+	g.uploadMasks()
 	return g, nil
+}
+
+// uploadMasks ships the embedded mask bank to the device as one coverage atlas, enabling mask-word
+// candidates in Evaluate/Apply (kind = KindMaskBase+i -> atlas slot i, in registration order). On a
+// DLL without the export the bank stays host-only and mask candidates keep the reject sentinel.
+func (g *CUDA) uploadMasks() {
+	if g.procSetMasks == nil {
+		return
+	}
+	bank := maskbank.All()
+	if len(bank) == 0 {
+		return
+	}
+	var total int
+	for _, e := range bank {
+		total += e.W * e.H
+	}
+	atlas := make([]float32, 0, total)
+	meta := make([]int32, 0, len(bank)*3)
+	for _, e := range bank {
+		meta = append(meta, int32(len(atlas)), int32(e.W), int32(e.H))
+		atlas = append(atlas, e.Cov...)
+	}
+	ret, _, _ := g.procSetMasks.Call(
+		fptr(atlas), uintptr(len(atlas)),
+		uintptr(unsafe.Pointer(&meta[0])), uintptr(len(bank)),
+	)
+	runtime.KeepAlive(atlas)
+	runtime.KeepAlive(meta)
+	if ret == 0 {
+		g.masksOn = true
+	}
 }
 
 // fptr returns the address of a float32 slice's backing array as a uintptr for
@@ -206,22 +244,30 @@ func (g *CUDA) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 		g.candBuf = make([]float32, n*candStride)
 	}
 	g.candBuf = g.candBuf[:n*candStride]
+	hasMask := false
 	for i := range cands {
 		packCand(cands[i], g.candBuf[i*candStride:])
+		if cands[i].Kind >= model.KindMaskBase {
+			hasMask = true
+		}
 	}
 	if cap(g.outBuf) < n*resStride {
 		g.outBuf = make([]float32, n*resStride)
 	}
 	g.outBuf = g.outBuf[:n*resStride]
+	// Mask candidates need the block kernel (only it carries the per-pixel-alpha branch). Route this
+	// chunk there and restore, so pure-hard batches keep the fast warp path.
+	if hasMask && g.masksOn && !g.gradOn && g.procGradients != nil {
+		g.procGradients.Call(1)
+		defer g.procGradients.Call(0)
+	}
 	g.procEval.Call(fptr(g.candBuf), uintptr(n), fptr(g.outBuf))
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
-		// The CUDA kernel has no mask geometry (task #74): its inside/bbox switches fall through to
-		// ELLIPSE for kind >= KindMaskBase, so it would silently mis-score a mask as an ellipse and
-		// could pick it. Reject mask candidates here (fail-loud, never selected) until the real kernel
-		// + golden-diff case land. The on-device generator never emits masks, so this is currently inert.
-		if cands[i].Kind >= model.KindMaskBase {
+		// Without the atlas (older DLL) the kernel's inside/bbox switches would silently mis-score a
+		// mask as an ellipse — reject fail-loud so one can never be selected.
+		if cands[i].Kind >= model.KindMaskBase && !g.masksOn {
 			out[i] = backend.EvalResult{Score: maskRejected}
 			continue
 		}
@@ -603,6 +649,7 @@ func (g *CUDA) SetGradients(on bool) bool {
 		return false
 	}
 	g.procGradients.Call(uintptr(b2i32(on)))
+	g.gradOn = on
 	return true
 }
 

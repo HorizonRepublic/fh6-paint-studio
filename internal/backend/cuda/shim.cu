@@ -119,7 +119,77 @@ __host__ __device__ void lineBBox(const float* P, int w, int h, int* xMin, int* 
     *yMax = clampI((int)ceil(fmax(y1, y2) + hwid), 0, h - 1);
 }
 
+// ---- dictionary-mask coverage (mirrors raster/mask.go) ----
+// The mask bank's coverage textures live in one device atlas; per-word meta = {offset, w, h} in
+// constant memory. Kind ids >= MASKBASE map to atlas slot kind-MASKBASE. Coverage = bilinear sample
+// of the texture after inverting the placement affine P = [cx, cy, Hx, Hy, rotDeg, skew] (Hx/Hy are
+// FULL extents, sign = mirror). Float32 math like the gradient kinds — validated by tolerance
+// golden-diff, not bit-match.
+#define MASKBASE 64
+#define MAXMASKS 512
+__constant__ int c_maskMeta[MAXMASKS * 3];
+__constant__ int c_maskCount[1];
+__constant__ float* c_maskAtlas;
+static float* d_maskAtlas = nullptr;
+static int g_maskCount = 0;
+
+__device__ inline float maskSampleUV(int ofs, int mw, int mh, float u, float v) {
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return 0.0f;
+    float tx = u * mw - 0.5f, ty = v * mh - 0.5f;
+    int x0 = (int)floorf(tx), y0 = (int)floorf(ty);
+    float fx = tx - (float)x0, fy = ty - (float)y0;
+    int x1 = x0 + 1 < mw - 1 ? x0 + 1 : mw - 1;
+    int y1 = y0 + 1 < mh - 1 ? y0 + 1 : mh - 1;
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    x0 = x0 < 0 ? 0 : (x0 > mw - 1 ? mw - 1 : x0);
+    y0 = y0 < 0 ? 0 : (y0 > mh - 1 ? mh - 1 : y0);
+    const float* m = c_maskAtlas + ofs;
+    float c00 = __ldg(m + y0 * mw + x0), c10 = __ldg(m + y0 * mw + x1);
+    float c01 = __ldg(m + y1 * mw + x0), c11 = __ldg(m + y1 * mw + x1);
+    return (1.0f - fx) * (1.0f - fy) * c00 + fx * (1.0f - fy) * c10 + (1.0f - fx) * fy * c01 + fx * fy * c11;
+}
+
+__device__ inline float maskCovP(int kind, const float* P, int x, int y) {
+    int mi = kind - MASKBASE;
+    if (mi < 0 || mi >= c_maskCount[0]) return 0.0f;
+    float hx = P[2], hy = P[3];
+    if (hx == 0.0f || hy == 0.0f) return 0.0f;
+    float th = (float)(P[4] * DEG2RAD), skew = P[5];
+    float c = cosf(th), s = sinf(th);
+    float dx = (float)x + 0.5f - P[0], dy = (float)y + 0.5f - P[1];
+    float kx = dx * c + dy * s, ky = -dx * s + dy * c;
+    float sx = kx - skew * ky;
+    const int* mm = c_maskMeta + mi * 3;
+    return maskSampleUV(mm[0], mm[1], mm[2], sx / hx + 0.5f, ky / hy + 0.5f);
+}
+
+__host__ __device__ void maskBBox(const float* P, int w, int h, int* xMin, int* yMin, int* xMax, int* yMax) {
+    double cx = P[0], cy = P[1], hx = P[2] / 2.0, hy = P[3] / 2.0;
+    double th = P[4] * DEG2RAD, skew = P[5];
+    double c = cos(th), s = sin(th);
+    double minX = 1e30, minY = 1e30, maxX = -1e30, maxY = -1e30;
+    for (int i = 0; i < 4; i++) {
+        double ex = (i & 1) ? hx : -hx, ey = (i & 2) ? hy : -hy;
+        double kx = ex + skew * ey;
+        double px = cx + kx * c - ey * s, py = cy + kx * s + ey * c;
+        minX = fmin(minX, px); maxX = fmax(maxX, px);
+        minY = fmin(minY, py); maxY = fmax(maxY, py);
+    }
+    *xMin = clampI((int)floor(minX - 1), 0, w - 1);
+    *xMax = clampI((int)ceil(maxX + 1), 0, w - 1);
+    *yMin = clampI((int)floor(minY - 1), 0, h - 1);
+    *yMax = clampI((int)ceil(maxY + 1), 0, h - 1);
+}
+
 __host__ __device__ bool inside(int kind, const float* P, int x, int y) {
+    if (kind >= MASKBASE) {
+#ifdef __CUDA_ARCH__
+        return maskCovP(kind, P, x, y) >= 0.5f;
+#else
+        return false; // host has no atlas; mask coverage is device-only
+#endif
+    }
     switch (kind) {
         case 1: return rectInside(P, x, y);
         case 2: return triangleInside(P, x, y);
@@ -128,6 +198,7 @@ __host__ __device__ bool inside(int kind, const float* P, int x, int y) {
     }
 }
 __host__ __device__ void bbox(int kind, const float* P, int w, int h, int* xMin, int* yMin, int* xMax, int* yMax) {
+    if (kind >= MASKBASE) { maskBBox(P, w, h, xMin, yMin, xMax, yMax); return; }
     switch (kind) {
         case 1: rectBBox(P, w, h, xMin, yMin, xMax, yMax); return;
         case 2: triangleBBox(P, w, h, xMin, yMin, xMax, yMax); return;
@@ -162,6 +233,14 @@ struct SC {
 // Boundary pixels can rarely flip vs the double reference — golden-diff tolerance
 // (cuda_test.go) bounds the effect, and end-to-end error is unchanged.
 __device__ void prepShape(int kind, const float* P, SC* sc) {
+    if (kind >= MASKBASE) { // dictionary mask: placement affine (full extents + skew in lhw)
+        sc->cx = P[0]; sc->cy = P[1];
+        sc->a0 = P[2]; sc->a1 = P[3];
+        sc->lhw = P[5];
+        double cc, ss; sincos((double)P[4] * DEG2RAD, &ss, &cc);
+        sc->c = (float)cc; sc->s = (float)ss;
+        return;
+    }
     if (kind == 1) { // rectangle
         sc->cx = P[0]; sc->cy = P[1];
         sc->a0 = (float)fmaxd(0.5, (double)P[2]); sc->a1 = (float)fmaxd(0.5, (double)P[3]);
@@ -230,15 +309,25 @@ __device__ inline float gradFalloff(int kind, float t2) {
     return 1.0f - (3.0f * u * u - 2.0f * u * u * u);
 }
 
-// gradCovC: gradient coverage in the eval hot loop (reuses the precomputed SC rotation/axes²).
+// gradCovC: per-pixel-alpha coverage in the eval hot loop (reuses the precomputed SC constants).
+// Serves both the radial-gradient kinds and the dictionary masks (SC stores the placement affine:
+// a0/a1 = full extents, lhw = skew).
 __device__ inline float gradCovC(int kind, const SC* sc, int x, int y) {
     float dx = (x + 0.5f) - sc->cx, dy = (y + 0.5f) - sc->cy;
     float xr = dx * sc->c + dy * sc->s, yr = -dx * sc->s + dy * sc->c;
+    if (kind >= MASKBASE) {
+        int mi = kind - MASKBASE;
+        if (mi >= c_maskCount[0] || sc->a0 == 0.0f || sc->a1 == 0.0f) return 0.0f;
+        float sx = xr - sc->lhw * yr;
+        const int* mm = c_maskMeta + mi * 3;
+        return maskSampleUV(mm[0], mm[1], mm[2], sx / sc->a0 + 0.5f, yr / sc->a1 + 0.5f);
+    }
     return gradFalloff(kind, xr * xr / sc->a0 + yr * yr / sc->a1);
 }
 
-// gradCovP: gradient coverage from raw params (apply kernel — one thread per pixel, no SC).
+// gradCovP: per-pixel-alpha coverage from raw params (apply/polish kernels — one thread per pixel).
 __device__ inline float gradCovP(int kind, const float* P, int x, int y) {
+    if (kind >= MASKBASE) return maskCovP(kind, P, x, y);
     float rx = fmaxf(1.0f, P[2]), ry = fmaxf(1.0f, P[3]);
     float th = (float)(P[4] * DEG2RAD), c = cosf(th), s = sinf(th);
     float dx = (x + 0.5f) - P[0], dy = (y + 0.5f) - P[1];
@@ -246,7 +335,8 @@ __device__ inline float gradCovP(int kind, const float* P, int x, int y) {
     return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
 }
 
-__device__ inline bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+// isGradKind: kinds whose composite alpha varies per pixel (radial gradients + dictionary masks).
+__device__ inline bool isGradKind(int kind) { return kind == 4 || kind == 5 || kind >= MASKBASE; }
 
 // gaussianCovGradD: KindGlow coverage at pixel (x,y) AND its analytic gradient wrt the 5 ellipse
 // params [cx,cy,rx,ry,thetaDeg] (slot 5 = 0). Device mirror of the FD-verified CPU reference
@@ -1832,6 +1922,27 @@ API void fp_set_warp_eval(int on) { g_warpEval = on ? 1 : 0; }
 // off the candidate's kind directly, so it needs no flag.
 API void fp_set_gradients(int on) { g_gradients = on ? 1 : 0; }
 
+// fp_set_masks uploads the dictionary-mask atlas: count textures concatenated into one float plane,
+// meta = count*3 ints {offset, w, h} (kind id MASKBASE+i -> slot i). Call once after fp_init; safe to
+// call again (re-uploads). Returns 0 on success.
+API int fp_set_masks(const float* atlas, long long totalFloats, const int* meta, int count) {
+    if (count < 0 || count > MAXMASKS) return 1;
+    if (d_maskAtlas) { cudaFree(d_maskAtlas); d_maskAtlas = nullptr; }
+    g_maskCount = 0;
+    int zero = 0;
+    if (count == 0 || totalFloats <= 0) {
+        cudaMemcpyToSymbol(c_maskCount, &zero, sizeof(int));
+        return 0;
+    }
+    if (cudaMalloc(&d_maskAtlas, totalFloats * sizeof(float)) != cudaSuccess) return 2;
+    if (cudaMemcpy(d_maskAtlas, atlas, totalFloats * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) return 3;
+    if (cudaMemcpyToSymbol(c_maskMeta, meta, count * 3 * sizeof(int)) != cudaSuccess) return 4;
+    if (cudaMemcpyToSymbol(c_maskAtlas, &d_maskAtlas, sizeof(float*)) != cudaSuccess) return 5;
+    if (cudaMemcpyToSymbol(c_maskCount, &count, sizeof(int)) != cudaSuccess) return 6;
+    g_maskCount = count;
+    return 0;
+}
+
 // fp_set_coarse enables coarse-to-fine search (see g_coarseSearch): budget = the cheap
 // pixel cap for the filter pass (<1 -> 4000). Allocates the survivor scratch on first
 // enable. Pass enable=0 to restore the single-pass full-budget search.
@@ -2311,4 +2422,7 @@ API void fp_free() {
     d_redIdx = d_bestIdx = nullptr;
     g_searchCap = 0;
     g_momentCap = 0;
+    cudaFree(d_maskAtlas);
+    d_maskAtlas = nullptr;
+    g_maskCount = 0;
 }
