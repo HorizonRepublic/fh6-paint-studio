@@ -73,4 +73,17 @@ func TestHiResPrep(t *testing.T) {
 	if got.W != 1400 || got.H != 1200 {
 		t.Errorf("cropped prep %dx%d, want native 1400x1200", got.W, got.H)
 	}
+
+	// "Use source resolution": fits at the TRUE source size, for every mode including photo.
+	stSrc := &ui.AppState{ImgPath: big}
+	stSrc.SourceRes.Value = true
+	for _, mode := range []string{"flat", "photo"} {
+		got := hiResPrep(stSrc, mode, full, 642, 1100)
+		if got == nil {
+			t.Fatalf("source-res + %s: want a native prep, got nil", mode)
+		}
+		if got.W != 1400 || got.H != 2400 {
+			t.Errorf("source-res %s prep %dx%d, want native 1400x2400", mode, got.W, got.H)
+		}
+	}
 }

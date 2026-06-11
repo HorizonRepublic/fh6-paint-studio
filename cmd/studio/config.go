@@ -19,6 +19,7 @@ type studioConfig struct {
 	// Generator toggles (pointer = tri-state: absent -> the NewAppState default). Persisted so a
 	// preferred setup survives a restart.
 	KeepInside *bool `json:"keep_inside,omitempty"` // default ON
+	SourceRes  *bool `json:"source_res,omitempty"`  // default OFF: fit the engine at the image's original resolution (max quality, much slower)
 
 	CheckUpdates    *bool     `json:"check_updates,omitempty"` // tri-state, nil = on
 	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`

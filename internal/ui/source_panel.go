@@ -258,6 +258,11 @@ func (s *AppState) advancedSection(gtx C) D {
 		}),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.SourceRes, "Use source resolution", &s.SourceResHint,
+				"OFF by default — large images are fitted at a fast working resolution. ON: the engine fits at the image's ORIGINAL resolution, so fine lines and small detail survive on big sources. Generation can take several times longer; use it when you want maximum quality. No effect on images at or below the working size.")
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
 			return s.toggleRow(gtx, &s.Economy, "Economy mode (slower, better at low budgets)", &s.EconomyHint,
 				"OFF by default. At low shape counts (≲1500) this co-adapts the shapes — it keeps re-fitting ALL of them together as it builds, for a cleaner result with fewer shapes. The catch: it's MUCH slower (it re-polishes the whole set repeatedly), so turn it on only when you want maximum quality on a tight budget and don't mind the wait. No effect on Logo/Flat or above ~1500 shapes.")
 		}),

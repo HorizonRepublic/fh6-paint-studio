@@ -133,6 +133,9 @@ func loop(w *app.Window) error {
 	if prefs.KeepInside != nil {
 		st.KeepInside.Value = *prefs.KeepInside
 	}
+	if prefs.SourceRes != nil {
+		st.SourceRes.Value = *prefs.SourceRes
+	}
 
 	q := newEventQueue()
 	var ops op.Ops
@@ -187,9 +190,10 @@ func loop(w *app.Window) error {
 	savePrefs := func() {
 		on := st.SoundOn.Value
 		keep := st.KeepInside.Value
+		srcRes := st.SourceRes.Value
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
-			KeepInside: &keep, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
+			KeepInside: &keep, SourceRes: &srcRes, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
 			LastSeenVersion: st.LastSeen, Recent: recent}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
@@ -757,6 +761,9 @@ func loop(w *app.Window) error {
 			if st.SoundOn.Update(gtx) { // persist the "sound on finish" toggle the moment it changes
 				savePrefs()
 			}
+			if st.SourceRes.Update(gtx) { // persist the "use source resolution" toggle the moment it changes
+				savePrefs()
+			}
 			if st.InjectLayersErr { // clear the red FH6-layers highlight once a valid count is entered
 				if l, _ := injectParams(st); l > 0 {
 					st.InjectLayersErr = false
@@ -1053,17 +1060,29 @@ func loadCropRegion(path string, abs image.Rectangle) (*imageio.Prepared, *image
 // stays at studioMaxRes.
 const genMaxRes = 2000
 
-// hiResPrep re-decodes the current view for the ENGINE at genMaxRes when the mode benefits and the
-// source actually has more pixels than the display load kept. Returns nil to fit on the display-
-// resolution prep: photo/gaussian modes, sources at/below studioMaxRes, no source path (demo), or a
-// failed re-decode. The re-derivation mirrors the state exactly: un-cropped views go through the same
-// auto-crop (+checker-strip) pipeline as loadImage; crops re-use the crop tool's absolute-rect
-// primitive, so the engine sees the same content rectangle at a higher resolution.
+// srcResCap bounds the "Use source resolution" toggle: measured on a 3541px line-art source the
+// gain keeps growing all the way to native (−40% vs the 2000 cap, no low-view tradeoff, ~2× wall),
+// so the toggle fits at the TRUE source size — this ceiling only protects time/VRAM from
+// pathological scans.
+const srcResCap = 4096
+
+// hiResPrep re-decodes the current view for the ENGINE above the display cap when it pays: at
+// genMaxRes for the modes measured to benefit (flat/anime), or at the source's own resolution for
+// ANY mode when the user asks for maximum quality (the "Use source resolution" toggle). Returns nil
+// to fit on the display-resolution prep: no benefit for the mode, sources at/below studioMaxRes, no
+// source path (demo), or a failed re-decode. The re-derivation mirrors the state exactly: un-cropped
+// views go through the same auto-crop (+checker-strip) pipeline as loadImage; crops re-use the crop
+// tool's absolute-rect primitive, so the engine sees the same content rectangle at a higher
+// resolution.
 func hiResPrep(st *ui.AppState, mode string, viewAbs image.Rectangle, curW, curH int) *imageio.Prepared {
-	switch preset.PresetMode(mode) {
-	case "flat", "anime":
-	default:
-		return nil
+	capPx := srcResCap
+	if !st.SourceRes.Value {
+		switch preset.PresetMode(mode) {
+		case "flat", "anime":
+			capPx = genMaxRes
+		default:
+			return nil
+		}
 	}
 	if st.ImgPath == "" || (curW < studioMaxRes && curH < studioMaxRes) {
 		return nil // demo source, or the display load never hit the cap — nothing extra to gain
@@ -1073,9 +1092,9 @@ func hiResPrep(st *ui.AppState, mode string, viewAbs image.Rectangle, curW, curH
 		err  error
 	)
 	if st.Cropped {
-		prep, err = imageio.LoadAbsRegion(st.ImgPath, genMaxRes, viewAbs)
+		prep, err = imageio.LoadAbsRegion(st.ImgPath, capPx, viewAbs)
 	} else {
-		prep, _, err = imageio.LoadAutoCropped(st.ImgPath, genMaxRes)
+		prep, _, err = imageio.LoadAutoCropped(st.ImgPath, capPx)
 	}
 	if err != nil {
 		st.AppendLog("hi-res fit unavailable (" + err.Error() + "); fitting at display resolution")

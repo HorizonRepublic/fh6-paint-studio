@@ -147,6 +147,7 @@ type AppState struct {
 	Backfit      widget.Bool
 	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
 	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	SourceRes    widget.Bool // fit the ENGINE at the image's original resolution instead of the working cap — maximum detail on large sources, much slower (display stays at the working size)
 	Mono         widget.Bool // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
 	Economy      widget.Bool // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
 	Seed         widget.Editor
@@ -155,6 +156,7 @@ type AppState struct {
 	BackfitHint    Hint
 	BoundaryHint   Hint
 	KeepInsideHint Hint
+	SourceResHint  Hint
 	MonoHint       Hint
 	EconomyHint    Hint
 	BudgetHint     Hint
