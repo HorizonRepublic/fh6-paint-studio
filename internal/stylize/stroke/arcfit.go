@@ -88,11 +88,13 @@ func placeArc(P [][2]float64, i, j int, halfW float64, col []int, cfg Config) (m
 		score float64
 	}
 	var cands []scored
+	inSweep := 0
 	for _, aw := range arcCatalog() {
 		dSweep := math.Abs(aw.sweep - sweep)
 		if dSweep > 70*deg2rad {
 			continue
 		}
+		inSweep++
 		lW := math.Hypot(aw.b[0]-aw.a[0], aw.b[1]-aw.a[1])
 		if lW < 1e-6 {
 			continue
@@ -115,11 +117,25 @@ func placeArc(P [][2]float64, i, j int, halfW float64, col []int, cfg Config) (m
 		}
 		cands = append(cands, scored{aw, score})
 	}
+	if arcStats != nil && len(cands) == 0 {
+		if inSweep == 0 {
+			arcStats.noSweep++
+		} else {
+			arcStats.noWidth++
+		}
+		arcStats.failed = append(arcStats.failed, [3]float64{sweep / deg2rad, halfW, chord})
+	}
 	sort.Slice(cands, func(a, b int) bool { return cands[a].score < cands[b].score })
 	// Bow tolerance scales with the chord: a fixed-px limit kills the smooth hair-curve fits that look
 	// better than rect chains, while a relative one still rejects the big soft "lens" a sweep-mismatched
 	// arc paints beside a long near-straight run (the worst line-art artifact).
 	midTol := math.Max(math.Max(1.5, halfW), 0.035*chord)
+	if arcStats != nil {
+		arcStats.runs++
+		arcStats.sweepSum += sweep / deg2rad
+		arcStats.chordSum += chord
+		arcStats.hwSum += halfW
+	}
 	for _, sc := range cands {
 		aw := sc.aw
 		for _, m := range [2]float64{1, -1} {
@@ -134,13 +150,34 @@ func placeArc(P [][2]float64, i, j int, halfW float64, col []int, cfg Config) (m
 			rot := math.Atan2(dS[1], dS[0]) - math.Atan2(dW[1], dW[0])
 			c, sn := math.Cos(rot), math.Sin(rot)
 			pos := [2]float64{Pi[0] - s*(c*A[0]-sn*A[1]), Pi[1] - s*(sn*A[0]+c*A[1])}
-			// Geometry verification: with the endpoints pinned, a sweep mismatch shows up as the arc's
-			// bulge missing the run's — the placed mid must land ON the contour or the stamp paints a
-			// soft lens BESIDE the line (the worst line-art artifact). Reject and try the next arc.
-			mx := pos[0] + s*(c*Wm[0]-sn*Wm[1])
-			my := pos[1] + s*(sn*Wm[0]+c*Wm[1])
-			if math.Hypot(mx-mid[0], my-mid[1]) > midTol {
+			// Geometry verification: every run vertex AND every segment midpoint must lie on the
+			// placed word's circle (within midTol). Anything weaker gets fooled: the raw middle
+			// vertex wobbles with tracer noise; a fitted-circle midpoint lies for corner-rounded
+			// runs; and a vertices-only check passes a 3-vertex CORNER (the circle through 3 points
+			// is exact and the pinned endpoints sit on it by construction) whose straight legs the
+			// stamp then crosses with a soft "lens" — the worst line-art artifact. The polyline
+			// midpoints catch that: on a true arc they ride the curve, on a corner they sit on the
+			// straight legs far from the bulge.
+			wcx, wcy, wr, wok := circum3(A, B, Wm)
+			if !wok {
 				continue
+			}
+			ccx := pos[0] + s*(c*wcx-sn*wcy)
+			ccy := pos[1] + s*(sn*wcx+c*wcy)
+			rr := s * wr
+			devOK := true
+			for k := i; k <= j && devOK; k++ {
+				devOK = math.Abs(math.Hypot(P[k][0]-ccx, P[k][1]-ccy)-rr) <= midTol
+				if devOK && k < j {
+					sx, sy := (P[k][0]+P[k+1][0])/2, (P[k][1]+P[k+1][1])/2
+					devOK = math.Abs(math.Hypot(sx-ccx, sy-ccy)-rr) <= midTol
+				}
+			}
+			if !devOK {
+				continue
+			}
+			if arcStats != nil {
+				arcStats.placed++
 			}
 			return model.Shape{
 				Type:  int(aw.word),
@@ -149,8 +186,36 @@ func placeArc(P [][2]float64, i, j int, halfW float64, col []int, cfg Config) (m
 			}, true
 		}
 	}
+	if arcStats != nil && len(cands) > 0 {
+		arcStats.noBow++
+		arcStats.failed = append(arcStats.failed, [3]float64{sweep / deg2rad, halfW, chord})
+	}
 	return model.Shape{}, false
 }
+
+// circum3 is the circle through three points (the word arc's endpoints + bulge); ok=false when
+// near-collinear.
+func circum3(a, b, c [2]float64) (cx, cy, r float64, ok bool) {
+	d := 2 * (a[0]*(b[1]-c[1]) + b[0]*(c[1]-a[1]) + c[0]*(a[1]-b[1]))
+	if math.Abs(d) < 1e-9 {
+		return 0, 0, 0, false
+	}
+	a2 := a[0]*a[0] + a[1]*a[1]
+	b2 := b[0]*b[0] + b[1]*b[1]
+	c2 := c[0]*c[0] + c[1]*c[1]
+	cx = (a2*(b[1]-c[1]) + b2*(c[1]-a[1]) + c2*(a[1]-b[1])) / d
+	cy = (a2*(c[0]-b[0]) + b2*(a[0]-c[0]) + c2*(b[0]-a[0])) / d
+	return cx, cy, math.Hypot(a[0]-cx, a[1]-cy), true
+}
+
+// arcStatsT is debug-only demand instrumentation for the arc matcher (enabled by tests).
+type arcStatsT struct {
+	runs, placed, noSweep, noWidth, noBow int
+	sweepSum, chordSum, hwSum             float64
+	failed                                [][3]float64 // sweep°, halfW, chord of unplaced curved runs
+}
+
+var arcStats *arcStatsT
 
 // runSweep is the swept central angle of the run i..j about its fitted circle (the true arc angle).
 // Falls back to interior turning if the points are collinear.
@@ -207,3 +272,15 @@ func crossSign(u, v [2]float64) int {
 }
 
 func sub(a, b [2]float64) [2]float64 { return [2]float64{a[0] - b[0], a[1] - b[1]} }
+
+// ArcDemandStart / ArcDemandReport are temporary debug hooks for measuring matcher demand.
+func ArcDemandStart() { arcStats = &arcStatsT{} }
+
+func ArcDemandReport() (runs, placed, noSweep, noWidth, noBow int, failed [][3]float64) {
+	st := arcStats
+	arcStats = nil
+	if st == nil {
+		return
+	}
+	return st.runs, st.placed, st.noSweep, st.noWidth, st.noBow, st.failed
+}
