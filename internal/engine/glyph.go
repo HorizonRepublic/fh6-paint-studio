@@ -251,7 +251,10 @@ func (r *run) glyphPropose(progress float32, sampGrid []float32, penalty func(mo
 			ccx = -gw.cx
 		}
 		for _, dsh := range [3]int{0, -1, 1} {
-			rot := float64((m.shift+dsh)%glyphBins) * (360.0 / glyphBins)
+			// sigDist matches blob bin i against word bin i+shift, so a blob rotated by θ
+			// is found at shift = -θ·bins/360: the placement rotation negates the shift
+			sh := ((glyphBins-(m.shift+dsh))%glyphBins + glyphBins) % glyphBins
+			rot := float64(sh) * (360.0 / glyphBins)
 			rad := rot * math.Pi / 180
 			c, sn := math.Cos(rad), math.Sin(rad)
 			ox, oy := s*ccx, s*gw.cy
