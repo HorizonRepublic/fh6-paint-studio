@@ -23,10 +23,14 @@ func (s *AppState) Layout(gtx C) D {
 	dims := layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(s.topBar),
 		layout.Flexed(1, func(gtx C) D {
-			if s.View == ViewLibrary {
+			switch s.View {
+			case ViewLibrary:
 				return s.libraryScreen(gtx)
+			case ViewEditor:
+				return s.editorScreen(gtx)
+			default:
+				return s.bodyRow(gtx)
 			}
-			return s.bodyRow(gtx)
 		}),
 		layout.Rigid(s.console), // shared activity console (status strip + expandable feed) — visible in both views
 	)
@@ -172,6 +176,8 @@ func (s *AppState) viewTabs(gtx C) D {
 		tab(&s.StudioTab, i18n.T("app.tab_studio"), s.View == ViewStudio),
 		layout.Rigid(GapH(6).Layout),
 		tab(&s.LibraryTab, i18n.T("app.tab_library"), s.View == ViewLibrary),
+		layout.Rigid(GapH(6).Layout),
+		tab(&s.EditorTab, i18n.T("app.tab_editor"), s.View == ViewEditor),
 	)
 }
 
@@ -224,7 +230,7 @@ func (s *AppState) wipeBar(gtx C) D {
 	th := s.Th
 	// Hidden without a reconstruction, and while the crop tool is active (it owns the pointer + bottom
 	// bar). After a crop is applied the source IS the crop, so the wipe works on it as a normal image.
-	if s.Preview == nil || s.CropMode {
+	if s.Preview == nil || s.CropMode || s.EditorMode {
 		return D{}
 	}
 	return layout.Inset{Top: 10}.Layout(gtx, func(gtx C) D {

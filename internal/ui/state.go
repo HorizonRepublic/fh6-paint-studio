@@ -13,6 +13,7 @@ import (
 	"gioui.org/widget"
 
 	"fh6-paint-studio/internal/i18n"
+	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/userpreset"
 )
@@ -33,6 +34,7 @@ type View int
 const (
 	ViewStudio View = iota
 	ViewLibrary
+	ViewEditor
 )
 
 // RunStats is the live telemetry shown in the run panel.
@@ -318,6 +320,69 @@ type AppState struct {
 	// scrolling
 	LeftScroll widget.List // left column (source + settings) — scrolls when toggles overflow the height
 	LogList    widget.List
+
+	// Shape editor (opt-in mode; see editor.go). Working on a deep COPY so Cancel discards cleanly.
+	EditorMode    bool
+	EditShapes    []model.Shape // working copy being edited
+	EditW, EditH  int           // canvas size of the working doc
+	EditSel       int           // selected shape index, -1 = none
+	editDrag      editorDrag    // active drag (kind + start snapshot)
+	editPanning   bool          // middle/secondary-button canvas pan in progress
+	panLast       f32.Point     // last pan pointer position
+	editWantFocus bool          // request canvas key focus next frame (Ctrl+Z / Delete)
+	editUndo      [][]model.Shape
+	editOp        paint.ImageOp    // cached render of EditShapes; rebuilt only when editDirty
+	editDirty     bool             // EditShapes changed → re-render on the next editorArea pass
+	editDragBase  *image.NRGBA     // pre-rendered shapes EXCEPT the dragged one, for live composite during a drag
+	EditBtn       widget.Clickable // enter the editor from a generated result
+	NewBlankBtn   widget.Clickable // enter the editor on a blank canvas
+	EditorTab     widget.Clickable // top-bar Editor tab
+	EditSaveBtn   widget.Clickable // save the design to the library
+	editKeyTag    int              // key-focus tag for Ctrl+Z / Ctrl+Shift+Z / Delete
+
+	// editor save flow: a name field + an override-on-name confirmation + transient "saved" feedback.
+	EditName          widget.Editor
+	EditOverrideBtn   widget.Clickable
+	EditSaveCancelBtn widget.Clickable
+	editSavePending   bool   // a name-collision override confirmation is showing
+	editPendingName   string // the name awaiting override confirmation
+	editSavedMsg      string // transient post-save feedback
+	editSavedUntil    time.Time
+
+	// editor canvas zoom + pan
+	editZoom                             float64 // 1 = fit
+	editPan                              f32.Point
+	editZoomIn, editZoomOut, editZoomFit widget.Clickable
+
+	// editor inspector: numeric controls for the selected shape (two-way synced) + colour picker.
+	inspFor                             int // shape index the fields currently reflect (-1 = none)
+	inspX, inspY, inspW, inspH, inspRot widget.Editor
+	editForward, editBack               widget.Clickable
+	editDup, editDelete                 widget.Clickable
+	colorSwatchBtn                      widget.Clickable // opens the colour picker
+	colorPickerOpen                     bool
+	pickR, pickG, pickB, pickA          widget.Float       // R/G/B/Alpha sliders (0..1)
+	colorPalBtns                        []widget.Clickable // rainbow preset swatches
+
+	// editor palette + layers + redo (the undo stack is editUndo above).
+	palCircle, palSquare, palTriangle widget.Clickable
+	palGlow, palDisk                  widget.Clickable
+	editUndoBtn, editRedoBtn          widget.Clickable
+	editRedo                          [][]model.Shape
+	editLayerList                     widget.List
+	editLayerBtns                     []widget.Clickable
+	layerDrags                        []gesture.Drag // per-row drag-to-reorder grips
+	layerDragFrom                     int            // shape index being dragged (-1 = none)
+	layerDragAccum                    float64        // accumulated drag px toward the next row swap
+	layerDragLastY                    float32        // last drag pointer Y
+	layerDragMoved                    bool           // a swap happened this drag (one undo per drag)
+
+	// editor bank palette (curves/decorative/glyphs), always shown in the left column.
+	bankList        widget.List
+	bankBtns        []widget.Clickable
+	bankThumbs      []paint.ImageOp
+	bankRows        []bankRow
+	bankThumbsBuilt bool
 }
 
 // expertGroup is the collapse state of one expert sub-section.

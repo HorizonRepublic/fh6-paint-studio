@@ -64,6 +64,8 @@ func (s *AppState) activityIdle(gtx C) D {
 		}),
 		layout.Rigid(GapV(18).Layout),
 		layout.Rigid(func(gtx C) D { return s.phaseStepper(gtx, s.phases(), -1, false) }),
+		layout.Rigid(GapV(18).Layout),
+		layout.Rigid(func(gtx C) D { return s.editorEntry(gtx, false) }),
 	)
 }
 
@@ -154,6 +156,8 @@ func (s *AppState) activityDone(gtx C) D {
 		}),
 		layout.Rigid(GapV(18).Layout),
 		layout.Rigid(func(gtx C) D { return s.phaseStepper(gtx, s.phases(), len(s.phases())-1, true) }),
+		layout.Rigid(GapV(16).Layout),
+		layout.Rigid(func(gtx C) D { return s.editorEntry(gtx, true) }),
 	)
 }
 

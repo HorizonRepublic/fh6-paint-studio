@@ -451,6 +451,46 @@ func loop(w *app.Window) error {
 					st.Toast = "Reset failed: " + err.Error()
 				}
 			}
+			// Shape editor: enter from a finished generation (Edit) or a blank canvas (New); Apply
+			// commits the edited shapes back as the working geometry + preview, Cancel discards.
+			if st.EditBtn.Clicked(gtx) && len(lastShapes) > 0 {
+				st.EnterEditor(lastShapes, lastW, lastH) // loads the generated design into the editor
+			}
+			if st.NewBlankBtn.Clicked(gtx) {
+				st.EnterEditor(nil, 1024, 1024)
+			}
+			if st.EditorTab.Clicked(gtx) {
+				if st.EditorMode {
+					st.View = ui.ViewEditor // continue the current session
+				} else {
+					st.EnterEditor(nil, 1024, 1024)
+				}
+			}
+			if st.EditSaveBtn.Clicked(gtx) { // persist the edited design to the library (injectable)
+				name := st.SaveDesignName()
+				exists := false
+				if store != nil {
+					if entries, err := store.List(); err == nil {
+						for _, e := range entries {
+							if e.Name == name {
+								exists = true
+								break
+							}
+						}
+					}
+				}
+				if exists {
+					st.RequestOverride(name) // ask before overwriting a same-named design
+				} else {
+					saveEditedDesign(st, store, name, false)
+				}
+			}
+			if st.EditOverrideBtn.Clicked(gtx) {
+				saveEditedDesign(st, store, st.PendingSaveName(), true)
+			}
+			if st.EditSaveCancelBtn.Clicked(gtx) {
+				st.CancelOverride()
+			}
 			if st.GenBtn.Clicked(gtx) && curPrep != nil && st.Phase != ui.PhaseRunning && !opening {
 				st.Toast = ""
 				st.Log = nil
@@ -933,6 +973,34 @@ func saveDecalToLibrary(st *ui.AppState, store *library.Store, shapes []model.Sh
 	}
 	st.Toast = "Saved to Library"
 	reloadLibrary(st, store)
+}
+
+// saveEditedDesign saves an edited design to the library under name, optionally overwriting same-named
+// entries first (manual designs allow override; auto-generations never do). Shows in-editor feedback.
+func saveEditedDesign(st *ui.AppState, store *library.Store, name string, override bool) {
+	if store == nil || len(st.EditShapes) == 0 {
+		return
+	}
+	st.SetPreview(imageio.RenderFH6Image(st.EditShapes, true, st.EditW, st.EditH, 1))
+	if override {
+		if entries, err := store.List(); err == nil {
+			for _, e := range entries {
+				if e.Name == name {
+					_ = store.Delete(e.ID)
+				}
+			}
+		}
+	}
+	meta := libMeta(st, st.EditW, st.EditH)
+	meta.Name = name
+	if _, err := store.Save(st.EditShapes, st.Preview, meta); err != nil {
+		st.AppendLog("library save: " + err.Error())
+		st.Toast = "Save failed: " + err.Error()
+		st.CancelOverride()
+		return
+	}
+	reloadLibrary(st, store)
+	st.SetSavedFeedback(name)
 }
 
 // exportLibraryEntry copies a stored generation's geometry to dst (+ preview.png beside it).

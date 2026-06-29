@@ -23,6 +23,18 @@ func (s *AppState) previewArea(gtx C) D {
 	th := s.Th
 	sz := gtx.Constraints.Max
 	if s.Source == nil {
+		// A blank-canvas edit can produce a reconstruction with no loaded source — show it on the
+		// checker (no before/after wipe, since there is nothing to compare against).
+		if s.Preview != nil {
+			rect := fitRect(s.Preview.Bounds().Size(), sz)
+			drawCheckerboard(gtx, rect)
+			drawImageIn(gtx, s.PreviewOp, rect)
+			if s.PreviewZoom.Clicked(gtx) {
+				s.ShowLightbox(s.Preview)
+			}
+			s.drawZoomButton(gtx, rect)
+			return D{Size: sz}
+		}
 		layout.Center.Layout(gtx, s.emptyStateOpen)
 		return D{Size: sz}
 	}
