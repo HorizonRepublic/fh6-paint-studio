@@ -433,6 +433,45 @@ func TestSnapMoveDeltaPullsTowardNeighbour(t *testing.T) {
 	}
 }
 
+func TestArraySelectionRowAddsCopies(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1) // shape centre (20,20)
+	before := len(s.EditShapes)
+	s.arraySelection(4, false)
+	if got := len(s.EditShapes) - before; got != 3 {
+		t.Fatalf("row array added %d shapes, want 3", got)
+	}
+	if s.selCount() != 4 {
+		t.Fatalf("selection after array = %d, want 4 (original + 3 copies)", s.selCount())
+	}
+	xs := []float64{20}
+	for i := before; i < len(s.EditShapes); i++ {
+		xs = append(xs, s.EditShapes[i].Data[0])
+	}
+	for i := 1; i < len(xs); i++ {
+		if xs[i] <= xs[i-1] {
+			t.Fatalf("row copies should march right, got x = %v", xs)
+		}
+	}
+}
+
+func TestArraySelectionRingKeepsRadiusAboutCanvasCentre(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1) // (20,20); canvas 100×100 → pivot (50,50)
+	before := len(s.EditShapes)
+	s.arraySelection(4, true)
+	if got := len(s.EditShapes) - before; got != 3 {
+		t.Fatalf("ring array added %d shapes, want 3", got)
+	}
+	r0 := math.Hypot(20-50, 20-50)
+	for i := before; i < len(s.EditShapes); i++ {
+		cx, cy := shapeCenter(s.EditShapes[i])
+		if d := math.Hypot(cx-50, cy-50); math.Abs(d-r0) > 1e-6 {
+			t.Fatalf("ring copy %d radius = %v, want %v", i, d, r0)
+		}
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()

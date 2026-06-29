@@ -81,6 +81,10 @@
   "editor.guide_grid": "Grade",
   "editor.guide_ruler": "Régua",
   "editor.snap": "Encaixar",
+  "editor.array": "Matriz",
+  "editor.array_count": "Qtd",
+  "editor.array_row": "Linha",
+  "editor.array_ring": "Anel",
   "editor.new_canvas": "Nova tela",
   "editor.clear_confirm": "Descartar e começar de novo?",
 

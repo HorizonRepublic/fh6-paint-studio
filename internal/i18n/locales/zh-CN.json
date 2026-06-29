@@ -81,6 +81,10 @@
   "editor.guide_grid": "网格",
   "editor.guide_ruler": "标尺",
   "editor.snap": "吸附",
+  "editor.array": "阵列",
+  "editor.array_count": "数量",
+  "editor.array_row": "行",
+  "editor.array_ring": "环形",
   "editor.new_canvas": "新建画布",
   "editor.clear_confirm": "放弃并重新开始？",
 

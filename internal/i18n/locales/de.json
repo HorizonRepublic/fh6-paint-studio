@@ -81,6 +81,10 @@
   "editor.guide_grid": "Raster",
   "editor.guide_ruler": "Lineal",
   "editor.snap": "Einrasten",
+  "editor.array": "Anordnung",
+  "editor.array_count": "Anzahl",
+  "editor.array_row": "Reihe",
+  "editor.array_ring": "Ring",
   "editor.new_canvas": "Neue Leinwand",
   "editor.clear_confirm": "Verwerfen und neu beginnen?",
 

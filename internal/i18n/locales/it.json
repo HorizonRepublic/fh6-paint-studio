@@ -81,6 +81,10 @@
   "editor.guide_grid": "Griglia",
   "editor.guide_ruler": "Righello",
   "editor.snap": "Aggancia",
+  "editor.array": "Serie",
+  "editor.array_count": "N.",
+  "editor.array_row": "Fila",
+  "editor.array_ring": "Anello",
   "editor.new_canvas": "Nuova tela",
   "editor.clear_confirm": "Scartare e ricominciare?",
 

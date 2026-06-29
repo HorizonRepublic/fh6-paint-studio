@@ -81,6 +81,10 @@
   "editor.guide_grid": "グリッド",
   "editor.guide_ruler": "ルーラー",
   "editor.snap": "スナップ",
+  "editor.array": "配列",
+  "editor.array_count": "数",
+  "editor.array_row": "行",
+  "editor.array_ring": "リング",
   "editor.new_canvas": "新規キャンバス",
   "editor.clear_confirm": "破棄して新規作成しますか？",
 

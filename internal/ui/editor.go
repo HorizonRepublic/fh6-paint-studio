@@ -444,6 +444,8 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	for _, ed := range []*widget.Editor{&s.inspX, &s.inspY, &s.inspW, &s.inspH, &s.inspRot} {
 		ed.SingleLine = true
 	}
+	s.arrayCount.SingleLine = true
+	s.arrayCount.SetText("6")
 	s.EditorMode = true
 	s.View = ViewEditor
 }

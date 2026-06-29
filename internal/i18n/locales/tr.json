@@ -81,6 +81,10 @@
   "editor.guide_grid": "Izgara",
   "editor.guide_ruler": "Cetvel",
   "editor.snap": "Yapış",
+  "editor.array": "Dizi",
+  "editor.array_count": "Sayı",
+  "editor.array_row": "Sıra",
+  "editor.array_ring": "Halka",
   "editor.new_canvas": "Yeni tuval",
   "editor.clear_confirm": "At ve yeniden başla?",
 

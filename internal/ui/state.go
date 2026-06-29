@@ -379,6 +379,11 @@ type AppState struct {
 	recentColors                        []color.NRGBA    // recently applied colours
 	recentBtns                          []widget.Clickable
 
+	// editor array/radial duplicate: repeat the selection in a row or evenly around the canvas centre.
+	arrayCount   widget.Editor // how many copies in total (2..24)
+	arrayRowBtn  widget.Clickable
+	arrayRingBtn widget.Clickable
+
 	// editor palette + layers + redo (the undo stack is editUndo above).
 	palCircle, palSquare, palTriangle widget.Clickable
 	palGlow, palDisk                  widget.Clickable

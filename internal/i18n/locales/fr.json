@@ -81,6 +81,10 @@
   "editor.guide_grid": "Grille",
   "editor.guide_ruler": "Règle",
   "editor.snap": "Aimanter",
+  "editor.array": "Réseau",
+  "editor.array_count": "Nbre",
+  "editor.array_row": "Rangée",
+  "editor.array_ring": "Anneau",
   "editor.new_canvas": "Nouveau canevas",
   "editor.clear_confirm": "Abandonner et recommencer ?",
 

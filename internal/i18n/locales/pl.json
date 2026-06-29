@@ -81,6 +81,10 @@
   "editor.guide_grid": "Siatka",
   "editor.guide_ruler": "Linijka",
   "editor.snap": "Przyciąganie",
+  "editor.array": "Szyk",
+  "editor.array_count": "Ile",
+  "editor.array_row": "Rząd",
+  "editor.array_ring": "Pierścień",
   "editor.new_canvas": "Nowe płótno",
   "editor.clear_confirm": "Odrzucić i zacząć od nowa?",
 

@@ -81,6 +81,10 @@
   "editor.guide_grid": "Rejilla",
   "editor.guide_ruler": "Regla",
   "editor.snap": "Ajustar",
+  "editor.array": "Matriz",
+  "editor.array_count": "Cant.",
+  "editor.array_row": "Fila",
+  "editor.array_ring": "Anillo",
   "editor.new_canvas": "Lienzo nuevo",
   "editor.clear_confirm": "¿Descartar y empezar de nuevo?",
 

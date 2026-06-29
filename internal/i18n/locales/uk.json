@@ -81,6 +81,10 @@
   "editor.guide_grid": "Сітка",
   "editor.guide_ruler": "Лінійка",
   "editor.snap": "Прилипання",
+  "editor.array": "Масив",
+  "editor.array_count": "К-ть",
+  "editor.array_row": "Ряд",
+  "editor.array_ring": "Кільце",
   "editor.new_canvas": "Новий холст",
   "editor.clear_confirm": "Скинути й почати заново?",
 

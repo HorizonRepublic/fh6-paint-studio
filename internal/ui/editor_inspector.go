@@ -49,6 +49,8 @@ func (s *AppState) inspectorBody(gtx C) D {
 		layout.Rigid(s.inspActions),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(s.mirrorButtons),
+		layout.Rigid(GapV(12).Layout),
+		layout.Rigid(s.arrayPanel),
 	)
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
@@ -93,6 +95,8 @@ func (s *AppState) multiPanel(gtx C) D {
 		layout.Rigid(full(&s.alignBtns[distributeV], "editor.distribute_v")),
 		layout.Rigid(GapV(12).Layout),
 		layout.Rigid(s.mirrorButtons),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(s.arrayPanel),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
 			return layout.Flex{}.Layout(gtx,
@@ -551,6 +555,12 @@ func (s *AppState) handleEditActions(gtx C) {
 	if s.editMirrorV.Clicked(gtx) {
 		s.mirrorSelection(true)
 	}
+	if s.arrayRowBtn.Clicked(gtx) {
+		s.arraySelection(s.arrayCountVal(), false)
+	}
+	if s.arrayRingBtn.Clicked(gtx) {
+		s.arraySelection(s.arrayCountVal(), true)
+	}
 	for n := range s.alignBtns {
 		if s.alignBtns[n].Clicked(gtx) {
 			s.alignSelection(n)
@@ -613,6 +623,92 @@ func (s *AppState) duplicateSel() {
 	}
 	s.selectFromSet(newIdx)
 	s.markEditDirty()
+}
+
+// arrayCountVal reads the requested copy count, clamped to a sane 2..24 (default 6 on bad input).
+func (s *AppState) arrayCountVal() int {
+	n, err := strconv.Atoi(s.arrayCount.Text())
+	if err != nil || n < 2 {
+		return 6
+	}
+	if n > 24 {
+		return 24
+	}
+	return n
+}
+
+// arraySelection repeats the current selection count-1 more times: a horizontal row a box-width apart,
+// or evenly spaced around the canvas centre. The originals plus every copy end up selected.
+func (s *AppState) arraySelection(count int, radial bool) {
+	idx := s.selIndices()
+	if len(idx) == 0 || count < 2 {
+		return
+	}
+	_, _, ghx, _, ok := s.groupImgBox(s.EditShapes)
+	if !ok {
+		return
+	}
+	originals := make([]model.Shape, len(idx))
+	for n, i := range idx {
+		originals[n] = cloneShapes(s.EditShapes[i : i+1])[0]
+	}
+	s.pushUndo(cloneShapes(s.EditShapes))
+	pcx, pcy := float64(s.EditW)/2, float64(s.EditH)/2 // radial pivot = canvas centre
+	stepX := 2*ghx + math.Max(2*ghx*0.15, 6)           // box width + a small gap
+	sel := append([]int(nil), idx...)
+	for k := 1; k < count; k++ {
+		r := float64(k) * 2 * math.Pi / float64(count)
+		c, sn := math.Cos(r), math.Sin(r)
+		for _, src := range originals {
+			if len(s.EditShapes) >= editMaxShapes {
+				s.selectFromSet(sel)
+				s.markEditDirty()
+				return
+			}
+			clone := cloneShapes([]model.Shape{src})[0]
+			if radial {
+				applyRotation(&clone, src, float64(k)*360/float64(count))
+				scx, scy := shapeCenter(src)
+				nx := pcx + (scx-pcx)*c - (scy-pcy)*sn
+				ny := pcy + (scx-pcx)*sn + (scy-pcy)*c
+				moveShapeData(&clone, nx-scx, ny-scy)
+			} else {
+				moveShapeData(&clone, float64(k)*stepX, 0)
+			}
+			s.EditShapes = append(s.EditShapes, clone)
+			sel = append(sel, len(s.EditShapes)-1)
+		}
+	}
+	s.selectFromSet(sel)
+	s.markEditDirty()
+}
+
+// arrayPanel is the row/ring duplicate controls shown for any selection.
+func (s *AppState) arrayPanel(gtx C) D {
+	th := s.Th
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("editor.array")) }),
+		layout.Rigid(GapV(6).Layout),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx C) D {
+					w := gtx.Dp(52)
+					gtx.Constraints.Min.X, gtx.Constraints.Max.X = w, w
+					return th.editorBox(gtx, &s.arrayCount, i18n.T("editor.array_count"))
+				}),
+				layout.Rigid(GapH(8).Layout),
+				layout.Flexed(1, func(gtx C) D {
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return th.SecondaryButton(gtx, &s.arrayRowBtn, i18n.T("editor.array_row"), true)
+				}),
+				layout.Rigid(GapH(6).Layout),
+				layout.Flexed(1, func(gtx C) D {
+					gtx.Constraints.Min.X = gtx.Constraints.Max.X
+					return th.SecondaryButton(gtx, &s.arrayRingBtn, i18n.T("editor.array_ring"), true)
+				}),
+			)
+		}),
+	)
 }
 
 // mirrorSelection appends a copy of each selected shape reflected across the canvas vertical centre and

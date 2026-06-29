@@ -81,6 +81,10 @@
   "editor.guide_grid": "Grid",
   "editor.guide_ruler": "Ruler",
   "editor.snap": "Snap",
+  "editor.array": "Array",
+  "editor.array_count": "Count",
+  "editor.array_row": "Row",
+  "editor.array_ring": "Ring",
   "editor.new_canvas": "New canvas",
   "editor.clear_confirm": "Discard & start new?",
 
