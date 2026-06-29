@@ -730,6 +730,27 @@ func (s *AppState) groupScreenRect(rect image.Rectangle) image.Rectangle {
 	return out
 }
 
+// groupImgBox is the image-space (px) bounding box of the current selection, returned as centre +
+// half-extents. It uses the true rendered bbox of each shape so it matches the drawn group frame.
+func (s *AppState) groupImgBox(shapes []model.Shape) (gcx, gcy, ghx, ghy float64, ok bool) {
+	minX, minY := math.Inf(1), math.Inf(1)
+	maxX, maxY := math.Inf(-1), math.Inf(-1)
+	for _, i := range s.selIndices() {
+		if i < 0 || i >= len(shapes) {
+			continue
+		}
+		sh := shapes[i]
+		x0, y0, x1, y1 := raster.BBox(model.KindFromType(sh.Type), model.ParamsFromShape(sh), s.EditW, s.EditH)
+		minX, minY = math.Min(minX, float64(x0)), math.Min(minY, float64(y0))
+		maxX, maxY = math.Max(maxX, float64(x1)), math.Max(maxY, float64(y1))
+		ok = true
+	}
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	return (minX + maxX) / 2, (minY + maxY) / 2, (maxX - minX) / 2, (maxY - minY) / 2, true
+}
+
 // pressInsideSelection reports whether a press at pos falls within any selected shape's screen box.
 func (s *AppState) pressInsideSelection(pos f32.Point, rect image.Rectangle) bool {
 	for _, i := range s.selIndices() {
@@ -954,12 +975,24 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 	if s.editPanning || s.editDrag.kind != dragNone || s.editMarqueeOn || !s.selValid() {
 		return
 	}
-	if s.selCount() > 1 { // group is move-only: a grab cursor over the whole group box, no handles
-		if in := s.groupScreenRect(rect).Intersect(vp); in.Dx() > 0 && in.Dy() > 0 {
+	if s.selCount() > 1 { // group transform: grab over the box, resize handles on the frame, rotate knob above
+		g := s.groupScreenRect(rect)
+		if in := g.Intersect(vp); in.Dx() > 0 && in.Dy() > 0 {
 			c := clip.Rect(in).Push(gtx.Ops)
 			pointer.CursorGrab.Add(gtx.Ops)
 			c.Pop()
 		}
+		for i, h := range cropHandlePts(g) {
+			const r = editHandleHitR
+			hc := clip.Rect(image.Rect(h.X-r, h.Y-r, h.X+r, h.Y+r)).Push(gtx.Ops)
+			cropCursorForHandle(i).Add(gtx.Ops)
+			hc.Pop()
+		}
+		rp := rotateHandlePt(g)
+		const rr = editHandleHitR
+		rc := clip.Rect(image.Rect(rp.X-rr, rp.Y-rr, rp.X+rr, rp.Y+rr)).Push(gtx.Ops)
+		pointer.CursorPointer.Add(gtx.Ops)
+		rc.Pop()
 		return
 	}
 	sel := s.selScreenRect(rect)
@@ -1078,14 +1111,20 @@ func (s *AppState) drawSelection(gtx C, rect image.Rectangle) {
 // with a single move anchor — group transforms are move-only, so no scale handles or rotate knob.
 func (s *AppState) drawMultiSelection(gtx C, rect image.Rectangle) {
 	th := s.Th
-	// Thin static per-shape frames + a bolder group frame with one move anchor; the pulse is on the
-	// shapes' silhouettes (overlayOp), so nothing here flashes.
+	// Thin static per-shape frames + a bolder group frame carrying scale handles and a rotate knob; the
+	// pulse is on the shapes' silhouettes (overlayOp), so nothing here flashes.
 	for _, i := range s.selIndices() {
 		drawRectBorderW(gtx, s.shapeScreenRect(i, rect), th.Accent, 1)
 	}
 	g := s.groupScreenRect(rect)
 	drawRectBorderW(gtx, g, color.NRGBA{A: 160}, 2)
 	drawRectBorderW(gtx, g, th.Accent, 1)
+	knob := rotateHandlePt(g)
+	drawLine(gtx, image.Pt((g.Min.X+g.Max.X)/2, g.Min.Y), knob, th.Accent, 1.5)
+	drawKnob(gtx, knob, th.Accent, th.Bg)
+	for _, p := range cropHandlePts(g) {
+		drawHandle(gtx, p, th.Accent, th.Bg)
+	}
 	drawMoveAnchor(gtx, image.Pt((g.Min.X+g.Max.X)/2, (g.Min.Y+g.Max.Y)/2), th.Accent, th.Bg)
 }
 
@@ -1194,6 +1233,20 @@ func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle, additive
 			}
 		}
 	}
+	// Group scale/rotate handles act on the group's axis-aligned box.
+	if s.selCount() > 1 && !additive {
+		g := s.groupScreenRect(rect)
+		if within(pos, rotateHandlePt(g), editHandleHitR) {
+			s.startTransform(dragRotate, 0, fp)
+			return
+		}
+		for i, h := range cropHandlePts(g) {
+			if within(pos, h, editHandleHitR) {
+				s.startTransform(dragScale, i, fp)
+				return
+			}
+		}
+	}
 	// A press inside ANY selected shape's box moves the whole selection — so sparse shapes (a barcode,
 	// a dotted decal) can be grabbed by their box, not only their solid pixels, and a multi-selection
 	// drags as one.
@@ -1245,12 +1298,19 @@ func ptInRect(p f32.Point, r image.Rectangle) bool {
 func (s *AppState) startTransform(kind, handle int, fp f32.Point) {
 	d := editorDrag{kind: kind, handle: handle, start: cloneShapes(s.EditShapes), anchor: fp}
 	if s.selValid() {
-		sh := s.EditShapes[s.EditSel]
-		d.cx, d.cy = shapeCenter(sh)
-		d.theta0 = shapeTheta(sh)
+		if s.selCount() > 1 {
+			// Group transform: pivot is the group box centre, with no intrinsic base angle.
+			if gcx, gcy, _, _, ok := s.groupImgBox(s.EditShapes); ok {
+				d.cx, d.cy, d.theta0 = gcx, gcy, 0
+			}
+		} else {
+			sh := s.EditShapes[s.EditSel]
+			d.cx, d.cy = shapeCenter(sh)
+			d.theta0 = shapeTheta(sh)
+		}
 		d.ang0 = math.Atan2(float64(fp.Y)*float64(s.EditH)-d.cy, float64(fp.X)*float64(s.EditW)-d.cx)
 		// Pre-render everything except the selected shape(s) once, so each drag frame only re-composites
-		// those (live + smooth at any doc size, even for a multi-shape group move).
+		// those (live + smooth at any doc size, even for a multi-shape group transform).
 		skip := map[int]bool{}
 		for _, i := range s.selIndices() {
 			skip[i] = true
@@ -1279,6 +1339,11 @@ func (s *AppState) dragEditor(fp f32.Point) {
 			moveShapeData(&s.EditShapes[i], dx, dy)
 		}
 		s.markEditDirty()
+		return
+	}
+	// Group scale/rotate: transform every selected shape about the group box.
+	if (d.kind == dragScale || d.kind == dragRotate) && s.selCount() > 1 {
+		s.dragGroup(fp)
 		return
 	}
 	start := d.start[s.EditSel]
@@ -1327,6 +1392,66 @@ func (s *AppState) dragEditor(fp f32.Point) {
 			deltaDeg = math.Round((d.theta0+deltaDeg)/15)*15 - d.theta0
 		}
 		applyRotation(dst, start, deltaDeg)
+	}
+	s.markEditDirty()
+}
+
+// dragGroup scales or rotates the whole selection about its group box. Scale is uniform (driven by the
+// dragged handle's distance from the fixed opposite corner/edge); rotate turns each shape's centre about
+// the group centre and adds the same delta to the shape's own orientation.
+func (s *AppState) dragGroup(fp f32.Point) {
+	d := s.editDrag
+	gcx, gcy, ghx, ghy, ok := s.groupImgBox(d.start)
+	if !ok {
+		return
+	}
+	px := float64(fp.X) * float64(s.EditW)
+	py := float64(fp.Y) * float64(s.EditH)
+	switch d.kind {
+	case dragRotate:
+		deltaDeg := (math.Atan2(py-gcy, px-gcx) - d.ang0) * 180 / math.Pi
+		if s.editShift {
+			deltaDeg = math.Round(deltaDeg/15) * 15
+		}
+		r := deltaDeg * math.Pi / 180
+		c, sn := math.Cos(r), math.Sin(r)
+		for _, i := range s.selIndices() {
+			if i >= len(d.start) {
+				continue
+			}
+			src := d.start[i]
+			dst := &s.EditShapes[i]
+			dst.Data = append([]float64(nil), src.Data...)
+			applyRotation(dst, src, deltaDeg)
+			scx, scy := shapeCenter(src)
+			nx := gcx + (scx-gcx)*c - (scy-gcy)*sn
+			ny := gcy + (scx-gcx)*sn + (scy-gcy)*c
+			moveShapeData(dst, nx-scx, ny-scy)
+		}
+	case dragScale:
+		sx, sy := float64(handleSignX(d.handle)), float64(handleSignY(d.handle))
+		ax, ay := gcx-sx*ghx, gcy-sy*ghy // fixed opposite corner/edge
+		v0x, v0y := 2*sx*ghx, 2*sy*ghy
+		denom := v0x*v0x + v0y*v0y
+		if denom < 1e-9 {
+			return
+		}
+		f := ((px-ax)*v0x + (py-ay)*v0y) / denom
+		if f < 0.05 {
+			f = 0.05
+		}
+		for _, i := range s.selIndices() {
+			if i >= len(d.start) {
+				continue
+			}
+			src := d.start[i]
+			dst := &s.EditShapes[i]
+			dst.Data = append([]float64(nil), src.Data...)
+			scx, scy := shapeCenter(src)
+			moveShapeData(dst, ax+(scx-ax)*f-scx, ay+(scy-ay)*f-scy)
+			hx, hy := shapeHalfExtents(src)
+			setShapeScale(dst, hx*f, hy*f)
+		}
 	}
 	s.markEditDirty()
 }

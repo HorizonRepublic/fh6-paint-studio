@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/io/key"
 
 	"fh6-paint-studio/internal/maskbank"
@@ -343,6 +344,51 @@ func TestGroupNudgeMovesEveryShape(t *testing.T) {
 	s.nudge(1, 0, key.ModShift) // +10 px to each selected shape
 	if s.EditShapes[1].Data[0] != 30 || s.EditShapes[2].Data[0] != 50 {
 		t.Fatalf("group nudge x = %v,%v, want 30,50", s.EditShapes[1].Data[0], s.EditShapes[2].Data[0])
+	}
+}
+
+func TestGroupRotate180SwapsCentresAcrossGroupCentre(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	gcx, gcy, _, _, _ := s.groupImgBox(s.EditShapes)
+	src := cloneShapes(s.EditShapes)
+	// Pointer left of the group centre at its own height → atan2≈π → ~180° rotation about the centre.
+	s.editDrag = editorDrag{kind: dragRotate, start: src, ang0: 0}
+	s.dragGroup(f32.Point{X: 0, Y: float32(gcy) / float32(s.EditH)})
+	for _, i := range []int{1, 2} {
+		wantX := 2*gcx - src[i].Data[0] // reflection through the group centre
+		wantY := 2*gcy - src[i].Data[1]
+		g := s.EditShapes[i].Data
+		if math.Abs(g[0]-wantX) > 1e-3 || math.Abs(g[1]-wantY) > 1e-3 {
+			t.Fatalf("shape%d centre = %v,%v, want %v,%v", i, g[0], g[1], wantX, wantY)
+		}
+		if math.Abs(g[4]-(src[i].Data[4]+180)) > 1e-3 {
+			t.Fatalf("shape%d rotation = %v, want %v", i, g[4], src[i].Data[4]+180)
+		}
+	}
+}
+
+func TestGroupScaleDoublesAboutFixedCorner(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	gcx, gcy, ghx, ghy, _ := s.groupImgBox(s.EditShapes)
+	ax, ay := gcx-ghx, gcy-ghy // SE handle (4) keeps the NW corner fixed
+	src := cloneShapes(s.EditShapes)
+	s.editDrag = editorDrag{kind: dragScale, handle: 4, start: src}
+	s.dragGroup(f32.Point{X: 0.85, Y: 0.85}) // pull SE outward → uniform enlargement
+	f := s.EditShapes[1].Data[2] / src[1].Data[2]
+	if f <= 1.0 {
+		t.Fatalf("expected enlargement, factor = %v", f)
+	}
+	for _, i := range []int{1, 2} {
+		wantCx := ax + (src[i].Data[0]-ax)*f // every shape scales by the same factor about the anchor
+		wantCy := ay + (src[i].Data[1]-ay)*f
+		wantHx := src[i].Data[2] * f
+		wantHy := src[i].Data[3] * f
+		g := s.EditShapes[i].Data
+		if math.Abs(g[0]-wantCx) > 1e-4 || math.Abs(g[1]-wantCy) > 1e-4 || math.Abs(g[2]-wantHx) > 1e-4 || math.Abs(g[3]-wantHy) > 1e-4 {
+			t.Fatalf("shape%d = %v, want centre %v,%v half %v,%v", i, g, wantCx, wantCy, wantHx, wantHy)
+		}
 	}
 }
 
