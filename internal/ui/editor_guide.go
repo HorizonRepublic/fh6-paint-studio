@@ -68,7 +68,7 @@ func (s *AppState) drawCanvasGuide(gtx C, vp, rect image.Rectangle) {
 	}
 	th := s.Th
 	scale := float64(rect.Dx()) / float64(s.EditW) // screen px per image px
-	step := niceStep(float64(gtx.Dp(38)) / scale)
+	step := niceStep(float64(gtx.Dp(20)) / scale)  // ~20dp on-screen spacing → a finer, more detailed grid
 	minor := color.NRGBA{R: th.Border.R, G: th.Border.G, B: th.Border.B, A: 70}
 	major := color.NRGBA{R: th.Border.R, G: th.Border.G, B: th.Border.B, A: 140}
 

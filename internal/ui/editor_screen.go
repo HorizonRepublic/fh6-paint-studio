@@ -13,7 +13,8 @@ import (
 // editorScreen is the full-window editor view (its own top-level tab): a palette/bank column, the
 // canvas + toolbar, and the inspector + layers column.
 func (s *AppState) editorScreen(gtx C) D {
-	return layout.UniformInset(12).Layout(gtx, func(gtx C) D {
+	sz := gtx.Constraints.Max
+	dims := layout.UniformInset(12).Layout(gtx, func(gtx C) D {
 		fillH := func(w layout.Widget) layout.Widget {
 			return func(gtx C) D {
 				gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
@@ -36,6 +37,9 @@ func (s *AppState) editorScreen(gtx C) D {
 			layout.Rigid(fixed(300, s.editorRightColumn)),
 		)
 	})
+	// Drag-and-drop layer on top of everything (pass-through, so it never steals clicks).
+	s.dragOverlay(gtx, sz)
+	return dims
 }
 
 // editorLeftColumn is undo/redo + the add-primitive quick palette + the categorized dictionary grid.

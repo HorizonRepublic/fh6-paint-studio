@@ -463,6 +463,7 @@ func (s *AppState) editorArea(gtx C) D {
 	vp := image.Rectangle{Max: sz}
 	s.updateCanvas(gtx, sz)
 	rect := s.zoomedRect(sz)
+	s.canvasImgRect = rect // recorded for the drag-and-drop drop mapping
 
 	cl := clip.Rect(vp).Push(gtx.Ops)
 	// During a shape drag, composite ONLY the selected shape(s) over the pre-rendered base. Off-drag,
@@ -759,7 +760,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target:  &s.editKeyTag,
-			Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel,
+			Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel | pointer.Move | pointer.Leave,
 			ScrollY: pointer.ScrollRange{Min: -1000, Max: 1000},
 		})
 		if !ok {
@@ -773,6 +774,11 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 		switch pe.Kind {
 		case pointer.Scroll:
 			s.zoomAbout(pe.Position, math.Exp(float64(-pe.Scroll.Y)*0.0015), sz)
+		case pointer.Move:
+			s.canvasLocal = pe.Position
+			s.canvasHover = true
+		case pointer.Leave:
+			s.canvasHover = false
 		case pointer.Press:
 			if s.eyedropMode {
 				s.sampleColor(pxToFrac(pe.Position, rect))

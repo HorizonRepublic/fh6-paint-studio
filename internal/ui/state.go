@@ -426,6 +426,22 @@ type AppState struct {
 	// editor canvas backdrop / measurement guide (checkerboard / grid / ruler), cycled from the toolbar
 	canvasGuide int
 	GuideBtn    widget.Clickable
+
+	// editor drag-and-drop: drag a shape from the bank/primitive palette onto the canvas. A full-window
+	// pass-through pointer layer tracks the cursor in window coords; the window→canvas offset is observed
+	// while hovering the canvas so the drop maps to the right image position.
+	bankCandKind  int       // 0 none, 1 mask, 2 primitive — a press that may become a drag
+	bankCandWord  int       // mask word (bankCandKind 1)
+	bankCandPrim  int       // primitive kind (bankCandKind 2)
+	bankDragging  bool      // a drag past the threshold is underway (ghost shown)
+	dragTag       int       // top-level pass-through pointer tag
+	dragStartWin  f32.Point // press position (overlay/window coords)
+	dragWin       f32.Point // current cursor (overlay/window coords)
+	canvasHover   bool      // cursor currently over the canvas (offset capture)
+	canvasLocal   f32.Point // cursor in canvas-local coords (last hover)
+	canvasOff     f32.Point // window minus canvas-local (constant while the layout holds)
+	canvasOffOK   bool
+	canvasImgRect image.Rectangle // the zoomed image rect in canvas-local coords
 }
 
 // expertGroup is the collapse state of one expert sub-section.

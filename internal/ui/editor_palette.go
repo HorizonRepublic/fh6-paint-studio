@@ -286,6 +286,9 @@ func (s *AppState) handlePaletteActions(gtx C) {
 		{&s.palDisk, primDisk},
 	}
 	for i, p := range prims {
+		if p.b.Pressed() && s.bankCandKind == 0 && !s.bankDragging {
+			s.bankCandKind, s.bankCandPrim = 2, p.k // a press that may become a drag
+		}
 		if p.b.Clicked(gtx) && s.doubleClicked(2, i, gtx.Now) {
 			s.addPrimitive(p.k)
 		}

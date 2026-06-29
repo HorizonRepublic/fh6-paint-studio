@@ -75,7 +75,11 @@ func buildBankRows(entries []maskbank.Entry, cols int) []bankRow {
 
 // handleBankActions processes every thumbnail click (insert the word).
 func (s *AppState) handleBankActions(gtx C) {
+	entries := maskbank.All()
 	for i := range s.bankBtns {
+		if s.bankBtns[i].Pressed() && s.bankCandKind == 0 && !s.bankDragging && i < len(entries) {
+			s.bankCandKind, s.bankCandWord = 1, int(entries[i].Word) // a press that may become a drag
+		}
 		if s.bankBtns[i].Clicked(gtx) && s.doubleClicked(1, i, gtx.Now) {
 			s.insertBankWord(i)
 		}
