@@ -3,10 +3,20 @@ package i18n
 import "testing"
 
 func TestTFallsBackToEnglish(t *testing.T) {
-	SetLocale("uk") // no uk.json yet -> must fall back to en
-	defer SetLocale("en")
+	// A locale that is missing a key must fall back to the English text for that key.
+	catalogs["zz"] = map[string]string{}
+	defer func() { delete(catalogs, "zz"); SetLocale("en") }()
+	SetLocale("zz")
 	if got, want := T("shapes.used"), "Used shapes"; got != want {
-		t.Fatalf("T(shapes.used)=%q, want %q (en fallback)", got, want)
+		t.Fatalf("missing-key fallback = %q, want %q (en)", got, want)
+	}
+}
+
+func TestLocaleSwitchesText(t *testing.T) {
+	defer SetLocale("en")
+	SetLocale("uk")
+	if got := T("shapes.used"); got == "" || got == "Used shapes" {
+		t.Fatalf("uk T(shapes.used)=%q, expected a Ukrainian translation distinct from English", got)
 	}
 }
 
