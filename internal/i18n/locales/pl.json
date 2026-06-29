@@ -67,6 +67,8 @@
   "editor.cat_letters": "Litery",
   "editor.cat_decals": "Naklejki i symbole",
 
+  "editor.eyedrop": "Pipeta",
+
   "about.dev": "dev",
   "about.dev_build": "kompilacja dev",
   "about.update_available": "Dostępna aktualizacja — ",

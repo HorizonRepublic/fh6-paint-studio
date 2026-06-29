@@ -67,6 +67,8 @@
   "editor.cat_letters": "字母",
   "editor.cat_decals": "贴花与符号",
 
+  "editor.eyedrop": "取色",
+
   "about.dev": "开发版",
   "about.dev_build": "开发构建",
   "about.update_available": "有可用更新 — ",

@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 
+	"gioui.org/f32"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/widget"
@@ -82,13 +83,24 @@ func (s *AppState) colorSection(gtx C) D {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("editor.color")) }),
 				layout.Flexed(1, spacerW),
+				layout.Rigid(func(gtx C) D {
+					lbl := i18n.T("editor.eyedrop")
+					if s.eyedropMode {
+						lbl = "• " + lbl
+					}
+					return th.SecondaryButton(gtx, &s.eyedropBtn, lbl, true)
+				}),
+				layout.Rigid(GapH(8).Layout),
 				layout.Rigid(func(gtx C) D { return s.colorSwatch(gtx, colorFromShape(sh)) }),
 			)
 		}),
 	}
 	if s.colorPickerOpen {
+		rows = append(rows, layout.Rigid(GapV(8).Layout))
+		if len(s.recentColors) > 0 {
+			rows = append(rows, layout.Rigid(s.recentColorsRow), layout.Rigid(GapV(6).Layout))
+		}
 		rows = append(rows,
-			layout.Rigid(GapV(8).Layout),
 			layout.Rigid(s.colorPaletteGrid),
 			layout.Rigid(GapV(8).Layout),
 			layout.Rigid(func(gtx C) D {
@@ -179,7 +191,70 @@ func (s *AppState) applyPaletteColor(c color.NRGBA) {
 	}
 	sh.Color[0], sh.Color[1], sh.Color[2] = int(c.R), int(c.G), int(c.B)
 	s.pickR.Value, s.pickG.Value, s.pickB.Value = float32(c.R)/255, float32(c.G)/255, float32(c.B)/255
+	s.pushRecentColor(c)
 	s.markEditDirty()
+}
+
+// pushRecentColor records an applied colour at the front of the recents (deduped, capped).
+func (s *AppState) pushRecentColor(c color.NRGBA) {
+	c.A = 255
+	for i, e := range s.recentColors {
+		if e == c {
+			s.recentColors = append(s.recentColors[:i], s.recentColors[i+1:]...)
+			break
+		}
+	}
+	s.recentColors = append([]color.NRGBA{c}, s.recentColors...)
+	if len(s.recentColors) > 10 {
+		s.recentColors = s.recentColors[:10]
+	}
+}
+
+// sampleColor (eyedropper) reads the colour at the canvas point from the last render and applies it.
+func (s *AppState) sampleColor(fp f32.Point) {
+	if s.editImg == nil || !s.selValid() {
+		return
+	}
+	x := int(float64(fp.X) * float64(s.EditW))
+	y := int(float64(fp.Y) * float64(s.EditH))
+	b := s.editImg.Bounds()
+	if x < b.Min.X || x >= b.Max.X || y < b.Min.Y || y >= b.Max.Y {
+		return
+	}
+	c := s.editImg.NRGBAAt(x, y)
+	if c.A == 0 {
+		return // empty canvas — nothing to pick
+	}
+	c.A = 255
+	s.applyPaletteColor(c)
+}
+
+// recentColorsRow renders the recently-applied colours as clickable swatches.
+func (s *AppState) recentColorsRow(gtx C) D {
+	for len(s.recentBtns) < len(s.recentColors) {
+		s.recentBtns = append(s.recentBtns, widget.Clickable{})
+	}
+	var cells []layout.FlexChild
+	for i, c := range s.recentColors {
+		if i > 0 {
+			cells = append(cells, layout.Rigid(GapH(4).Layout))
+		}
+		i, c := i, c
+		cells = append(cells, layout.Rigid(func(gtx C) D { return s.colorChipBtn(gtx, &s.recentBtns[i], c) }))
+	}
+	return layout.Flex{}.Layout(gtx, cells...)
+}
+
+// colorChipBtn is a small fixed swatch button for a given colour + clickable.
+func (s *AppState) colorChipBtn(gtx C, b *widget.Clickable, col color.NRGBA) D {
+	th := s.Th
+	return material.Clickable(gtx, b, func(gtx C) D {
+		sz := image.Pt(gtx.Dp(20), gtx.Dp(18))
+		gtx.Constraints = layout.Exact(sz)
+		borderRRect(gtx, th.Border, col, sz, 4, 1)
+		pointer.CursorPointer.Add(gtx.Ops)
+		return D{Size: sz}
+	})
 }
 
 // hsvToRGB converts HSV (h in degrees, s,v in 0..1) to an opaque NRGBA.
@@ -383,11 +458,19 @@ func (s *AppState) handleEditActions(gtx C) {
 			s.populateColorSliders()
 		}
 	}
+	if s.eyedropBtn.Clicked(gtx) {
+		s.eyedropMode = !s.eyedropMode
+	}
 	if s.colorPickerOpen {
 		pal := editorRainbow()
 		for i := range s.colorPalBtns {
 			if i < len(pal) && s.colorPalBtns[i].Clicked(gtx) {
 				s.applyPaletteColor(pal[i])
+			}
+		}
+		for i := range s.recentBtns {
+			if i < len(s.recentColors) && s.recentBtns[i].Clicked(gtx) {
+				s.applyPaletteColor(s.recentColors[i])
 			}
 		}
 	}

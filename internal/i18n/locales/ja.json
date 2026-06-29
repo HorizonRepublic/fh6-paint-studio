@@ -67,6 +67,8 @@
   "editor.cat_letters": "文字",
   "editor.cat_decals": "デカール・記号",
 
+  "editor.eyedrop": "スポイト",
+
   "about.dev": "開発版",
   "about.dev_build": "開発ビルド",
   "about.update_available": "更新があります — ",

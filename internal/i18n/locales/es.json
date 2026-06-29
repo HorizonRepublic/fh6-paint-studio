@@ -67,6 +67,8 @@
   "editor.cat_letters": "Letras",
   "editor.cat_decals": "Calcas y símbolos",
 
+  "editor.eyedrop": "Cuentagotas",
+
   "about.dev": "dev",
   "about.dev_build": "compilación dev",
   "about.update_available": "Actualización disponible — ",

@@ -293,6 +293,7 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	s.editLayerList.Axis = layout.Vertical
 	s.bankList.Axis = layout.Vertical
 	s.colorPickerOpen = false
+	s.eyedropMode = false
 	s.editSavePending = false
 	s.editSavedMsg = ""
 	s.editDragBase = nil
@@ -356,7 +357,8 @@ func (s *AppState) editorArea(gtx C) D {
 		imageio.CompositeShapeOnto(img, s.EditShapes[s.EditSel], s.EditW, s.EditH)
 		s.editOp = paint.NewImageOp(img)
 	} else if s.editDirty {
-		s.editOp = paint.NewImageOp(imageio.RenderFH6Image(s.EditShapes, true, s.EditW, s.EditH, 1))
+		s.editImg = imageio.RenderFH6Image(s.EditShapes, true, s.EditW, s.EditH, 1)
+		s.editOp = paint.NewImageOp(s.editImg)
 		s.editDirty = false
 	}
 	drawCheckerboard(gtx, rect)
@@ -448,7 +450,10 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 		case pointer.Scroll:
 			s.zoomAbout(pe.Position, math.Exp(float64(-pe.Scroll.Y)*0.0015), sz)
 		case pointer.Press:
-			if pe.Buttons&pointer.ButtonPrimary != 0 {
+			if s.eyedropMode {
+				s.sampleColor(pxToFrac(pe.Position, rect))
+				s.eyedropMode = false
+			} else if pe.Buttons&pointer.ButtonPrimary != 0 {
 				gtx.Execute(key.FocusCmd{Tag: &s.editKeyTag})
 				s.editPanning = false
 				s.pressEditor(pe.Position, pxToFrac(pe.Position, rect), rect)
@@ -482,6 +487,8 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 	area := clip.Rect(vp).Push(gtx.Ops)
 	event.Op(gtx.Ops, &s.editKeyTag)
 	switch {
+	case s.eyedropMode:
+		pointer.CursorCrosshair.Add(gtx.Ops)
 	case s.editPanning:
 		pointer.CursorGrabbing.Add(gtx.Ops)
 	case s.editDrag.kind != dragNone:

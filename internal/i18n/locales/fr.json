@@ -67,6 +67,8 @@
   "editor.cat_letters": "Lettres",
   "editor.cat_decals": "Décalcomanies et symboles",
 
+  "editor.eyedrop": "Pipette",
+
   "about.dev": "dev",
   "about.dev_build": "build dev",
   "about.update_available": "Mise à jour disponible — ",

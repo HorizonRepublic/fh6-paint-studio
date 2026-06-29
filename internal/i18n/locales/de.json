@@ -67,6 +67,8 @@
   "editor.cat_letters": "Buchstaben",
   "editor.cat_decals": "Aufkleber & Symbole",
 
+  "editor.eyedrop": "Pipette",
+
   "about.dev": "dev",
   "about.dev_build": "Dev-Build",
   "about.update_available": "Update verfügbar — ",

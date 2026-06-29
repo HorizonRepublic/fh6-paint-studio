@@ -67,6 +67,8 @@
   "editor.cat_letters": "Letters",
   "editor.cat_decals": "Decals & symbols",
 
+  "editor.eyedrop": "Pick",
+
   "about.dev": "dev",
   "about.dev_build": "dev build",
   "about.update_available": "Update available — ",

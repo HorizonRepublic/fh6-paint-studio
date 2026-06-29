@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"image/color"
 	"strconv"
 	"strings"
 	"time"
@@ -364,6 +365,11 @@ type AppState struct {
 	colorPickerOpen                     bool
 	pickR, pickG, pickB, pickA          widget.Float       // R/G/B/Alpha sliders (0..1)
 	colorPalBtns                        []widget.Clickable // rainbow preset swatches
+	eyedropBtn                          widget.Clickable   // eyedropper toggle
+	eyedropMode                         bool               // next canvas click samples a colour
+	editImg                             *image.NRGBA       // last full render, sampled by the eyedropper
+	recentColors                        []color.NRGBA      // recently applied colours
+	recentBtns                          []widget.Clickable
 
 	// editor palette + layers + redo (the undo stack is editUndo above).
 	palCircle, palSquare, palTriangle widget.Clickable

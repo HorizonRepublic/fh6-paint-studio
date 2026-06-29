@@ -67,6 +67,8 @@
   "editor.cat_letters": "Літери",
   "editor.cat_decals": "Декали та символи",
 
+  "editor.eyedrop": "Піпетка",
+
   "about.dev": "dev",
   "about.dev_build": "dev-збірка",
   "about.update_available": "Доступне оновлення — ",

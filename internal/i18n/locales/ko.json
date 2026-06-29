@@ -67,6 +67,8 @@
   "editor.cat_letters": "문자",
   "editor.cat_decals": "데칼 및 기호",
 
+  "editor.eyedrop": "스포이트",
+
   "about.dev": "개발",
   "about.dev_build": "개발 빌드",
   "about.update_available": "업데이트 사용 가능 — ",
