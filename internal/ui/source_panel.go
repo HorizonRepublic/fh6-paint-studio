@@ -74,38 +74,7 @@ func (s *AppState) sourceCard(gtx C) D {
 			}
 			return th.Dim(gtx, name)
 		}),
-		layout.Rigid(s.recentList),
 	)
-}
-
-// recentList shows the recently-opened images as clickable filenames (click to reopen). The clicks are
-// handled in the main loop (RecentBtns parallel to Recent). Hidden when empty.
-func (s *AppState) recentList(gtx C) D {
-	th := s.Th
-	if len(s.Recent) == 0 {
-		return D{}
-	}
-	children := []layout.FlexChild{
-		layout.Rigid(GapV(10).Layout),
-		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, i18n.T("source.recent"), th.TextDim) }),
-		layout.Rigid(GapV(4).Layout),
-	}
-	for i := range s.Recent {
-		if i >= len(s.RecentBtns) || i >= 6 {
-			break
-		}
-		i := i
-		name := filepath.Base(s.Recent[i])
-		children = append(children, layout.Rigid(func(gtx C) D {
-			return material.Clickable(gtx, &s.RecentBtns[i], func(gtx C) D {
-				return layout.Inset{Top: 2, Bottom: 2}.Layout(gtx, func(gtx C) D {
-					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					return th.Lbl(gtx, 13, name, th.Text)
-				})
-			})
-		}))
-	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 // thumbnail draws the loaded source fit inside a rounded surface box, or a placeholder.

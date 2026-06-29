@@ -238,10 +238,8 @@ type AppState struct {
 	// actions
 	OpenBtn          widget.Clickable
 	PreviewOpen      widget.Clickable // the empty-state preview area doubles as an Open button
-	Recent           []string         // recently opened image paths (newest first); rendered in the Source card
-	RecentBtns       []widget.Clickable
-	escTag           int // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
-	lightboxTag      int // pointer tag for the lightbox scrim — captures clicks so they dismiss it (and don't fall through to the gallery thumbs behind)
+	escTag           int              // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
+	lightboxTag      int              // pointer tag for the lightbox scrim — captures clicks so they dismiss it (and don't fall through to the gallery thumbs behind)
 	GenBtn           widget.Clickable
 	CancelBtn        widget.Clickable
 	InjectLayers     widget.Editor // exact FH6 template layer count for injection (library inject controls)
@@ -533,12 +531,6 @@ func (s *AppState) SetPreview(img *image.NRGBA) {
 	}
 	s.Preview = img
 	s.PreviewOp = paint.NewImageOp(img)
-}
-
-// SetRecent stores the recently-opened image paths (newest first) and rebuilds their click targets.
-func (s *AppState) SetRecent(paths []string) {
-	s.Recent = paths
-	s.RecentBtns = make([]widget.Clickable, len(paths))
 }
 
 // AppendLog adds a line to the activity feed, inferring its severity from the text (capped to 600).

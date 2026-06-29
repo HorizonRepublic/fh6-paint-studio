@@ -25,7 +25,6 @@ type studioConfig struct {
 	CheckUpdates    *bool     `json:"check_updates,omitempty"` // tri-state, nil = on
 	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
 	LastSeenVersion string    `json:"last_seen_version,omitempty"`
-	Recent          []string  `json:"recent,omitempty"` // recently opened image paths, newest first
 }
 
 // SoundOn reports the saved sound preference, defaulting to ON when unset.

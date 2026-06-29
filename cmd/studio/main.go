@@ -96,7 +96,6 @@ func loop(w *app.Window) error {
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
 	st.LastSeen = prefs.LastSeenVersion
-	st.SetRecent(prefs.Recent) // restore the recently-opened images
 
 	// Warm the shell file-dialog infrastructure in the background so the first Open shows the native
 	// dialog without a cold-start delay.
@@ -196,7 +195,6 @@ func loop(w *app.Window) error {
 
 	// savePrefs persists the UI preferences (window size + sound) to studio.json — called on exit and
 	// whenever a persisted toggle changes, so a preference survives even an unclean shutdown.
-	recent := append([]string(nil), prefs.Recent...) // recently-opened images, newest first
 	savePrefs := func() {
 		on := st.SoundOn.Value
 		keep := st.KeepInside.Value
@@ -204,29 +202,12 @@ func loop(w *app.Window) error {
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
 			KeepInside: &keep, SourceRes: &srcRes, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
-			LastSeenVersion: st.LastSeen, Recent: recent, Locale: i18n.Current()}
+			LastSeenVersion: st.LastSeen, Locale: i18n.Current()}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
 		}
 		saveConfig(c)
 	}
-	// pushRecent moves a freshly-opened image to the front of the recent list (deduped, capped) and
-	// persists it, so it survives a restart and shows in the Source card.
-	pushRecent := func(p string) {
-		if p == "" {
-			return
-		}
-		out := []string{p}
-		for _, q := range recent {
-			if q != p && len(out) < 8 {
-				out = append(out, q)
-			}
-		}
-		recent = out
-		st.SetRecent(recent)
-		savePrefs()
-	}
-
 	post := func(e runner.Event) { q.push(e); w.Invalidate() }
 
 	upd := newUpdater()
@@ -407,7 +388,6 @@ func loop(w *app.Window) error {
 					st.SetSource(res.img, res.path)
 					st.Toast = ""
 					st.Log = nil
-					pushRecent(res.path)
 				}
 			}
 
@@ -426,12 +406,6 @@ func loop(w *app.Window) error {
 				// Gio's main thread would make the modal SendMessage to that thread and deadlock.
 				picking = true
 				go func() { openPick.put(pickFile(0)); w.Invalidate() }()
-			}
-			// Reopen a recently-used image (clicked in the Source card).
-			for i := range st.RecentBtns {
-				if st.RecentBtns[i].Clicked(gtx) && !opening && !picking && i < len(st.Recent) {
-					beginOpen(st.Recent[i])
-				}
 			}
 			if p, ok := openPick.take(); ok {
 				picking = false
