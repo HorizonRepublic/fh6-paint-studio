@@ -56,6 +56,7 @@ func (s *AppState) previewArea(gtx C) D {
 		wx := rect.Min.X + int(float64(rect.Dx())*float64(clamp01(s.Wipe.Value)))
 		region := image.Rect(wx, rect.Min.Y, rect.Max.X, rect.Max.Y)
 		cl := clip.Rect(region).Push(gtx.Ops)
+		drawCheckerboard(gtx, rect) // neutral backing so a transparent reconstruction shows the checker, not the source beneath
 		drawImageIn(gtx, s.PreviewOp, rect)
 		cl.Pop()
 		if wx > rect.Min.X && wx < rect.Max.X {
@@ -74,6 +75,28 @@ func (s *AppState) previewArea(gtx C) D {
 		s.drawZoomButton(gtx, rect)
 	}
 	return D{Size: sz}
+}
+
+// drawCheckerboard fills rect with the standard transparency checker, so transparent areas of the
+// reconstruction read as empty instead of revealing the source image underneath (which made logo / text
+// boundaries hard to see). It backs the reconstruction side of the wipe; the source side is untouched.
+func drawCheckerboard(gtx C, rect image.Rectangle) {
+	dark := color.NRGBA{R: 0x23, G: 0x26, B: 0x2e, A: 0xff}
+	light := color.NRGBA{R: 0x33, G: 0x37, B: 0x42, A: 0xff}
+	paint.FillShape(gtx.Ops, dark, clip.Rect(rect).Op())
+	cs := gtx.Dp(11)
+	if cs < 1 {
+		cs = 1
+	}
+	for y := rect.Min.Y; y < rect.Max.Y; y += cs {
+		for x := rect.Min.X; x < rect.Max.X; x += cs {
+			if ((x-rect.Min.X)/cs+(y-rect.Min.Y)/cs)%2 == 0 {
+				continue
+			}
+			r := image.Rect(x, y, min(x+cs, rect.Max.X), min(y+cs, rect.Max.Y))
+			paint.FillShape(gtx.Ops, light, clip.Rect(r).Op())
+		}
+	}
 }
 
 // drawZoomButton renders the corner "Zoom" pill, right-aligned in the reconstruction's top-right. It is
