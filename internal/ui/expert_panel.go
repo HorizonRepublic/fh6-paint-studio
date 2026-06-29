@@ -84,12 +84,6 @@ func (s *AppState) expertBlock(gtx C) D {
 			"Maximum elongation for ellipse/rectangle slivers. Higher = thin slivers that trace sharp contours; 0 = round shapes for smooth content. Blank = preset default.\n\nAffects: quality.",
 			&s.AspectEd, "auto", false),
 		gap(8),
-		layout.Rigid(func(gtx C) D {
-			return s.fieldHint(gtx, "Shape kinds", &s.KindsHint,
-				"Which primitives to use. Tick the kinds to include; fewer kinds is faster but coarser.\n\nAffects: time and quality.",
-				func(gtx C) D { return s.KindsSel.Layout(gtx, th) })
-		}),
-		gap(8),
 		layout.Rigid(s.kindWeightsBlock),
 		gap(8),
 		slider("Standout suppression", &s.StandoutHint,

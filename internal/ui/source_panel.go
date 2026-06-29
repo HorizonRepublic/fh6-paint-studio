@@ -137,11 +137,6 @@ func (s *AppState) settingsCard(gtx C) D {
 		layout.Rigid(func(gtx C) D { return s.stepHeader(gtx, "2", "Adjust") }),
 		layout.Rigid(GapV(10).Layout),
 		layout.Rigid(s.budgetRow),
-		layout.Rigid(GapV(10).Layout),
-		layout.Rigid(func(gtx C) D {
-			return s.toggleRow(gtx, &s.SourceRes, "Use source resolution", &s.SourceResHint,
-				"OFF by default — large images are fitted at a fast working resolution. ON: the engine fits at the image's ORIGINAL resolution, so fine lines and small detail survive on big sources. Generation can take several times longer; use it when you want maximum quality. No effect on images at or below the working size.")
-		}),
 		layout.Rigid(func(gtx C) D {
 			if !preset.IsHybridMode(s.baseMode) { // the Artist line/fill dial only applies to the hybrids
 				return D{}
@@ -252,6 +247,13 @@ func (s *AppState) advancedSection(gtx C) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(head),
 		layout.Rigid(GapV(10).Layout),
+		layout.Rigid(s.shapeKindsRow),
+		layout.Rigid(GapV(10).Layout),
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.SourceRes, "Use source resolution", &s.SourceResHint,
+				"OFF by default — large images are fitted at a fast working resolution. ON: the engine fits at the image's ORIGINAL resolution, so fine lines and small detail survive on big sources. Generation can take several times longer; use it when you want maximum quality. No effect on images at or below the working size.")
+		}),
+		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
 			return s.toggleRow(gtx, &s.KeepInside, "Keep shapes inside image", &s.KeepInsideHint,
 				"ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture, with no circles or rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean. Turn off only for the legacy behaviour.")

@@ -204,6 +204,7 @@ type AppState struct {
 	KindsHint       Hint
 	KindWeightEds   []widget.Editor // one per kind (parallel to preset.KindNames); only selected ones render
 	KindWeightsHint Hint
+	ShapeChips      []widget.Clickable // "Used shapes" icon toggles in Adjust — a second view on KindsSel
 
 	StandoutSlider widget.Float // post-polish standout suppression tolerance; 0 = off
 	StandoutHint   Hint
@@ -355,6 +356,7 @@ func NewAppState(th *Theme) *AppState {
 		allKinds[i] = true
 	}
 	s.KindsSel = NewMultiSelect(preset.KindNames, allKinds)
+	s.ShapeChips = make([]widget.Clickable, len(shapeChipKinds))
 	s.KindWeightEds = make([]widget.Editor, len(preset.KindNames))
 	for i := range s.KindWeightEds {
 		s.KindWeightEds[i].SingleLine = true
@@ -621,6 +623,11 @@ func (s *AppState) Choices() preset.Choices {
 		c.MonoColor = "auto"
 	}
 	c.Economy = s.Economy.Value // opt-in low-budget co-adaptation (slow); curated toggle, applied in both modes
+	// Used-shapes picker (top of Advanced): a curated control like Mono/Economy — a restricted set keeps
+	// applying even when Advanced is collapsed again. All-on stays "" so the mode keeps its default mix.
+	if s.KindsSel.OnCount() < len(preset.KindNames) {
+		c.Kinds = s.KindsSel.ValueCSV()
+	}
 	if !s.Expert.Value {
 		return c
 	}
