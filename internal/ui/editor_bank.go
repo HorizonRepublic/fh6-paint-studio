@@ -76,21 +76,10 @@ func buildBankRows(entries []maskbank.Entry, cols int) []bankRow {
 // handleBankActions processes every thumbnail click (insert the word).
 func (s *AppState) handleBankActions(gtx C) {
 	for i := range s.bankBtns {
-		if s.bankBtns[i].Clicked(gtx) {
-			s.armPlaceMask(i)
+		if s.bankBtns[i].Clicked(gtx) && s.doubleClicked(1, i, gtx.Now) {
+			s.insertBankWord(i)
 		}
 	}
-}
-
-// armPlaceMask picks up bank entry i for placement; it then rides the cursor over the canvas and drops on
-// the next click there.
-func (s *AppState) armPlaceMask(i int) {
-	entries := maskbank.All()
-	if i < 0 || i >= len(entries) {
-		return
-	}
-	s.placing, s.placeKind, s.placeWord = true, 1, int(entries[i].Word)
-	s.placeGhostOn = false
 }
 
 // bankGrid is the scrollable list of category headers + thumbnail rows.

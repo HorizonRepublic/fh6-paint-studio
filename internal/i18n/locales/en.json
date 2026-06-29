@@ -74,7 +74,10 @@
   "editor.distribute_h": "Distribute H",
   "editor.distribute_v": "Distribute V",
   "editor.confirm_del": "Delete?",
-  "editor.place_hint": "Click an item, then click the canvas to place it",
+  "editor.dblclick_add": "Double-click to add",
+  "editor.guide_checker": "Checkerboard",
+  "editor.guide_grid": "Grid",
+  "editor.guide_ruler": "Ruler",
   "editor.new_canvas": "New canvas",
   "editor.clear_confirm": "Discard & start new?",
 

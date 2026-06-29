@@ -74,7 +74,10 @@
   "editor.distribute_h": "Distribuer H",
   "editor.distribute_v": "Distribuer V",
   "editor.confirm_del": "Supprimer ?",
-  "editor.place_hint": "Cliquez un élément, puis sur le canevas pour le placer",
+  "editor.dblclick_add": "Double-clic pour ajouter",
+  "editor.guide_checker": "Damier",
+  "editor.guide_grid": "Grille",
+  "editor.guide_ruler": "Règle",
   "editor.new_canvas": "Nouveau canevas",
   "editor.clear_confirm": "Abandonner et recommencer ?",
 

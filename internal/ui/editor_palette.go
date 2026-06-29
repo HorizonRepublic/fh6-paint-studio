@@ -285,9 +285,9 @@ func (s *AppState) handlePaletteActions(gtx C) {
 		{&s.palGlow, primGlow},
 		{&s.palDisk, primDisk},
 	}
-	for _, p := range prims {
-		if p.b.Clicked(gtx) {
-			s.armPlacePrimitive(p.k)
+	for i, p := range prims {
+		if p.b.Clicked(gtx) && s.doubleClicked(2, i, gtx.Now) {
+			s.addPrimitive(p.k)
 		}
 	}
 	if s.editUndoBtn.Clicked(gtx) {

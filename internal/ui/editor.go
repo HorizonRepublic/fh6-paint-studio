@@ -400,8 +400,7 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	s.deleteArmed = false
 	s.clearArmed = false
 	s.colorWheelBuilt = false
-	s.placing = false
-	s.placeGhostOn = false
+	s.dblTag, s.dblIdx = 0, -1
 	s.editWantFocus = true
 	s.editZoom = 1
 	s.editPan = f32.Point{}
@@ -490,8 +489,9 @@ func (s *AppState) editorArea(gtx C) D {
 		}
 		s.editOp = s.overlayOp(gtx)
 	}
-	drawCheckerboard(gtx, rect)
+	s.drawCanvasBackdrop(gtx, rect)
 	drawImageIn(gtx, s.editOp, rect)
+	s.drawCanvasGuide(gtx, vp, rect)
 	if s.selCount() > 1 {
 		s.drawMultiSelection(gtx, rect)
 	} else if s.selValid() {
@@ -508,7 +508,7 @@ func (s *AppState) editorArea(gtx C) D {
 		s.editWantFocus = false
 	}
 	s.handleEditKeys(gtx)
-	if s.selValid() || s.editMarqueeOn || s.placing { // selection pulse / live marquee / placement ghost
+	if s.selValid() || s.editMarqueeOn { // animate the selection pulse / live marquee
 		gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(40 * time.Millisecond)})
 	}
 	return D{Size: sz}
@@ -627,90 +627,40 @@ func (s *AppState) selectFromSet(idx []int) {
 }
 
 // tintShape returns a copy of sh recoloured to col at the given alpha — used to paint a pulsing selection
-// highlight or a placement ghost on the shape's own silhouette (not its bounding box).
+// highlight on the shape's own silhouette (not its bounding box).
 func tintShape(sh model.Shape, col color.NRGBA, alpha int) model.Shape {
 	t := sh
 	t.Color = []int{int(col.R), int(col.G), int(col.B), alpha}
 	return t
 }
 
-// armPlacePrimitive picks up a primitive for placement; it then rides the cursor over the canvas.
-func (s *AppState) armPlacePrimitive(kind int) {
-	s.placing, s.placeKind, s.placePrim = true, 2, kind
-	s.placeGhostOn = false
-}
-
-// disarmPlace cancels placement mode.
-func (s *AppState) disarmPlace() {
-	s.placing = false
-	s.placeGhostOn = false
-	s.placeKind = 0
-}
-
-// placeCandidate builds the shape that placement would drop, centred at the current ghost position.
-func (s *AppState) placeCandidate() (model.Shape, bool) {
-	var sh model.Shape
-	switch s.placeKind {
-	case 1:
-		e, ok := maskEntryByWord(uint16(s.placeWord))
-		if !ok {
-			return model.Shape{}, false
-		}
-		sh = defaultMaskShape(e, s.EditW, s.EditH)
-	case 2:
-		sh = defaultPrimitive(s.placePrim, s.EditW, s.EditH)
-	default:
-		return model.Shape{}, false
+// doubleClicked reports whether the click on (tag,idx) completes a double-click within the window; a
+// single click only arms it, so a stray single click on a palette item never spawns a shape.
+func (s *AppState) doubleClicked(tag, idx int, now time.Time) bool {
+	const window = 400 * time.Millisecond
+	if s.dblTag == tag && s.dblIdx == idx && now.Sub(s.dblAt) < window {
+		s.dblTag, s.dblIdx = 0, -1
+		return true
 	}
-	imgX := float64(s.placeGhost.X) * float64(s.EditW)
-	imgY := float64(s.placeGhost.Y) * float64(s.EditH)
-	cx, cy := shapeCenter(sh)
-	moveShapeData(&sh, imgX-cx, imgY-cy)
-	return sh, true
-}
-
-// placeShapeAt drops the held palette item at fp (image fraction) and selects it.
-func (s *AppState) placeShapeAt(fp f32.Point) {
-	s.placeGhost, s.placeGhostOn = fp, true
-	gh, ok := s.placeCandidate()
-	if !ok {
-		return
-	}
-	if len(s.EditShapes) >= editMaxShapes {
-		s.Toast = i18n.T("editor.budget_full")
-		return
-	}
-	s.pushUndo(cloneShapes(s.EditShapes))
-	s.EditShapes = append(s.EditShapes, gh)
-	s.selectSingle(len(s.EditShapes) - 1)
-	s.markEditDirty()
+	s.dblTag, s.dblIdx, s.dblAt = tag, idx, now
+	return false
 }
 
 // overlayOp returns the canvas image to draw: the plain render, or a copy with the selected shapes lit by
-// a pulsing accent tint on their silhouettes (the SHAPE glows, not its bounding box) and/or a placement
-// ghost composited at the cursor.
+// a pulsing accent tint on their silhouettes (the SHAPE glows, not its bounding box).
 func (s *AppState) overlayOp(gtx C) paint.ImageOp {
 	base := s.editImg
 	if base == nil {
 		return paint.ImageOp{}
 	}
-	selOverlay := s.selValid() && s.editDrag.kind == dragNone
-	ghostOverlay := s.placing && s.placeGhostOn
-	if !selOverlay && !ghostOverlay {
+	if !(s.selValid() && s.editDrag.kind == dragNone) {
 		return paint.NewImageOp(base)
 	}
 	img := image.NewNRGBA(base.Bounds())
 	copy(img.Pix, base.Pix)
-	if selOverlay {
-		a := int(50 + 120*selPulse(gtx))
-		for _, i := range s.selIndices() {
-			imageio.CompositeShapeOnto(img, tintShape(s.EditShapes[i], s.Th.Accent, a), s.EditW, s.EditH)
-		}
-	}
-	if ghostOverlay {
-		if gh, ok := s.placeCandidate(); ok {
-			imageio.CompositeShapeOnto(img, tintShape(gh, s.Th.Accent, 130), s.EditW, s.EditH)
-		}
+	a := int(50 + 120*selPulse(gtx))
+	for _, i := range s.selIndices() {
+		imageio.CompositeShapeOnto(img, tintShape(s.EditShapes[i], s.Th.Accent, a), s.EditW, s.EditH)
 	}
 	return paint.NewImageOp(img)
 }
@@ -809,7 +759,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target:  &s.editKeyTag,
-			Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel | pointer.Move | pointer.Leave,
+			Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel,
 			ScrollY: pointer.ScrollRange{Min: -1000, Max: 1000},
 		})
 		if !ok {
@@ -823,26 +773,15 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 		switch pe.Kind {
 		case pointer.Scroll:
 			s.zoomAbout(pe.Position, math.Exp(float64(-pe.Scroll.Y)*0.0015), sz)
-		case pointer.Move:
-			if s.placing { // the held palette item rides the cursor as a ghost
-				s.placeGhost = pxToFrac(pe.Position, rect)
-				s.placeGhostOn = true
-			}
-		case pointer.Leave:
-			s.placeGhostOn = false
 		case pointer.Press:
-			switch {
-			case s.placing && pe.Buttons&pointer.ButtonPrimary != 0:
-				s.placeShapeAt(pxToFrac(pe.Position, rect))
-				s.disarmPlace()
-			case s.eyedropMode:
+			if s.eyedropMode {
 				s.sampleColor(pxToFrac(pe.Position, rect))
 				s.eyedropMode = false
-			case pe.Buttons&pointer.ButtonPrimary != 0:
+			} else if pe.Buttons&pointer.ButtonPrimary != 0 {
 				gtx.Execute(key.FocusCmd{Tag: &s.editKeyTag})
 				s.editPanning = false
 				s.pressEditor(pe.Position, pxToFrac(pe.Position, rect), rect, pe.Modifiers.Contain(key.ModShortcut))
-			default:
+			} else {
 				s.editPanning = true
 				s.panLast = pe.Position
 			}
@@ -908,7 +847,7 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 	area := clip.Rect(vp).Push(gtx.Ops)
 	event.Op(gtx.Ops, &s.editKeyTag)
 	switch {
-	case s.placing, s.eyedropMode:
+	case s.eyedropMode:
 		pointer.CursorCrosshair.Add(gtx.Ops)
 	case s.editPanning:
 		pointer.CursorGrabbing.Add(gtx.Ops)
@@ -919,7 +858,7 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 	}
 	area.Pop()
 
-	if s.placing || s.editPanning || s.editDrag.kind != dragNone || s.editMarqueeOn || !s.selValid() {
+	if s.editPanning || s.editDrag.kind != dragNone || s.editMarqueeOn || !s.selValid() {
 		return
 	}
 	if s.selCount() > 1 { // group is move-only: a grab cursor over the whole group box, no handles
@@ -988,11 +927,7 @@ func (s *AppState) handleEditKeys(gtx C) {
 		case ke.Name == key.NameDeleteForward || ke.Name == key.NameDeleteBackward:
 			s.deleteSel()
 		case ke.Name == key.NameEscape:
-			if s.placing {
-				s.disarmPlace()
-			} else {
-				s.deselectAll()
-			}
+			s.deselectAll()
 		case ke.Name == key.NameLeftArrow:
 			s.nudge(-1, 0, ke.Modifiers)
 		case ke.Name == key.NameRightArrow:

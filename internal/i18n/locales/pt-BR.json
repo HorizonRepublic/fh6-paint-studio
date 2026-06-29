@@ -74,7 +74,10 @@
   "editor.distribute_h": "Distribuir H",
   "editor.distribute_v": "Distribuir V",
   "editor.confirm_del": "Excluir?",
-  "editor.place_hint": "Clique num item e depois na tela para posicioná-lo",
+  "editor.dblclick_add": "Clique duplo para adicionar",
+  "editor.guide_checker": "Xadrez",
+  "editor.guide_grid": "Grade",
+  "editor.guide_ruler": "Régua",
   "editor.new_canvas": "Nova tela",
   "editor.clear_confirm": "Descartar e começar de novo?",
 

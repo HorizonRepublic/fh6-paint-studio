@@ -74,7 +74,10 @@
   "editor.distribute_h": "Distribuir H",
   "editor.distribute_v": "Distribuir V",
   "editor.confirm_del": "¿Eliminar?",
-  "editor.place_hint": "Haz clic en un elemento y luego en el lienzo para colocarlo",
+  "editor.dblclick_add": "Doble clic para añadir",
+  "editor.guide_checker": "Damero",
+  "editor.guide_grid": "Rejilla",
+  "editor.guide_ruler": "Regla",
   "editor.new_canvas": "Lienzo nuevo",
   "editor.clear_confirm": "¿Descartar y empezar de nuevo?",
 

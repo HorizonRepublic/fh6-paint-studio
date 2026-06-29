@@ -58,7 +58,7 @@ func (s *AppState) editorLeftColumn(gtx C) D {
 			layout.Rigid(GapV(6).Layout),
 			layout.Rigid(s.addPaletteRows),
 			layout.Rigid(GapV(8).Layout),
-			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, i18n.T("editor.place_hint"), th.TextDim) }),
+			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, i18n.T("editor.dblclick_add"), th.TextDim) }),
 			layout.Rigid(GapV(10).Layout),
 			layout.Flexed(1, s.bankGrid),
 		)
@@ -95,6 +95,9 @@ func (s *AppState) editorToolbar(gtx C) D {
 	if s.editZoomIn.Clicked(gtx) {
 		s.zoomStep(1.25)
 	}
+	if s.GuideBtn.Clicked(gtx) {
+		s.canvasGuide = (s.canvasGuide + 1) % canvasGuideModes
+	}
 	pct := strconv.Itoa(int(s.editZoom*100+0.5)) + "%"
 	children := []layout.FlexChild{
 		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.editZoomOut, "−", true) }),
@@ -104,6 +107,8 @@ func (s *AppState) editorToolbar(gtx C) D {
 		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.editZoomIn, "+", true) }),
 		layout.Rigid(GapH(10).Layout),
 		layout.Rigid(func(gtx C) D { return th.Dim(gtx, pct) }),
+		layout.Rigid(GapH(12).Layout),
+		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.GuideBtn, i18n.T(guideModeKey(s.canvasGuide)), true) }),
 		layout.Flexed(1, spacerW),
 	}
 	if s.editSavePending {

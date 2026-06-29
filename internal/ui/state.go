@@ -398,14 +398,11 @@ type AppState struct {
 	bankRows        []bankRow
 	bankThumbsBuilt bool
 
-	// editor place-from-palette: clicking a palette item picks it up; it then rides the cursor as a ghost
-	// over the canvas and drops where you click — no stray inserts, and you choose the position.
-	placing      bool
-	placeKind    int       // 1 = mask word, 2 = primitive
-	placeWord    int       // mask word id (placeKind 1)
-	placePrim    int       // primitive kind (placeKind 2)
-	placeGhost   f32.Point // cursor position over the canvas (image fraction)
-	placeGhostOn bool      // cursor is currently over the canvas
+	// editor double-click-to-spawn: a single stray click on a palette item no longer spawns a shape; a
+	// double-click drops it on the canvas.
+	dblTag int       // which palette fired the previous click (1=bank thumbnail, 2=primitive chip)
+	dblIdx int       // index within that palette
+	dblAt  time.Time // timestamp of that click
 
 	// editor destructive-action confirmation (red two-step buttons)
 	deleteArmed   bool
@@ -425,6 +422,10 @@ type AppState struct {
 
 	// editor layer icons: cached glyph thumbnails for mask shapes, keyed by word id
 	layerThumbs map[uint16]paint.ImageOp
+
+	// editor canvas backdrop / measurement guide (checkerboard / grid / ruler), cycled from the toolbar
+	canvasGuide int
+	GuideBtn    widget.Clickable
 }
 
 // expertGroup is the collapse state of one expert sub-section.

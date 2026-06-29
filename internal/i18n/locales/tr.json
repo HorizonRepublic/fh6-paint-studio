@@ -74,7 +74,10 @@
   "editor.distribute_h": "Yatay dağıt",
   "editor.distribute_v": "Dikey dağıt",
   "editor.confirm_del": "Silinsin mi?",
-  "editor.place_hint": "Bir öğeye tıklayın, sonra yerleştirmek için tuvale tıklayın",
+  "editor.dblclick_add": "Eklemek için çift tıklayın",
+  "editor.guide_checker": "Dama deseni",
+  "editor.guide_grid": "Izgara",
+  "editor.guide_ruler": "Cetvel",
   "editor.new_canvas": "Yeni tuval",
   "editor.clear_confirm": "At ve yeniden başla?",
 

@@ -74,7 +74,10 @@
   "editor.distribute_h": "水平分布",
   "editor.distribute_v": "垂直分布",
   "editor.confirm_del": "删除？",
-  "editor.place_hint": "点击项目，然后点击画布进行放置",
+  "editor.dblclick_add": "双击添加",
+  "editor.guide_checker": "棋盘格",
+  "editor.guide_grid": "网格",
+  "editor.guide_ruler": "标尺",
   "editor.new_canvas": "新建画布",
   "editor.clear_confirm": "放弃并重新开始？",
 

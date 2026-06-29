@@ -74,7 +74,10 @@
   "editor.distribute_h": "水平分布",
   "editor.distribute_v": "垂直分布",
   "editor.confirm_del": "削除しますか？",
-  "editor.place_hint": "項目をクリックし、キャンバスをクリックして配置します",
+  "editor.dblclick_add": "ダブルクリックで追加",
+  "editor.guide_checker": "市松模様",
+  "editor.guide_grid": "グリッド",
+  "editor.guide_ruler": "ルーラー",
   "editor.new_canvas": "新規キャンバス",
   "editor.clear_confirm": "破棄して新規作成しますか？",
 

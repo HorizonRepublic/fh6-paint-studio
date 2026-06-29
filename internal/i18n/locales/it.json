@@ -74,7 +74,10 @@
   "editor.distribute_h": "Distribuisci O",
   "editor.distribute_v": "Distribuisci V",
   "editor.confirm_del": "Eliminare?",
-  "editor.place_hint": "Clicca un elemento, poi sulla tela per posizionarlo",
+  "editor.dblclick_add": "Doppio clic per aggiungere",
+  "editor.guide_checker": "Scacchiera",
+  "editor.guide_grid": "Griglia",
+  "editor.guide_ruler": "Righello",
   "editor.new_canvas": "Nuova tela",
   "editor.clear_confirm": "Scartare e ricominciare?",
 

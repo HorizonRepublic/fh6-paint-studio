@@ -74,7 +74,10 @@
   "editor.distribute_h": "Rozłóż w poziomie",
   "editor.distribute_v": "Rozłóż w pionie",
   "editor.confirm_del": "Usunąć?",
-  "editor.place_hint": "Kliknij element, potem kliknij na płótnie, aby umieścić",
+  "editor.dblclick_add": "Kliknij dwukrotnie, aby dodać",
+  "editor.guide_checker": "Szachownica",
+  "editor.guide_grid": "Siatka",
+  "editor.guide_ruler": "Linijka",
   "editor.new_canvas": "Nowe płótno",
   "editor.clear_confirm": "Odrzucić i zacząć od nowa?",
 

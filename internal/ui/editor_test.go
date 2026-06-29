@@ -4,8 +4,8 @@ import (
 	"image/color"
 	"math"
 	"testing"
+	"time"
 
-	"gioui.org/f32"
 	"gioui.org/io/key"
 
 	"fh6-paint-studio/internal/maskbank"
@@ -422,23 +422,35 @@ func TestDistributeNeedsThree(t *testing.T) {
 	}
 }
 
-func TestPlaceShapeAtDropsAtCursor(t *testing.T) {
+func TestDoubleClickedRequiresTwo(t *testing.T) {
 	s := NewAppState(NewTheme())
-	s.EnterEditor(nil, 200, 200) // blank, just the background slot
-	s.armPlacePrimitive(primCircle)
-	if !s.placing {
-		t.Fatal("armPlacePrimitive should enter placing mode")
+	t0 := time.Unix(100, 0)
+	if s.doubleClicked(1, 3, t0) {
+		t.Fatal("first click must only arm, not fire")
 	}
-	s.placeShapeAt(f32.Point{X: 0.25, Y: 0.75}) // drop at image (50,150)
-	if len(s.EditShapes) != 2 || s.EditSel != 1 {
-		t.Fatalf("place: n=%d sel=%d, want 2 and selection 1", len(s.EditShapes), s.EditSel)
+	if !s.doubleClicked(1, 3, t0.Add(100*time.Millisecond)) {
+		t.Fatal("second click within the window must fire")
 	}
-	if cx, cy := shapeCenter(s.EditShapes[1]); cx != 50 || cy != 150 {
-		t.Fatalf("placed centre = %v,%v, want 50,150", cx, cy)
+	if s.doubleClicked(1, 3, t0.Add(150*time.Millisecond)) {
+		t.Fatal("a click right after firing must not immediately fire again")
 	}
-	s.disarmPlace()
-	if s.placing {
-		t.Fatal("disarmPlace should leave placing mode")
+	s.doubleClicked(1, 3, t0)
+	if s.doubleClicked(1, 4, t0.Add(50*time.Millisecond)) {
+		t.Fatal("a click on a different item must not fire")
+	}
+	s.doubleClicked(1, 3, t0)
+	if s.doubleClicked(1, 3, t0.Add(time.Second)) {
+		t.Fatal("second click outside the window must not fire")
+	}
+}
+
+func TestNiceStep(t *testing.T) {
+	for _, c := range []struct{ in, want float64 }{
+		{0.3, 1}, {1, 1}, {1.5, 2}, {3, 5}, {7, 10}, {12, 20}, {30, 50}, {77, 100}, {240, 500},
+	} {
+		if got := niceStep(c.in); got != c.want {
+			t.Fatalf("niceStep(%v) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }
 
