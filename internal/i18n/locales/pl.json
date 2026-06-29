@@ -85,6 +85,10 @@
   "editor.array_count": "Ile",
   "editor.array_row": "Rząd",
   "editor.array_ring": "Pierścień",
+  "editor.sym_off": "Symetria",
+  "editor.sym_h": "Symetria poz.",
+  "editor.sym_v": "Symetria pion.",
+  "editor.sym_all": "Odbij wszystko",
   "editor.new_canvas": "Nowe płótno",
   "editor.clear_confirm": "Odrzucić i zacząć od nowa?",
 

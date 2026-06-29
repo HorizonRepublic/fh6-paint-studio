@@ -105,6 +105,12 @@ func (s *AppState) editorToolbar(gtx C) D {
 	if s.SnapBtn.Clicked(gtx) {
 		s.snapOn = !s.snapOn
 	}
+	if s.SymBtn.Clicked(gtx) {
+		s.symMode = (s.symMode + 1) % 3
+	}
+	if s.MirrorAllBtn.Clicked(gtx) {
+		s.mirrorWholeDesign()
+	}
 	pct := strconv.Itoa(int(s.editZoom*100+0.5)) + "%"
 	children := []layout.FlexChild{
 		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.editZoomOut, "−", true) }),
@@ -123,8 +129,23 @@ func (s *AppState) editorToolbar(gtx C) D {
 			}
 			return th.SecondaryButton(gtx, &s.SnapBtn, i18n.T("editor.snap"), true)
 		}),
-		layout.Flexed(1, spacerW),
+		layout.Rigid(GapH(6).Layout),
+		layout.Rigid(func(gtx C) D {
+			if s.symMode != symOff {
+				return th.PrimaryButton(gtx, &s.SymBtn, i18n.T(s.symModeKey()), true)
+			}
+			return th.SecondaryButton(gtx, &s.SymBtn, i18n.T(s.symModeKey()), true)
+		}),
 	}
+	if s.symMode != symOff {
+		children = append(children,
+			layout.Rigid(GapH(6).Layout),
+			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.MirrorAllBtn, i18n.T("editor.sym_all"), true) }),
+		)
+	}
+	children = append(children,
+		layout.Flexed(1, spacerW),
+	)
 	if s.editSavePending {
 		children = append(children,
 			layout.Rigid(func(gtx C) D {

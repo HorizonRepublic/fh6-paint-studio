@@ -85,6 +85,10 @@
   "editor.array_count": "К-ть",
   "editor.array_row": "Ряд",
   "editor.array_ring": "Кільце",
+  "editor.sym_off": "Симетрія",
+  "editor.sym_h": "Симетрія гориз.",
+  "editor.sym_v": "Симетрія верт.",
+  "editor.sym_all": "Дзеркалити все",
   "editor.new_canvas": "Новий холст",
   "editor.clear_confirm": "Скинути й почати заново?",
 

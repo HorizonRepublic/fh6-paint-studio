@@ -85,6 +85,10 @@
   "editor.array_count": "N.",
   "editor.array_row": "Fila",
   "editor.array_ring": "Anello",
+  "editor.sym_off": "Simmetria",
+  "editor.sym_h": "Simmetria oriz.",
+  "editor.sym_v": "Simmetria vert.",
+  "editor.sym_all": "Rifletti tutto",
   "editor.new_canvas": "Nuova tela",
   "editor.clear_confirm": "Scartare e ricominciare?",
 

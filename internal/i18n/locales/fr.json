@@ -85,6 +85,10 @@
   "editor.array_count": "Nbre",
   "editor.array_row": "Rangée",
   "editor.array_ring": "Anneau",
+  "editor.sym_off": "Symétrie",
+  "editor.sym_h": "Symétrie horiz.",
+  "editor.sym_v": "Symétrie vert.",
+  "editor.sym_all": "Tout refléter",
   "editor.new_canvas": "Nouveau canevas",
   "editor.clear_confirm": "Abandonner et recommencer ?",
 

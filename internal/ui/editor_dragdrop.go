@@ -108,10 +108,7 @@ func (s *AppState) dropBankDrag() {
 	}
 	scx, scy := shapeCenter(sh)
 	moveShapeData(&sh, cx-scx, cy-scy)
-	s.pushUndo(cloneShapes(s.EditShapes))
-	s.EditShapes = append(s.EditShapes, sh)
-	s.selectSingle(len(s.EditShapes) - 1)
-	s.markEditDirty()
+	s.addShape(sh)
 }
 
 // drawDragGhost paints a small marker of the dragged shape at the cursor while a drag is underway.

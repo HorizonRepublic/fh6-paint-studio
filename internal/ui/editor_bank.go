@@ -171,14 +171,7 @@ func (s *AppState) insertBankWord(i int) {
 	if i < 0 || i >= len(entries) {
 		return
 	}
-	if len(s.EditShapes) >= editMaxShapes {
-		s.Toast = i18n.T("editor.budget_full")
-		return
-	}
-	s.pushUndo(cloneShapes(s.EditShapes))
-	s.EditShapes = append(s.EditShapes, defaultMaskShape(entries[i], s.EditW, s.EditH))
-	s.selectSingle(len(s.EditShapes) - 1)
-	s.markEditDirty()
+	s.addShape(defaultMaskShape(entries[i], s.EditW, s.EditH))
 }
 
 // defaultMaskShape builds a centred mask placement: Type = the dictionary word, Data = full extents

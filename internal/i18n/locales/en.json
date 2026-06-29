@@ -85,6 +85,10 @@
   "editor.array_count": "Count",
   "editor.array_row": "Row",
   "editor.array_ring": "Ring",
+  "editor.sym_off": "Symmetry",
+  "editor.sym_h": "Symmetry horiz.",
+  "editor.sym_v": "Symmetry vert.",
+  "editor.sym_all": "Mirror all",
   "editor.new_canvas": "New canvas",
   "editor.clear_confirm": "Discard & start new?",
 

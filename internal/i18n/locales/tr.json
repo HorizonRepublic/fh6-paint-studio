@@ -85,6 +85,10 @@
   "editor.array_count": "Sayı",
   "editor.array_row": "Sıra",
   "editor.array_ring": "Halka",
+  "editor.sym_off": "Simetri",
+  "editor.sym_h": "Simetri yatay",
+  "editor.sym_v": "Simetri dikey",
+  "editor.sym_all": "Tümünü yansıt",
   "editor.new_canvas": "Yeni tuval",
   "editor.clear_confirm": "At ve yeniden başla?",
 

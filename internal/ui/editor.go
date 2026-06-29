@@ -446,6 +446,7 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	}
 	s.arrayCount.SingleLine = true
 	s.arrayCount.SetText("6")
+	s.symMode = symOff
 	s.EditorMode = true
 	s.View = ViewEditor
 }
@@ -519,6 +520,7 @@ func (s *AppState) editorArea(gtx C) D {
 	s.drawCanvasBackdrop(gtx, rect)
 	drawImageIn(gtx, s.editOp, rect)
 	s.drawCanvasGuide(gtx, vp, rect)
+	s.drawSymmetryAxis(gtx, vp, rect)
 	if s.selCount() > 1 {
 		s.drawMultiSelection(gtx, rect)
 	} else if s.selValid() {

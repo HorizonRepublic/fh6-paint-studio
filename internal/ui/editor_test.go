@@ -472,6 +472,49 @@ func TestArraySelectionRingKeepsRadiusAboutCanvasCentre(t *testing.T) {
 	}
 }
 
+func TestAddShapeStampsMirrorWhenSymmetryOn(t *testing.T) {
+	s := multiDoc()
+	s.symMode = symMirrorH // mirror left↔right across the vertical centre (W=100)
+	before := len(s.EditShapes)
+	s.addShape(model.Shape{Type: model.TypeRotatedEllipse, Data: []float64{20, 30, 5, 5, 10}, Color: []int{1, 0, 0, 255}})
+	if got := len(s.EditShapes) - before; got != 2 {
+		t.Fatalf("symmetry add created %d shapes, want 2 (shape + mirror)", got)
+	}
+	mir := s.EditShapes[before+1]
+	if math.Abs(mir.Data[0]-80) > 1e-9 || math.Abs(mir.Data[1]-30) > 1e-9 {
+		t.Fatalf("mirror centre = %v,%v, want 80,30", mir.Data[0], mir.Data[1])
+	}
+	if s.selCount() != 2 {
+		t.Fatalf("both the shape and its mirror should be selected, got %d", s.selCount())
+	}
+}
+
+func TestAddShapeSingleWhenSymmetryOff(t *testing.T) {
+	s := multiDoc()
+	s.symMode = symOff
+	before := len(s.EditShapes)
+	s.addShape(model.Shape{Type: model.TypeRotatedEllipse, Data: []float64{20, 30, 5, 5, 0}, Color: []int{1, 0, 0, 255}})
+	if got := len(s.EditShapes) - before; got != 1 {
+		t.Fatalf("symmetry-off add created %d shapes, want 1", got)
+	}
+}
+
+func TestMirrorWholeDesignReflectsEveryShape(t *testing.T) {
+	s := multiDoc() // background + ellipses at (20,20) and (40,40)
+	s.symMode = symMirrorH
+	before := len(s.EditShapes)
+	s.mirrorWholeDesign()
+	if got := len(s.EditShapes) - before; got != 2 {
+		t.Fatalf("mirror all added %d shapes, want 2", got)
+	}
+	if math.Abs(s.EditShapes[before].Data[0]-80) > 1e-9 {
+		t.Fatalf("first mirror x = %v, want 80", s.EditShapes[before].Data[0])
+	}
+	if math.Abs(s.EditShapes[before+1].Data[0]-60) > 1e-9 {
+		t.Fatalf("second mirror x = %v, want 60", s.EditShapes[before+1].Data[0])
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()

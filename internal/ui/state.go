@@ -446,6 +446,12 @@ type AppState struct {
 	snapShowX     bool             // a vertical guide is active this frame
 	snapShowY     bool             // a horizontal guide is active this frame
 
+	// editor symmetry stamping: a toolbar cycle (off / mirror-across-vertical / mirror-across-horizontal).
+	// While on, every added shape also drops a mirrored copy; "Mirror all" reflects the whole design.
+	symMode      int // symOff / symVert / symHorz
+	SymBtn       widget.Clickable
+	MirrorAllBtn widget.Clickable
+
 	// editor drag-and-drop: drag a shape from the bank/primitive palette onto the canvas. A full-window
 	// pass-through pointer layer tracks the cursor in window coords; the window→canvas offset is observed
 	// while hovering the canvas so the drop maps to the right image position.

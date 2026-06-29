@@ -85,6 +85,10 @@
   "editor.array_count": "Qtd",
   "editor.array_row": "Linha",
   "editor.array_ring": "Anel",
+  "editor.sym_off": "Simetria",
+  "editor.sym_h": "Simetria horiz.",
+  "editor.sym_v": "Simetria vert.",
+  "editor.sym_all": "Espelhar tudo",
   "editor.new_canvas": "Nova tela",
   "editor.clear_confirm": "Descartar e começar de novo?",
 

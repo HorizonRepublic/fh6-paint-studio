@@ -85,6 +85,10 @@
   "editor.array_count": "Cant.",
   "editor.array_row": "Fila",
   "editor.array_ring": "Anillo",
+  "editor.sym_off": "Simetría",
+  "editor.sym_h": "Simetría horiz.",
+  "editor.sym_v": "Simetría vert.",
+  "editor.sym_all": "Reflejar todo",
   "editor.new_canvas": "Lienzo nuevo",
   "editor.clear_confirm": "¿Descartar y empezar de nuevo?",
 

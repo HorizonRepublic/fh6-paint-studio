@@ -313,14 +313,7 @@ func (s *AppState) handlePaletteActions(gtx C) {
 // addPrimitive inserts a default-sized primitive of the given kind at the canvas centre, on top, and
 // selects it. It refuses past the FH6 per-panel budget.
 func (s *AppState) addPrimitive(kind int) {
-	if len(s.EditShapes) >= editMaxShapes {
-		s.Toast = i18n.T("editor.budget_full")
-		return
-	}
-	s.pushUndo(cloneShapes(s.EditShapes))
-	s.EditShapes = append(s.EditShapes, defaultPrimitive(kind, s.EditW, s.EditH))
-	s.selectSingle(len(s.EditShapes) - 1)
-	s.markEditDirty()
+	s.addShape(defaultPrimitive(kind, s.EditW, s.EditH))
 }
 
 // defaultPrimitive builds a centred, ~1/8-canvas shape of the given kind in a neutral grey.

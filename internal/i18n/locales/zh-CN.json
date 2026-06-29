@@ -85,6 +85,10 @@
   "editor.array_count": "数量",
   "editor.array_row": "行",
   "editor.array_ring": "环形",
+  "editor.sym_off": "对称",
+  "editor.sym_h": "水平对称",
+  "editor.sym_v": "垂直对称",
+  "editor.sym_all": "全部镜像",
   "editor.new_canvas": "新建画布",
   "editor.clear_confirm": "放弃并重新开始？",
 

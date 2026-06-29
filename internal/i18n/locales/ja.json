@@ -85,6 +85,10 @@
   "editor.array_count": "数",
   "editor.array_row": "行",
   "editor.array_ring": "リング",
+  "editor.sym_off": "対称",
+  "editor.sym_h": "左右対称",
+  "editor.sym_v": "上下対称",
+  "editor.sym_all": "全体ミラー",
   "editor.new_canvas": "新規キャンバス",
   "editor.clear_confirm": "破棄して新規作成しますか？",
 

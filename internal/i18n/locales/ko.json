@@ -85,6 +85,10 @@
   "editor.array_count": "개수",
   "editor.array_row": "행",
   "editor.array_ring": "링",
+  "editor.sym_off": "대칭",
+  "editor.sym_h": "좌우 대칭",
+  "editor.sym_v": "상하 대칭",
+  "editor.sym_all": "전체 미러",
   "editor.new_canvas": "새 캔버스",
   "editor.clear_confirm": "버리고 새로 시작할까요?",
 
