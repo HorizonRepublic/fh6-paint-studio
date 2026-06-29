@@ -107,7 +107,13 @@ func (s *AppState) layersHeader(gtx C) D {
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("editor.layers")) }),
 		layout.Flexed(1, spacerW),
-		layout.Rigid(func(gtx C) D { return th.Dim(gtx, strconv.Itoa(n)) }),
+		layout.Rigid(func(gtx C) D {
+			col := th.TextDim
+			if n >= editMaxShapes*9/10 {
+				col = th.Warn
+			}
+			return th.Lbl(gtx, 12, strconv.Itoa(n)+" / "+strconv.Itoa(editMaxShapes), col)
+		}),
 	)
 }
 

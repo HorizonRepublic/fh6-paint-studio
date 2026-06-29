@@ -328,6 +328,7 @@ type AppState struct {
 	EditSel       int           // selected shape index, -1 = none
 	editDrag      editorDrag    // active drag (kind + start snapshot)
 	editPanning   bool          // middle/secondary-button canvas pan in progress
+	editShift     bool          // Shift held during the active drag (rotate snaps to 15°)
 	panLast       f32.Point     // last pan pointer position
 	editWantFocus bool          // request canvas key focus next frame (Ctrl+Z / Delete)
 	editUndo      [][]model.Shape

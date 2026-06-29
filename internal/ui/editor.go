@@ -461,6 +461,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 				s.editPan = s.editPan.Add(pe.Position.Sub(s.panLast))
 				s.panLast = pe.Position
 			} else {
+				s.editShift = pe.Modifiers.Contain(key.ModShift)
 				s.dragEditor(pxToFrac(pe.Position, rect))
 			}
 		case pointer.Release, pointer.Cancel:
@@ -519,8 +520,14 @@ func (s *AppState) handleEditKeys(gtx C) {
 		ev, ok := gtx.Event(
 			key.Filter{Focus: &s.editKeyTag, Name: "Z", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: "Z", Required: key.ModShortcut | key.ModShift},
+			key.Filter{Focus: &s.editKeyTag, Name: "D", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameDeleteForward},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameDeleteBackward},
+			key.Filter{Focus: &s.editKeyTag, Name: key.NameEscape},
+			key.Filter{Focus: &s.editKeyTag, Name: key.NameLeftArrow, Optional: key.ModShift},
+			key.Filter{Focus: &s.editKeyTag, Name: key.NameRightArrow, Optional: key.ModShift},
+			key.Filter{Focus: &s.editKeyTag, Name: key.NameUpArrow, Optional: key.ModShift},
+			key.Filter{Focus: &s.editKeyTag, Name: key.NameDownArrow, Optional: key.ModShift},
 		)
 		if !ok {
 			break
@@ -534,10 +541,36 @@ func (s *AppState) handleEditKeys(gtx C) {
 			s.redo()
 		case ke.Name == "Z" && ke.Modifiers.Contain(key.ModShortcut):
 			s.undo()
+		case ke.Name == "D" && ke.Modifiers.Contain(key.ModShortcut):
+			s.duplicateSel()
 		case ke.Name == key.NameDeleteForward || ke.Name == key.NameDeleteBackward:
 			s.deleteSel()
+		case ke.Name == key.NameEscape:
+			s.EditSel = -1
+		case ke.Name == key.NameLeftArrow:
+			s.nudge(-1, 0, ke.Modifiers)
+		case ke.Name == key.NameRightArrow:
+			s.nudge(1, 0, ke.Modifiers)
+		case ke.Name == key.NameUpArrow:
+			s.nudge(0, -1, ke.Modifiers)
+		case ke.Name == key.NameDownArrow:
+			s.nudge(0, 1, ke.Modifiers)
 		}
 	}
+}
+
+// nudge moves the selected shape by the arrow keys: 1px, or 10px with Shift held.
+func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
+	if !s.selValid() {
+		return
+	}
+	step := 1.0
+	if mods.Contain(key.ModShift) {
+		step = 10
+	}
+	s.pushUndo(cloneShapes(s.EditShapes))
+	moveShapeData(&s.EditShapes[s.EditSel], dx*step, dy*step)
+	s.markEditDirty()
 }
 
 // drawSelection draws the selected shape's pulsing outline (accent↔white over ~0.8s, so it reads
@@ -700,7 +733,11 @@ func (s *AppState) dragEditor(fp f32.Point) {
 		setShapeScale(dst, nhx, nhy)
 	case dragRotate:
 		ang := math.Atan2(float64(fp.Y)*float64(s.EditH)-d.cy, float64(fp.X)*float64(s.EditW)-d.cx)
-		applyRotation(dst, start, (ang-d.ang0)*180/math.Pi)
+		deltaDeg := (ang - d.ang0) * 180 / math.Pi
+		if s.editShift { // snap to 15° steps
+			deltaDeg = math.Round((d.theta0+deltaDeg)/15)*15 - d.theta0
+		}
+		applyRotation(dst, start, deltaDeg)
 	}
 	s.markEditDirty()
 }
