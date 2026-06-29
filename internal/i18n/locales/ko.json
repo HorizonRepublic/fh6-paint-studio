@@ -80,6 +80,7 @@
   "editor.guide_checker": "체커보드",
   "editor.guide_grid": "격자",
   "editor.guide_ruler": "눈금자",
+  "editor.snap": "스냅",
   "editor.new_canvas": "새 캔버스",
   "editor.clear_confirm": "버리고 새로 시작할까요?",
 

@@ -80,6 +80,7 @@
   "editor.guide_checker": "棋盘格",
   "editor.guide_grid": "网格",
   "editor.guide_ruler": "标尺",
+  "editor.snap": "吸附",
   "editor.new_canvas": "新建画布",
   "editor.clear_confirm": "放弃并重新开始？",
 

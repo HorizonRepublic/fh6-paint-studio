@@ -102,6 +102,9 @@ func (s *AppState) editorToolbar(gtx C) D {
 	if s.GuideBtn.Clicked(gtx) {
 		s.canvasGuide = (s.canvasGuide + 1) % canvasGuideModes
 	}
+	if s.SnapBtn.Clicked(gtx) {
+		s.snapOn = !s.snapOn
+	}
 	pct := strconv.Itoa(int(s.editZoom*100+0.5)) + "%"
 	children := []layout.FlexChild{
 		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.editZoomOut, "−", true) }),
@@ -113,6 +116,13 @@ func (s *AppState) editorToolbar(gtx C) D {
 		layout.Rigid(func(gtx C) D { return th.Dim(gtx, pct) }),
 		layout.Rigid(GapH(12).Layout),
 		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.GuideBtn, i18n.T(guideModeKey(s.canvasGuide)), true) }),
+		layout.Rigid(GapH(6).Layout),
+		layout.Rigid(func(gtx C) D {
+			if s.snapOn {
+				return th.PrimaryButton(gtx, &s.SnapBtn, i18n.T("editor.snap"), true)
+			}
+			return th.SecondaryButton(gtx, &s.SnapBtn, i18n.T("editor.snap"), true)
+		}),
 		layout.Flexed(1, spacerW),
 	}
 	if s.editSavePending {

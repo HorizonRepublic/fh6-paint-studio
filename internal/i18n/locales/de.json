@@ -80,6 +80,7 @@
   "editor.guide_checker": "Schachbrett",
   "editor.guide_grid": "Raster",
   "editor.guide_ruler": "Lineal",
+  "editor.snap": "Einrasten",
   "editor.new_canvas": "Neue Leinwand",
   "editor.clear_confirm": "Verwerfen und neu beginnen?",
 

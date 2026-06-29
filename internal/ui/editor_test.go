@@ -392,6 +392,47 @@ func TestGroupScaleDoublesAboutFixedCorner(t *testing.T) {
 	}
 }
 
+func TestSnapAxisPicksNearestWithinThreshold(t *testing.T) {
+	shift, guide, ok := snapAxis([]float64{12}, []float64{10, 30}, 5)
+	if !ok || math.Abs(shift-(-2)) > 1e-9 || guide != 10 {
+		t.Fatalf("snap = shift %v guide %v ok %v, want -2,10,true", shift, guide, ok)
+	}
+	if _, _, ok := snapAxis([]float64{12}, []float64{30, 40}, 5); ok {
+		t.Fatalf("expected no snap when every target is beyond threshold")
+	}
+	shift, guide, ok = snapAxis([]float64{0, 28}, []float64{30}, 5)
+	if !ok || math.Abs(shift-2) > 1e-9 || guide != 30 {
+		t.Fatalf("multi-anchor snap = %v,%v,%v, want 2,30,true", shift, guide, ok)
+	}
+}
+
+func TestSnapMoveDeltaOffIsNoOp(t *testing.T) {
+	s := multiDoc()
+	s.snapOn = false
+	if dx, dy := s.snapMoveDelta([4]float64{10, 10, 20, 20}, 3, 4); dx != 3 || dy != 4 {
+		t.Fatalf("snap off changed delta to %v,%v", dx, dy)
+	}
+	s.snapOn = true
+	s.editAlt = true // Alt suspends snapping
+	if dx, dy := s.snapMoveDelta([4]float64{10, 10, 20, 20}, 3, 4); dx != 3 || dy != 4 {
+		t.Fatalf("Alt-suspended snap changed delta to %v,%v", dx, dy)
+	}
+}
+
+func TestSnapMoveDeltaPullsTowardNeighbour(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.snapOn = true
+	s.snapThreshImg = 12
+	dx, _ := s.snapMoveDelta([4]float64{15, 15, 25, 25}, 8, 0)
+	if !s.snapShowX {
+		t.Fatalf("expected an x snap guide to fire near the neighbouring shape")
+	}
+	if dx == 8 {
+		t.Fatalf("expected dx to be nudged by the snap, got the raw 8")
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()

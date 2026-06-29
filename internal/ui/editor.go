@@ -525,6 +525,7 @@ func (s *AppState) editorArea(gtx C) D {
 	if s.editMarqueeOn {
 		s.drawMarquee(gtx, rect)
 	}
+	s.drawSnapGuides(gtx, vp, rect)
 	s.addCanvasInput(gtx, vp, rect)
 	cl.Pop()
 
@@ -907,6 +908,13 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 				s.editMarqueeB = pxToFrac(pe.Position, rect)
 			} else {
 				s.editShift = pe.Modifiers.Contain(key.ModShift)
+				s.editAlt = pe.Modifiers.Contain(key.ModAlt)
+				scale := float64(rect.Dx()) / math.Max(float64(s.EditW), 1)
+				s.snapThreshImg = 7.0 / math.Max(scale, 1e-6)
+				s.snapGridStep = 0
+				if s.canvasGuide == guideGrid {
+					s.snapGridStep = niceStep(float64(gtx.Dp(20)) / math.Max(scale, 1e-6))
+				}
 				s.dragEditor(pxToFrac(pe.Position, rect))
 			}
 		case pointer.Release, pointer.Cancel:
@@ -922,6 +930,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 				s.editDragSkip = nil
 				s.markEditDirty() // full render now that the drag is committed
 			}
+			s.snapShowX, s.snapShowY = false, false
 		}
 	}
 }
@@ -1327,10 +1336,14 @@ func (s *AppState) dragEditor(fp f32.Point) {
 	if d.kind == dragNone || s.EditSel < 1 || s.EditSel >= len(d.start) {
 		return
 	}
+	s.snapShowX, s.snapShowY = false, false
 	// Group move: translate every selected shape by the same delta from its drag-start snapshot.
 	if d.kind == dragMove && s.selCount() > 1 {
 		dx := float64(fp.X-d.anchor.X) * float64(s.EditW)
 		dy := float64(fp.Y-d.anchor.Y) * float64(s.EditH)
+		if gcx, gcy, ghx, ghy, ok := s.groupImgBox(d.start); ok {
+			dx, dy = s.snapMoveDelta([4]float64{gcx - ghx, gcy - ghy, gcx + ghx, gcy + ghy}, dx, dy)
+		}
 		for _, i := range s.selIndices() {
 			if i >= len(d.start) {
 				continue
@@ -1353,6 +1366,8 @@ func (s *AppState) dragEditor(fp f32.Point) {
 	case dragMove:
 		dx := float64(fp.X-d.anchor.X) * float64(s.EditW)
 		dy := float64(fp.Y-d.anchor.Y) * float64(s.EditH)
+		x0, y0, x1, y1 := raster.BBox(model.KindFromType(start.Type), model.ParamsFromShape(start), s.EditW, s.EditH)
+		dx, dy = s.snapMoveDelta([4]float64{float64(x0), float64(y0), float64(x1), float64(y1)}, dx, dy)
 		moveShapeData(dst, dx, dy)
 	case dragScale:
 		// Anchored scale: in the shape's local frame (rotated by theta0, relative to the start centre)

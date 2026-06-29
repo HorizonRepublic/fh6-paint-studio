@@ -428,6 +428,19 @@ type AppState struct {
 	canvasGuide int
 	GuideBtn    widget.Clickable
 
+	// editor smart snapping (toolbar toggle, default OFF). While moving a shape/group its bbox edges and
+	// centres snap to other shapes, the canvas edges/centre and (when the grid guide is on) grid lines;
+	// Alt suspends it for the duration of the press.
+	snapOn        bool             // toggle state
+	SnapBtn       widget.Clickable // toolbar toggle button
+	editAlt       bool             // Alt held during the active drag (suspends snapping)
+	snapThreshImg float64          // snap distance for this drag, in image px (screen threshold ÷ zoom)
+	snapGridStep  float64          // grid spacing in image px to snap to (0 = grid not active)
+	snapGuideX    float64          // active vertical snap line (image px)
+	snapGuideY    float64          // active horizontal snap line (image px)
+	snapShowX     bool             // a vertical guide is active this frame
+	snapShowY     bool             // a horizontal guide is active this frame
+
 	// editor drag-and-drop: drag a shape from the bank/primitive palette onto the canvas. A full-window
 	// pass-through pointer layer tracks the cursor in window coords; the window→canvas offset is observed
 	// while hovering the canvas so the drop maps to the right image position.

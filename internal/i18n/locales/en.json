@@ -80,6 +80,7 @@
   "editor.guide_checker": "Checkerboard",
   "editor.guide_grid": "Grid",
   "editor.guide_ruler": "Ruler",
+  "editor.snap": "Snap",
   "editor.new_canvas": "New canvas",
   "editor.clear_confirm": "Discard & start new?",
 
