@@ -27,6 +27,7 @@ import (
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/hybrid"
+	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/inject"
 	"fh6-paint-studio/internal/library"
@@ -137,6 +138,15 @@ func loop(w *app.Window) error {
 		st.SourceRes.Value = *prefs.SourceRes
 	}
 
+	// Language: an explicit saved choice wins; otherwise match the OS UI language on first run, falling
+	// back to English. The picker reflects whatever we land on.
+	if prefs.Locale != "" {
+		i18n.SetLocale(prefs.Locale)
+	} else if tag, ok := i18n.Detect(); ok {
+		i18n.SetLocale(tag)
+	}
+	st.Lang.Set(i18n.EndonymOf(i18n.Current()))
+
 	q := newEventQueue()
 	var ops op.Ops
 
@@ -194,7 +204,7 @@ func loop(w *app.Window) error {
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
 			KeepInside: &keep, SourceRes: &srcRes, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
-			LastSeenVersion: st.LastSeen, Recent: recent}
+			LastSeenVersion: st.LastSeen, Recent: recent, Locale: i18n.Current()}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
 		}
@@ -777,6 +787,12 @@ func loop(w *app.Window) error {
 			if st.Backend != nil && st.Backend.Changed() { // engine picker -> bias the next run's backend
 				runner.BackendPreference = st.Backend.Value()
 				st.BackendLabel = "shape engine · " + st.Backend.Value()
+			}
+			if st.Lang.Changed() { // user picked a language -> switch live and persist
+				if tag := i18n.TagForEndonym(st.Lang.Value()); tag != "" {
+					i18n.SetLocale(tag)
+					savePrefs()
+				}
 			}
 			e.Frame(gtx.Ops)
 		}
