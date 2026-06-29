@@ -68,6 +68,15 @@
   "editor.cat_decals": "Çıkartmalar ve simgeler",
 
   "editor.eyedrop": "Damlalık",
+  "editor.mirror": "Yansıt",
+  "editor.selected_n": "%d seçili",
+  "editor.align": "Hizala",
+  "editor.distribute_h": "Yatay dağıt",
+  "editor.distribute_v": "Dikey dağıt",
+  "editor.confirm_del": "Silinsin mi?",
+  "editor.place_hint": "Bir öğeye tıklayın, sonra yerleştirmek için tuvale tıklayın",
+  "editor.new_canvas": "Yeni tuval",
+  "editor.clear_confirm": "At ve yeniden başla?",
 
   "about.dev": "geliştirme",
   "about.dev_build": "geliştirme sürümü",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "Onaylıyor musun?",
   "library.export": "Dışa aktar",
   "library.rename": "Yeniden adlandır",
+  "library.edit": "Düzenle",
 
   "inject.guide_toggle": "  Enjeksiyon nasıl çalışır",
   "inject.guide_step1": "FH6'da, oluşturmanın şekilleri kadar katmana sahip bir vinil grubu ekle.",

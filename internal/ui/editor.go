@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -233,6 +234,113 @@ func applyRotation(dst *model.Shape, src model.Shape, deltaDeg float64) {
 	}
 }
 
+// mirrorShapeX reflects a shape across the canvas vertical centre line (x → w-x). Triangles and lines
+// reflect their vertices and ellipses/rectangles/glow/disks reflect the centre + negate rotation — both
+// are true mirrors. Masks (letters/decals) reflect position and orientation only; the glyph itself is not
+// flipped, which would need a negative scale FH6 may reject (verify in-game before relying on it).
+func mirrorShapeX(sh *model.Shape, w int) {
+	fw := float64(w)
+	switch model.KindFromType(sh.Type) {
+	case model.KindTriangle:
+		for i := 0; i+1 < len(sh.Data) && i < 6; i += 2 {
+			sh.Data[i] = fw - sh.Data[i]
+		}
+	case model.KindLine:
+		for i := 0; i+1 < len(sh.Data) && i < 4; i += 2 {
+			sh.Data[i] = fw - sh.Data[i]
+		}
+	default:
+		if len(sh.Data) >= 1 {
+			sh.Data[0] = fw - sh.Data[0]
+		}
+		if len(sh.Data) >= 5 {
+			sh.Data[4] = -sh.Data[4]
+		}
+	}
+}
+
+// align modes for alignSelection (parallel to AppState.alignBtns).
+const (
+	alignLeft = iota
+	alignCenterX
+	alignRight
+	alignTop
+	alignMiddleY
+	alignBottom
+	distributeH
+	distributeV
+)
+
+// alignSelection aligns or evenly distributes the selected shapes by their bounding boxes. Align needs ≥2
+// shapes; distribute needs ≥3 (the outermost two stay fixed, the rest space evenly between them).
+func (s *AppState) alignSelection(mode int) {
+	idx := s.selIndices()
+	if len(idx) < 2 {
+		return
+	}
+	type box struct {
+		i              int
+		x0, y0, x1, y1 float64
+	}
+	boxes := make([]box, len(idx))
+	gx0, gy0 := math.Inf(1), math.Inf(1)
+	gx1, gy1 := math.Inf(-1), math.Inf(-1)
+	for n, i := range idx {
+		sh := s.EditShapes[i]
+		k := model.KindFromType(sh.Type)
+		a, b, c, d := raster.BBox(k, model.ParamsFromShape(sh), s.EditW, s.EditH)
+		boxes[n] = box{i, float64(a), float64(b), float64(c), float64(d)}
+		gx0, gy0 = math.Min(gx0, float64(a)), math.Min(gy0, float64(b))
+		gx1, gy1 = math.Max(gx1, float64(c)), math.Max(gy1, float64(d))
+	}
+	center := func(b box, horiz bool) float64 {
+		if horiz {
+			return (b.x0 + b.x1) / 2
+		}
+		return (b.y0 + b.y1) / 2
+	}
+	if mode == distributeH || mode == distributeV {
+		if len(boxes) < 3 {
+			return
+		}
+		horiz := mode == distributeH
+		sort.Slice(boxes, func(a, b int) bool { return center(boxes[a], horiz) < center(boxes[b], horiz) })
+		s.pushUndo(cloneShapes(s.EditShapes))
+		n := len(boxes)
+		step := (center(boxes[n-1], horiz) - center(boxes[0], horiz)) / float64(n-1)
+		for k := 1; k < n-1; k++ {
+			delta := center(boxes[0], horiz) + step*float64(k) - center(boxes[k], horiz)
+			if horiz {
+				moveShapeData(&s.EditShapes[boxes[k].i], delta, 0)
+			} else {
+				moveShapeData(&s.EditShapes[boxes[k].i], 0, delta)
+			}
+		}
+		s.markEditDirty()
+		return
+	}
+	s.pushUndo(cloneShapes(s.EditShapes))
+	for _, bx := range boxes {
+		var dx, dy float64
+		switch mode {
+		case alignLeft:
+			dx = gx0 - bx.x0
+		case alignCenterX:
+			dx = (gx0+gx1)/2 - (bx.x0+bx.x1)/2
+		case alignRight:
+			dx = gx1 - bx.x1
+		case alignTop:
+			dy = gy0 - bx.y0
+		case alignMiddleY:
+			dy = (gy0+gy1)/2 - (bx.y0+bx.y1)/2
+		case alignBottom:
+			dy = gy1 - bx.y1
+		}
+		moveShapeData(&s.EditShapes[bx.i], dx, dy)
+	}
+	s.markEditDirty()
+}
+
 // pushUndo records a pre-edit snapshot (already a clone) on the undo stack, capped to keep memory
 // bounded. A fresh action invalidates the redo stack (standard linear undo).
 func (s *AppState) pushUndo(snapshot []model.Shape) {
@@ -255,6 +363,7 @@ func (s *AppState) undo() {
 	if s.EditSel >= len(s.EditShapes) {
 		s.EditSel = -1
 	}
+	s.editSelExtra = nil
 	s.markEditDirty()
 }
 
@@ -269,6 +378,7 @@ func (s *AppState) redo() {
 	if s.EditSel >= len(s.EditShapes) {
 		s.EditSel = -1
 	}
+	s.editSelExtra = nil
 	s.markEditDirty()
 }
 
@@ -284,6 +394,14 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	s.EditSel = -1
 	s.editDrag = editorDrag{}
 	s.editPanning = false
+	s.editSelExtra = nil
+	s.editDragSkip = nil
+	s.editMarqueeOn = false
+	s.deleteArmed = false
+	s.clearArmed = false
+	s.colorWheelBuilt = false
+	s.placing = false
+	s.placeGhostOn = false
 	s.editWantFocus = true
 	s.editZoom = 1
 	s.editPan = f32.Point{}
@@ -348,23 +466,39 @@ func (s *AppState) editorArea(gtx C) D {
 	rect := s.zoomedRect(sz)
 
 	cl := clip.Rect(vp).Push(gtx.Ops)
-	// During a shape drag, composite ONLY the dragged shape over the pre-rendered base (every other
-	// shape, rendered once at drag start) — cheap at any doc size, so the shape redraws live while
-	// staying smooth. Off-drag, rebuild the full render when dirty.
-	if s.editDrag.kind != dragNone && s.editDragBase != nil && s.selValid() {
+	// During a shape drag, composite ONLY the selected shape(s) over the pre-rendered base. Off-drag,
+	// rebuild the full render when dirty, then let overlayOp add the pulsing selection tint / placement
+	// ghost on top of a copy.
+	if s.editDrag.kind != dragNone && s.editDragBase != nil && len(s.editDragSkip) > 0 {
 		img := image.NewNRGBA(s.editDragBase.Bounds())
 		copy(img.Pix, s.editDragBase.Pix)
-		imageio.CompositeShapeOnto(img, s.EditShapes[s.EditSel], s.EditW, s.EditH)
+		ks := make([]int, 0, len(s.editDragSkip))
+		for i := range s.editDragSkip {
+			ks = append(ks, i)
+		}
+		sort.Ints(ks) // composite in z-order
+		for _, i := range ks {
+			if i >= 0 && i < len(s.EditShapes) {
+				imageio.CompositeShapeOnto(img, s.EditShapes[i], s.EditW, s.EditH)
+			}
+		}
 		s.editOp = paint.NewImageOp(img)
-	} else if s.editDirty {
-		s.editImg = imageio.RenderFH6Image(s.EditShapes, true, s.EditW, s.EditH, 1)
-		s.editOp = paint.NewImageOp(s.editImg)
-		s.editDirty = false
+	} else {
+		if s.editDirty {
+			s.editImg = imageio.RenderFH6Image(s.EditShapes, true, s.EditW, s.EditH, 1)
+			s.editDirty = false
+		}
+		s.editOp = s.overlayOp(gtx)
 	}
 	drawCheckerboard(gtx, rect)
 	drawImageIn(gtx, s.editOp, rect)
-	if s.selValid() {
+	if s.selCount() > 1 {
+		s.drawMultiSelection(gtx, rect)
+	} else if s.selValid() {
 		s.drawSelection(gtx, s.selScreenRect(rect))
+	}
+	if s.editMarqueeOn {
+		s.drawMarquee(gtx, rect)
 	}
 	s.addCanvasInput(gtx, vp, rect)
 	cl.Pop()
@@ -374,7 +508,7 @@ func (s *AppState) editorArea(gtx C) D {
 		s.editWantFocus = false
 	}
 	s.handleEditKeys(gtx)
-	if s.selValid() { // animate the selection pulse
+	if s.selValid() || s.editMarqueeOn || s.placing { // selection pulse / live marquee / placement ghost
 		gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(40 * time.Millisecond)})
 	}
 	return D{Size: sz}
@@ -383,12 +517,252 @@ func (s *AppState) editorArea(gtx C) D {
 // selValid reports whether a selectable shape (not the background) is currently selected.
 func (s *AppState) selValid() bool { return s.EditSel >= 1 && s.EditSel < len(s.EditShapes) }
 
+// deselectAll clears the primary selection, any multi-selection, and an in-flight marquee.
+func (s *AppState) deselectAll() {
+	s.EditSel = -1
+	s.editSelExtra = nil
+	s.editMarqueeOn = false
+	s.deleteArmed = false
+}
+
+// selectSingle makes i the sole selection (i<1 or out of range deselects).
+func (s *AppState) selectSingle(i int) {
+	s.editSelExtra = nil
+	s.deleteArmed = false
+	if i >= 1 && i < len(s.EditShapes) {
+		s.EditSel = i
+	} else {
+		s.EditSel = -1
+	}
+}
+
+// isSelected reports whether shape i is part of the current selection (primary or an extra).
+func (s *AppState) isSelected(i int) bool {
+	return (i == s.EditSel && s.selValid()) || s.editSelExtra[i]
+}
+
+// selCount is the number of selected shapes (primary + extras).
+func (s *AppState) selCount() int {
+	n := len(s.editSelExtra)
+	if s.selValid() {
+		n++
+	}
+	return n
+}
+
+// selIndices returns the selected shape indices in ascending (z-order) order.
+func (s *AppState) selIndices() []int {
+	out := make([]int, 0, s.selCount())
+	if s.selValid() {
+		out = append(out, s.EditSel)
+	}
+	for i := range s.editSelExtra {
+		if i >= 1 && i < len(s.EditShapes) && i != s.EditSel {
+			out = append(out, i)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// toggleSel adds/removes shape i from the selection (Ctrl+click); the survivor becomes primary.
+func (s *AppState) toggleSel(i int) {
+	if i < 1 || i >= len(s.EditShapes) {
+		return
+	}
+	s.deleteArmed = false
+	if i == s.EditSel { // drop the primary, promoting any one extra to primary
+		s.EditSel = -1
+		for k := range s.editSelExtra {
+			s.EditSel = k
+			delete(s.editSelExtra, k)
+			break
+		}
+		return
+	}
+	if s.editSelExtra[i] { // already an extra → remove it
+		delete(s.editSelExtra, i)
+		return
+	}
+	if s.editSelExtra == nil {
+		s.editSelExtra = map[int]bool{}
+	}
+	if s.selValid() {
+		s.editSelExtra[s.EditSel] = true
+	}
+	s.EditSel = i
+	delete(s.editSelExtra, i)
+}
+
+// selectAll selects every shape except the background (index 0).
+func (s *AppState) selectAll() {
+	if len(s.EditShapes) <= 1 {
+		return
+	}
+	s.EditSel = 1
+	s.editSelExtra = map[int]bool{}
+	for i := 2; i < len(s.EditShapes); i++ {
+		s.editSelExtra[i] = true
+	}
+	if len(s.editSelExtra) == 0 {
+		s.editSelExtra = nil
+	}
+}
+
+// selectFromSet replaces the selection with the given indices (primary = the largest, i.e. top-most).
+func (s *AppState) selectFromSet(idx []int) {
+	s.editSelExtra = nil
+	if len(idx) == 0 {
+		s.EditSel = -1
+		return
+	}
+	sort.Ints(idx)
+	s.EditSel = idx[len(idx)-1]
+	if len(idx) > 1 {
+		s.editSelExtra = map[int]bool{}
+		for _, i := range idx[:len(idx)-1] {
+			s.editSelExtra[i] = true
+		}
+	}
+}
+
+// tintShape returns a copy of sh recoloured to col at the given alpha — used to paint a pulsing selection
+// highlight or a placement ghost on the shape's own silhouette (not its bounding box).
+func tintShape(sh model.Shape, col color.NRGBA, alpha int) model.Shape {
+	t := sh
+	t.Color = []int{int(col.R), int(col.G), int(col.B), alpha}
+	return t
+}
+
+// armPlacePrimitive picks up a primitive for placement; it then rides the cursor over the canvas.
+func (s *AppState) armPlacePrimitive(kind int) {
+	s.placing, s.placeKind, s.placePrim = true, 2, kind
+	s.placeGhostOn = false
+}
+
+// disarmPlace cancels placement mode.
+func (s *AppState) disarmPlace() {
+	s.placing = false
+	s.placeGhostOn = false
+	s.placeKind = 0
+}
+
+// placeCandidate builds the shape that placement would drop, centred at the current ghost position.
+func (s *AppState) placeCandidate() (model.Shape, bool) {
+	var sh model.Shape
+	switch s.placeKind {
+	case 1:
+		e, ok := maskEntryByWord(uint16(s.placeWord))
+		if !ok {
+			return model.Shape{}, false
+		}
+		sh = defaultMaskShape(e, s.EditW, s.EditH)
+	case 2:
+		sh = defaultPrimitive(s.placePrim, s.EditW, s.EditH)
+	default:
+		return model.Shape{}, false
+	}
+	imgX := float64(s.placeGhost.X) * float64(s.EditW)
+	imgY := float64(s.placeGhost.Y) * float64(s.EditH)
+	cx, cy := shapeCenter(sh)
+	moveShapeData(&sh, imgX-cx, imgY-cy)
+	return sh, true
+}
+
+// placeShapeAt drops the held palette item at fp (image fraction) and selects it.
+func (s *AppState) placeShapeAt(fp f32.Point) {
+	s.placeGhost, s.placeGhostOn = fp, true
+	gh, ok := s.placeCandidate()
+	if !ok {
+		return
+	}
+	if len(s.EditShapes) >= editMaxShapes {
+		s.Toast = i18n.T("editor.budget_full")
+		return
+	}
+	s.pushUndo(cloneShapes(s.EditShapes))
+	s.EditShapes = append(s.EditShapes, gh)
+	s.selectSingle(len(s.EditShapes) - 1)
+	s.markEditDirty()
+}
+
+// overlayOp returns the canvas image to draw: the plain render, or a copy with the selected shapes lit by
+// a pulsing accent tint on their silhouettes (the SHAPE glows, not its bounding box) and/or a placement
+// ghost composited at the cursor.
+func (s *AppState) overlayOp(gtx C) paint.ImageOp {
+	base := s.editImg
+	if base == nil {
+		return paint.ImageOp{}
+	}
+	selOverlay := s.selValid() && s.editDrag.kind == dragNone
+	ghostOverlay := s.placing && s.placeGhostOn
+	if !selOverlay && !ghostOverlay {
+		return paint.NewImageOp(base)
+	}
+	img := image.NewNRGBA(base.Bounds())
+	copy(img.Pix, base.Pix)
+	if selOverlay {
+		a := int(50 + 120*selPulse(gtx))
+		for _, i := range s.selIndices() {
+			imageio.CompositeShapeOnto(img, tintShape(s.EditShapes[i], s.Th.Accent, a), s.EditW, s.EditH)
+		}
+	}
+	if ghostOverlay {
+		if gh, ok := s.placeCandidate(); ok {
+			imageio.CompositeShapeOnto(img, tintShape(gh, s.Th.Accent, 130), s.EditW, s.EditH)
+		}
+	}
+	return paint.NewImageOp(img)
+}
+
+// resetEditorCanvas wipes the working doc back to a blank canvas of the same size, so a new design can be
+// started without relaunching the app.
+func (s *AppState) resetEditorCanvas() {
+	w, h := s.EditW, s.EditH
+	if w <= 0 || h <= 0 {
+		w, h = 1024, 1024
+	}
+	s.EnterEditor(nil, w, h)
+}
+
 // selScreenRect is the selected shape's axis-aligned bounding box mapped into screen space.
 func (s *AppState) selScreenRect(rect image.Rectangle) image.Rectangle {
-	sh := s.EditShapes[s.EditSel]
+	return s.shapeScreenRect(s.EditSel, rect)
+}
+
+// shapeScreenRect is the on-screen bounding box of shape i.
+func (s *AppState) shapeScreenRect(i int, rect image.Rectangle) image.Rectangle {
+	if i < 0 || i >= len(s.EditShapes) {
+		return image.Rectangle{}
+	}
+	sh := s.EditShapes[i]
 	k := model.KindFromType(sh.Type)
 	xMin, yMin, xMax, yMax := raster.BBox(k, model.ParamsFromShape(sh), s.EditW, s.EditH)
 	return imgBBoxToScreen(rect, xMin, yMin, xMax, yMax, s.EditW, s.EditH)
+}
+
+// groupScreenRect is the union of the selected shapes' on-screen bounding boxes.
+func (s *AppState) groupScreenRect(rect image.Rectangle) image.Rectangle {
+	out, first := image.Rectangle{}, true
+	for _, i := range s.selIndices() {
+		r := s.shapeScreenRect(i, rect)
+		if first {
+			out, first = r, false
+		} else {
+			out = out.Union(r)
+		}
+	}
+	return out
+}
+
+// pressInsideSelection reports whether a press at pos falls within any selected shape's screen box.
+func (s *AppState) pressInsideSelection(pos f32.Point, rect image.Rectangle) bool {
+	for _, i := range s.selIndices() {
+		if ptInRect(pos, s.shapeScreenRect(i, rect)) {
+			return true
+		}
+	}
+	return false
 }
 
 // zoomedRect is the on-screen image rectangle for the current zoom + pan within a viewport of size sz.
@@ -435,7 +809,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 	for {
 		ev, ok := gtx.Event(pointer.Filter{
 			Target:  &s.editKeyTag,
-			Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel,
+			Kinds:   pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel | pointer.Move | pointer.Leave,
 			ScrollY: pointer.ScrollRange{Min: -1000, Max: 1000},
 		})
 		if !ok {
@@ -449,15 +823,26 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 		switch pe.Kind {
 		case pointer.Scroll:
 			s.zoomAbout(pe.Position, math.Exp(float64(-pe.Scroll.Y)*0.0015), sz)
+		case pointer.Move:
+			if s.placing { // the held palette item rides the cursor as a ghost
+				s.placeGhost = pxToFrac(pe.Position, rect)
+				s.placeGhostOn = true
+			}
+		case pointer.Leave:
+			s.placeGhostOn = false
 		case pointer.Press:
-			if s.eyedropMode {
+			switch {
+			case s.placing && pe.Buttons&pointer.ButtonPrimary != 0:
+				s.placeShapeAt(pxToFrac(pe.Position, rect))
+				s.disarmPlace()
+			case s.eyedropMode:
 				s.sampleColor(pxToFrac(pe.Position, rect))
 				s.eyedropMode = false
-			} else if pe.Buttons&pointer.ButtonPrimary != 0 {
+			case pe.Buttons&pointer.ButtonPrimary != 0:
 				gtx.Execute(key.FocusCmd{Tag: &s.editKeyTag})
 				s.editPanning = false
-				s.pressEditor(pe.Position, pxToFrac(pe.Position, rect), rect)
-			} else {
+				s.pressEditor(pe.Position, pxToFrac(pe.Position, rect), rect, pe.Modifiers.Contain(key.ModShortcut))
+			default:
 				s.editPanning = true
 				s.panLast = pe.Position
 			}
@@ -465,6 +850,8 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 			if s.editPanning {
 				s.editPan = s.editPan.Add(pe.Position.Sub(s.panLast))
 				s.panLast = pe.Position
+			} else if s.editMarqueeOn {
+				s.editMarqueeB = pxToFrac(pe.Position, rect)
 			} else {
 				s.editShift = pe.Modifiers.Contain(key.ModShift)
 				s.dragEditor(pxToFrac(pe.Position, rect))
@@ -472,14 +859,48 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 		case pointer.Release, pointer.Cancel:
 			if s.editPanning {
 				s.editPanning = false
+			} else if s.editMarqueeOn {
+				s.finishMarquee()
+				s.editMarqueeOn = false
 			} else if s.editDrag.kind != dragNone {
 				s.pushUndo(s.editDrag.start)
 				s.editDrag = editorDrag{}
 				s.editDragBase = nil
+				s.editDragSkip = nil
 				s.markEditDirty() // full render now that the drag is committed
 			}
 		}
 	}
+}
+
+// finishMarquee turns the rubber-band rectangle into a selection of every shape whose box intersects it.
+func (s *AppState) finishMarquee() {
+	ax, ay := float64(s.editMarqueeA.X)*float64(s.EditW), float64(s.editMarqueeA.Y)*float64(s.EditH)
+	bx, by := float64(s.editMarqueeB.X)*float64(s.EditW), float64(s.editMarqueeB.Y)*float64(s.EditH)
+	x0, x1 := math.Min(ax, bx), math.Max(ax, bx)
+	y0, y1 := math.Min(ay, by), math.Max(ay, by)
+	if x1-x0 < 2 && y1-y0 < 2 { // a click, not a drag → nothing to select
+		return
+	}
+	picked := map[int]bool{}
+	if s.editMarqueeAdd {
+		for _, i := range s.selIndices() {
+			picked[i] = true
+		}
+	}
+	for i := 1; i < len(s.EditShapes); i++ {
+		sh := s.EditShapes[i]
+		k := model.KindFromType(sh.Type)
+		bx0, by0, bx1, by1 := raster.BBox(k, model.ParamsFromShape(sh), s.EditW, s.EditH)
+		if float64(bx1) >= x0 && float64(bx0) <= x1 && float64(by1) >= y0 && float64(by0) <= y1 {
+			picked[i] = true
+		}
+	}
+	idx := make([]int, 0, len(picked))
+	for i := range picked {
+		idx = append(idx, i)
+	}
+	s.selectFromSet(idx)
 }
 
 // addCanvasInput registers the canvas pointer/key target + hover cursors for the next frame.
@@ -487,7 +908,7 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 	area := clip.Rect(vp).Push(gtx.Ops)
 	event.Op(gtx.Ops, &s.editKeyTag)
 	switch {
-	case s.eyedropMode:
+	case s.placing, s.eyedropMode:
 		pointer.CursorCrosshair.Add(gtx.Ops)
 	case s.editPanning:
 		pointer.CursorGrabbing.Add(gtx.Ops)
@@ -498,7 +919,15 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 	}
 	area.Pop()
 
-	if s.editPanning || s.editDrag.kind != dragNone || !s.selValid() {
+	if s.placing || s.editPanning || s.editDrag.kind != dragNone || s.editMarqueeOn || !s.selValid() {
+		return
+	}
+	if s.selCount() > 1 { // group is move-only: a grab cursor over the whole group box, no handles
+		if in := s.groupScreenRect(rect).Intersect(vp); in.Dx() > 0 && in.Dy() > 0 {
+			c := clip.Rect(in).Push(gtx.Ops)
+			pointer.CursorGrab.Add(gtx.Ops)
+			c.Pop()
+		}
 		return
 	}
 	sel := s.selScreenRect(rect)
@@ -528,6 +957,8 @@ func (s *AppState) handleEditKeys(gtx C) {
 			key.Filter{Focus: &s.editKeyTag, Name: "Z", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: "Z", Required: key.ModShortcut | key.ModShift},
 			key.Filter{Focus: &s.editKeyTag, Name: "D", Required: key.ModShortcut},
+			key.Filter{Focus: &s.editKeyTag, Name: "A", Required: key.ModShortcut},
+			key.Filter{Focus: &s.editKeyTag, Name: "M", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameDeleteForward},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameDeleteBackward},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameEscape},
@@ -550,10 +981,18 @@ func (s *AppState) handleEditKeys(gtx C) {
 			s.undo()
 		case ke.Name == "D" && ke.Modifiers.Contain(key.ModShortcut):
 			s.duplicateSel()
+		case ke.Name == "A" && ke.Modifiers.Contain(key.ModShortcut):
+			s.selectAll()
+		case ke.Name == "M" && ke.Modifiers.Contain(key.ModShortcut):
+			s.mirrorSelection()
 		case ke.Name == key.NameDeleteForward || ke.Name == key.NameDeleteBackward:
 			s.deleteSel()
 		case ke.Name == key.NameEscape:
-			s.EditSel = -1
+			if s.placing {
+				s.disarmPlace()
+			} else {
+				s.deselectAll()
+			}
 		case ke.Name == key.NameLeftArrow:
 			s.nudge(-1, 0, ke.Modifiers)
 		case ke.Name == key.NameRightArrow:
@@ -568,7 +1007,7 @@ func (s *AppState) handleEditKeys(gtx C) {
 
 // nudge moves the selected shape by the arrow keys: 1px, or 10px with Shift held.
 func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
-	if !s.selValid() {
+	if s.selCount() == 0 {
 		return
 	}
 	step := 1.0
@@ -576,7 +1015,9 @@ func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
 		step = 10
 	}
 	s.pushUndo(cloneShapes(s.EditShapes))
-	moveShapeData(&s.EditShapes[s.EditSel], dx*step, dy*step)
+	for _, i := range s.selIndices() {
+		moveShapeData(&s.EditShapes[i], dx*step, dy*step)
+	}
 	s.markEditDirty()
 }
 
@@ -584,10 +1025,9 @@ func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
 // clearly over busy art), the 8 resize handles, and the rotate knob.
 func (s *AppState) drawSelection(gtx C, sel image.Rectangle) {
 	th := s.Th
-	secs := float64(gtx.Now.UnixNano()) / 1e9
-	pulse := float32(0.5 + 0.5*math.Sin(secs*2*math.Pi/0.8))
-	col := lerpColor(th.Accent, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, pulse)
-	drawRectBorder(gtx, sel, col)
+	// Static two-tone bbox frame (the pulse now lives on the shape's silhouette, drawn by overlayOp).
+	drawRectBorderW(gtx, sel, color.NRGBA{A: 160}, 2)
+	drawRectBorderW(gtx, sel, th.Accent, 1)
 	drawCropHandles(gtx, sel, th.Accent, th.Bg)
 	rp := rotateHandlePt(sel)
 	mx := (sel.Min.X + sel.Max.X) / 2
@@ -595,6 +1035,66 @@ func (s *AppState) drawSelection(gtx C, sel image.Rectangle) {
 	drawKnob(gtx, rp, th.Accent, th.Bg)
 	// Centre move anchor (grab to drag — works even where the shape itself is sparse).
 	drawMoveAnchor(gtx, image.Pt(mx, (sel.Min.Y+sel.Max.Y)/2), th.Accent, th.Bg)
+}
+
+// drawMultiSelection outlines every shape in a multi-selection (pulsing) plus their shared group box
+// with a single move anchor — group transforms are move-only, so no scale handles or rotate knob.
+func (s *AppState) drawMultiSelection(gtx C, rect image.Rectangle) {
+	th := s.Th
+	// Thin static per-shape frames + a bolder group frame with one move anchor; the pulse is on the
+	// shapes' silhouettes (overlayOp), so nothing here flashes.
+	for _, i := range s.selIndices() {
+		drawRectBorderW(gtx, s.shapeScreenRect(i, rect), th.Accent, 1)
+	}
+	g := s.groupScreenRect(rect)
+	drawRectBorderW(gtx, g, color.NRGBA{A: 160}, 2)
+	drawRectBorderW(gtx, g, th.Accent, 1)
+	drawMoveAnchor(gtx, image.Pt((g.Min.X+g.Max.X)/2, (g.Min.Y+g.Max.Y)/2), th.Accent, th.Bg)
+}
+
+// drawMarquee paints the in-progress rubber-band rectangle (translucent fill + accent border).
+func (s *AppState) drawMarquee(gtx C, rect image.Rectangle) {
+	th := s.Th
+	a := fracToScreen(s.editMarqueeA, rect)
+	b := fracToScreen(s.editMarqueeB, rect)
+	x0, x1 := a.X, b.X
+	if x0 > x1 {
+		x0, x1 = x1, x0
+	}
+	y0, y1 := a.Y, b.Y
+	if y0 > y1 {
+		y0, y1 = y1, y0
+	}
+	r := image.Rect(x0, y0, x1, y1)
+	fill := th.Accent
+	fill.A = 40
+	paint.FillShape(gtx.Ops, fill, clip.Rect(r).Op())
+	drawRectBorder(gtx, r, th.Accent)
+}
+
+// fracToScreen maps an image-fraction point to a screen pixel inside rect.
+func fracToScreen(p f32.Point, rect image.Rectangle) image.Point {
+	return image.Pt(
+		rect.Min.X+int(p.X*float32(rect.Dx())+0.5),
+		rect.Min.Y+int(p.Y*float32(rect.Dy())+0.5),
+	)
+}
+
+// selPulse is the shared 0..1 selection-highlight pulse (period 0.8s).
+func selPulse(gtx C) float32 {
+	secs := float64(gtx.Now.UnixNano()) / 1e9
+	return float32(0.5 + 0.5*math.Sin(secs*2*math.Pi/0.8))
+}
+
+// drawRectBorderW strokes a w-px border of col just inside r (four filled bars), for a bolder outline.
+func drawRectBorderW(gtx C, r image.Rectangle, col color.NRGBA, w int) {
+	if r.Dx() <= 0 || r.Dy() <= 0 || w <= 0 {
+		return
+	}
+	paint.FillShape(gtx.Ops, col, clip.Rect(image.Rect(r.Min.X, r.Min.Y, r.Max.X, r.Min.Y+w)).Op())
+	paint.FillShape(gtx.Ops, col, clip.Rect(image.Rect(r.Min.X, r.Max.Y-w, r.Max.X, r.Max.Y)).Op())
+	paint.FillShape(gtx.Ops, col, clip.Rect(image.Rect(r.Min.X, r.Min.Y, r.Min.X+w, r.Max.Y)).Op())
+	paint.FillShape(gtx.Ops, col, clip.Rect(image.Rect(r.Max.X-w, r.Min.Y, r.Max.X, r.Max.Y)).Op())
 }
 
 // drawMoveAnchor draws the centre grab handle: a filled disc with a small plus.
@@ -643,8 +1143,9 @@ func drawKnob(gtx C, p image.Point, fill, border color.NRGBA) {
 
 // pressEditor classifies a press into a transform-handle grab on the current selection, or a fresh
 // selection + move, and starts the matching drag.
-func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle) {
-	if s.selValid() {
+func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle, additive bool) {
+	// Scale/rotate handles act only on a single primary selection (group transform = move-only).
+	if s.selValid() && s.selCount() == 1 && !additive {
 		sel := s.selScreenRect(rect)
 		if within(pos, rotateHandlePt(sel), editHandleHitR) {
 			s.startTransform(dragRotate, 0, fp)
@@ -656,20 +1157,46 @@ func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle) {
 				return
 			}
 		}
-		// A press anywhere inside the selected shape's bounding box moves it — so sparse shapes (a
-		// barcode, a dotted decal) can be grabbed by their box, not only their solid pixels (which would
-		// otherwise let the press fall through the gaps and drop the selection).
-		if ptInRect(pos, sel) {
+	}
+	// A press inside ANY selected shape's box moves the whole selection — so sparse shapes (a barcode,
+	// a dotted decal) can be grabbed by their box, not only their solid pixels, and a multi-selection
+	// drags as one.
+	if !additive && s.selCount() >= 1 {
+		inside := s.pressInsideSelection(pos, rect)
+		if !inside && s.selCount() > 1 { // also grab the drawn group-centre move anchor
+			g := s.groupScreenRect(rect)
+			anchor := image.Pt((g.Min.X+g.Max.X)/2, (g.Min.Y+g.Max.Y)/2)
+			inside = within(pos, anchor, editHandleHitR+4)
+		}
+		if inside {
 			s.startTransform(dragMove, 0, fp)
 			return
 		}
 	}
-	s.EditSel = s.hitTest(float64(fp.X)*float64(s.EditW), float64(fp.Y)*float64(s.EditH))
-	if s.EditSel >= 1 {
-		s.startTransform(dragMove, 0, fp)
-	} else {
+	hit := s.hitTest(float64(fp.X)*float64(s.EditW), float64(fp.Y)*float64(s.EditH))
+	if additive { // Ctrl+click toggles a shape; Ctrl-drag on empty space = additive marquee
+		if hit >= 1 {
+			s.toggleSel(hit)
+			s.editDrag = editorDrag{}
+			return
+		}
+		s.editMarqueeOn = true
+		s.editMarqueeAdd = true
+		s.editMarqueeA, s.editMarqueeB = fp, fp
 		s.editDrag = editorDrag{}
+		return
 	}
+	if hit >= 1 {
+		s.selectSingle(hit)
+		s.startTransform(dragMove, 0, fp)
+		return
+	}
+	// Empty space: begin a rubber-band marquee (replaces the selection on release).
+	s.deselectAll()
+	s.editMarqueeOn = true
+	s.editMarqueeAdd = false
+	s.editMarqueeA, s.editMarqueeB = fp, fp
+	s.editDrag = editorDrag{}
 }
 
 // ptInRect reports whether pointer p lies within rectangle r.
@@ -686,9 +1213,14 @@ func (s *AppState) startTransform(kind, handle int, fp f32.Point) {
 		d.cx, d.cy = shapeCenter(sh)
 		d.theta0 = shapeTheta(sh)
 		d.ang0 = math.Atan2(float64(fp.Y)*float64(s.EditH)-d.cy, float64(fp.X)*float64(s.EditW)-d.cx)
-		// Pre-render everything except the dragged shape once, so each drag frame only re-composites
-		// that one shape (live + smooth at any doc size).
-		s.editDragBase = imageio.RenderFH6ImageSkip(s.EditShapes, true, s.EditW, s.EditH, s.EditSel)
+		// Pre-render everything except the selected shape(s) once, so each drag frame only re-composites
+		// those (live + smooth at any doc size, even for a multi-shape group move).
+		skip := map[int]bool{}
+		for _, i := range s.selIndices() {
+			skip[i] = true
+		}
+		s.editDragSkip = skip
+		s.editDragBase = imageio.RenderFH6ImageSkipSet(s.EditShapes, true, s.EditW, s.EditH, skip)
 	}
 	s.editDrag = d
 }
@@ -697,6 +1229,20 @@ func (s *AppState) startTransform(kind, handle int, fp f32.Point) {
 func (s *AppState) dragEditor(fp f32.Point) {
 	d := s.editDrag
 	if d.kind == dragNone || s.EditSel < 1 || s.EditSel >= len(d.start) {
+		return
+	}
+	// Group move: translate every selected shape by the same delta from its drag-start snapshot.
+	if d.kind == dragMove && s.selCount() > 1 {
+		dx := float64(fp.X-d.anchor.X) * float64(s.EditW)
+		dy := float64(fp.Y-d.anchor.Y) * float64(s.EditH)
+		for _, i := range s.selIndices() {
+			if i >= len(d.start) {
+				continue
+			}
+			s.EditShapes[i].Data = append([]float64(nil), d.start[i].Data...)
+			moveShapeData(&s.EditShapes[i], dx, dy)
+		}
+		s.markEditDirty()
 		return
 	}
 	start := d.start[s.EditSel]
@@ -819,6 +1365,7 @@ func (s *AppState) ExitEditor() {
 	s.EditorMode = false
 	s.EditShapes = nil
 	s.EditSel = -1
+	s.editSelExtra = nil
 	s.editDrag = editorDrag{}
 	s.editUndo = nil
 	s.editRedo = nil

@@ -68,6 +68,15 @@
   "editor.cat_decals": "Naklejki i symbole",
 
   "editor.eyedrop": "Pipeta",
+  "editor.mirror": "Odbij",
+  "editor.selected_n": "Zaznaczono: %d",
+  "editor.align": "Wyrównaj",
+  "editor.distribute_h": "Rozłóż w poziomie",
+  "editor.distribute_v": "Rozłóż w pionie",
+  "editor.confirm_del": "Usunąć?",
+  "editor.place_hint": "Kliknij element, potem kliknij na płótnie, aby umieścić",
+  "editor.new_canvas": "Nowe płótno",
+  "editor.clear_confirm": "Odrzucić i zacząć od nowa?",
 
   "about.dev": "dev",
   "about.dev_build": "kompilacja dev",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "Potwierdzić?",
   "library.export": "Eksportuj",
   "library.rename": "Zmień nazwę",
+  "library.edit": "Edytuj",
 
   "inject.guide_toggle": "  Jak działa wstrzykiwanie",
   "inject.guide_step1": "W FH6 dodaj grupę winylu z co najmniej tyloma warstwami, ile kształtów ma generacja.",

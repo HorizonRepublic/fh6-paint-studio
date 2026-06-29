@@ -709,6 +709,19 @@ func loop(w *app.Window) error {
 						}
 					}
 				}
+				if r.Edit.Clicked(gtx) && store != nil {
+					if g, err := store.LoadGeometry(r.Entry.ID); err == nil {
+						ew, eh := r.Entry.Width, r.Entry.Height
+						if ew <= 0 || eh <= 0 {
+							ew, eh = 1024, 1024
+						}
+						st.EnterEditor(g.Shapes, ew, eh)
+						st.EditName.SetText(r.Entry.Name)
+					} else {
+						st.Toast = "Load failed: " + err.Error()
+					}
+					continue
+				}
 				if r.Export.Clicked(gtx) && store != nil && !saving {
 					saving = true
 					pendingExportID = r.Entry.ID

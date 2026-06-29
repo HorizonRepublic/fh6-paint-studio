@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"math"
 	"strconv"
+	"time"
 
 	"gioui.org/f32"
 	"gioui.org/io/pointer"
@@ -22,6 +23,9 @@ func (s *AppState) inspectorBody(gtx C) D {
 	th := s.Th
 	if !s.selValid() {
 		return th.Dim(gtx, i18n.T("editor.right_hint"))
+	}
+	if s.selCount() > 1 {
+		return s.multiPanel(gtx)
 	}
 	sh := s.EditShapes[s.EditSel]
 	k := model.KindFromType(sh.Type)
@@ -43,8 +47,79 @@ func (s *AppState) inspectorBody(gtx C) D {
 		layout.Rigid(s.colorSection),
 		layout.Rigid(GapV(14).Layout),
 		layout.Rigid(s.inspActions),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(s.mirrorButton),
 	)
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}
+
+// mirrorButton is the full-width "mirror across the vertical centre" action shared by single & multi.
+func (s *AppState) mirrorButton(gtx C) D {
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	return s.Th.SecondaryButton(gtx, &s.editMirror, i18n.T("editor.mirror"), true)
+}
+
+// multiPanel replaces the per-field inspector when several shapes are selected: align/distribute,
+// mirror, and group duplicate/delete (per-shape numeric editing only makes sense for one shape).
+func (s *AppState) multiPanel(gtx C) D {
+	th := s.Th
+	full := func(b *widget.Clickable, key string) layout.Widget {
+		return func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return th.SecondaryButton(gtx, b, i18n.T(key), true)
+		}
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 13, i18n.T("editor.selected_n", s.selCount()), th.Text) }),
+		layout.Rigid(GapV(10).Layout),
+		layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("editor.align")) }),
+		layout.Rigid(GapV(6).Layout),
+		layout.Rigid(s.alignRowX),
+		layout.Rigid(GapV(6).Layout),
+		layout.Rigid(s.alignRowY),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(full(&s.alignBtns[distributeH], "editor.distribute_h")),
+		layout.Rigid(GapV(6).Layout),
+		layout.Rigid(full(&s.alignBtns[distributeV], "editor.distribute_v")),
+		layout.Rigid(GapV(12).Layout),
+		layout.Rigid(full(&s.editMirror, "editor.mirror")),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{}.Layout(gtx,
+				layout.Flexed(1, full(&s.editDup, "editor.duplicate")),
+				layout.Rigid(GapH(8).Layout),
+				layout.Flexed(1, s.deleteButton),
+			)
+		}),
+	)
+}
+
+// alignBtn is one equal-width align button (label is an icon-like letter, no translation needed).
+func (s *AppState) alignBtn(n int, label string) layout.FlexChild {
+	return layout.Flexed(1, func(gtx C) D {
+		gtx.Constraints.Min.X = gtx.Constraints.Max.X
+		return s.Th.SecondaryButton(gtx, &s.alignBtns[n], label, true)
+	})
+}
+
+func (s *AppState) alignRowX(gtx C) D {
+	return layout.Flex{}.Layout(gtx,
+		s.alignBtn(alignLeft, "L"),
+		layout.Rigid(GapH(6).Layout),
+		s.alignBtn(alignCenterX, "C"),
+		layout.Rigid(GapH(6).Layout),
+		s.alignBtn(alignRight, "R"),
+	)
+}
+
+func (s *AppState) alignRowY(gtx C) D {
+	return layout.Flex{}.Layout(gtx,
+		s.alignBtn(alignTop, "T"),
+		layout.Rigid(GapH(6).Layout),
+		s.alignBtn(alignMiddleY, "M"),
+		layout.Rigid(GapH(6).Layout),
+		s.alignBtn(alignBottom, "B"),
+	)
 }
 
 // inspFieldWidget is a dim label stacked over a single editor box that fills the available width.
@@ -101,7 +176,9 @@ func (s *AppState) colorSection(gtx C) D {
 			rows = append(rows, layout.Rigid(s.recentColorsRow), layout.Rigid(GapV(6).Layout))
 		}
 		rows = append(rows,
-			layout.Rigid(s.colorPaletteGrid),
+			layout.Rigid(s.colorWheel),
+			layout.Rigid(GapV(8).Layout),
+			layout.Rigid(s.brightnessSlider),
 			layout.Rigid(GapV(8).Layout),
 			layout.Rigid(func(gtx C) D {
 				return s.colorSlider(gtx, "editor.col_r", &s.pickR, color.NRGBA{R: 220, G: 70, B: 70, A: 255})
@@ -121,62 +198,6 @@ func (s *AppState) colorSection(gtx C) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
 }
 
-// editorRainbow is the preset swatch palette: vivid / dark / pastel hue rows + a grayscale row.
-func editorRainbow() []color.NRGBA {
-	const hues = 8
-	var p []color.NRGBA
-	for _, sv := range [][2]float64{{1, 1}, {1, 0.6}, {0.4, 1}} {
-		for i := 0; i < hues; i++ {
-			p = append(p, hsvToRGB(float64(i)/hues*360, sv[0], sv[1]))
-		}
-	}
-	for i := 0; i < hues; i++ {
-		g := uint8(float64(i)/float64(hues-1)*255 + 0.5)
-		p = append(p, color.NRGBA{R: g, G: g, B: g, A: 255})
-	}
-	return p
-}
-
-// colorPaletteGrid renders the rainbow swatches; clicking one sets the shape's RGB (alpha preserved).
-func (s *AppState) colorPaletteGrid(gtx C) D {
-	pal := editorRainbow()
-	for len(s.colorPalBtns) < len(pal) {
-		s.colorPalBtns = append(s.colorPalBtns, widget.Clickable{})
-	}
-	const cols = 8
-	var rows []layout.FlexChild
-	for r := 0; r*cols < len(pal); r++ {
-		base := r * cols
-		rows = append(rows, layout.Rigid(func(gtx C) D {
-			var cells []layout.FlexChild
-			for c := 0; c < cols && base+c < len(pal); c++ {
-				if c > 0 {
-					cells = append(cells, layout.Rigid(GapH(4).Layout))
-				}
-				i, col := base+c, pal[base+c]
-				cells = append(cells, layout.Rigid(func(gtx C) D { return s.colorChip(gtx, i, col) }))
-			}
-			return layout.Flex{}.Layout(gtx, cells...)
-		}))
-		if (r+1)*cols < len(pal) {
-			rows = append(rows, layout.Rigid(GapV(4).Layout))
-		}
-	}
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
-}
-
-// colorChip is one fixed-size preset swatch button.
-func (s *AppState) colorChip(gtx C, i int, col color.NRGBA) D {
-	th := s.Th
-	return material.Clickable(gtx, &s.colorPalBtns[i], func(gtx C) D {
-		sz := image.Pt(gtx.Dp(24), gtx.Dp(22))
-		gtx.Constraints = layout.Exact(sz)
-		borderRRect(gtx, th.Border, col, sz, 4, 1)
-		pointer.CursorPointer.Add(gtx.Ops)
-		return D{Size: sz}
-	})
-}
-
 // applyPaletteColor sets the selected shape's RGB to c (alpha unchanged) and syncs the sliders.
 func (s *AppState) applyPaletteColor(c color.NRGBA) {
 	if !s.selValid() {
@@ -191,6 +212,9 @@ func (s *AppState) applyPaletteColor(c color.NRGBA) {
 	}
 	sh.Color[0], sh.Color[1], sh.Color[2] = int(c.R), int(c.G), int(c.B)
 	s.pickR.Value, s.pickG.Value, s.pickB.Value = float32(c.R)/255, float32(c.G)/255, float32(c.B)/255
+	h, sat, v := rgbToHSV(c)
+	s.pickH, s.pickS, s.pickV = h/360, sat, v
+	s.pickVf.Value = float32(v)
 	s.pushRecentColor(c)
 	s.markEditDirty()
 }
@@ -337,16 +361,33 @@ func (s *AppState) inspActions(gtx C) D {
 			return layout.Flex{}.Layout(gtx,
 				layout.Flexed(1, btn(&s.editDup, "editor.duplicate")),
 				layout.Rigid(GapH(8).Layout),
-				layout.Flexed(1, btn(&s.editDelete, "editor.delete")),
+				layout.Flexed(1, s.deleteButton),
 			)
 		}),
 	)
+}
+
+// deleteButton is the red, two-step Delete: the first click arms it (label → "Delete?"), a second within
+// the window confirms. Shared by the single-shape and multi-select panels.
+func (s *AppState) deleteButton(gtx C) D {
+	th := s.Th
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	if s.deleteArmed && gtx.Now.Before(s.deleteArmedAt.Add(3*time.Second)) {
+		return th.DangerButton(gtx, &s.editDelete, i18n.T("editor.confirm_del"))
+	}
+	return th.DangerButton(gtx, &s.editDelete, i18n.T("editor.delete"))
 }
 
 // syncInspector keeps the fields and the selected shape in step: it repopulates the fields when the
 // selection changes or a drag is mutating the shape live, and otherwise applies typed edits to the shape.
 func (s *AppState) syncInspector() {
 	if !s.selValid() {
+		s.inspFor = -1
+		return
+	}
+	if s.selCount() > 1 {
+		// Multi-select shows the group panel, not per-field editors — never read the (hidden, stale)
+		// fields back over the primary shape. inspFor=-1 forces a fresh populate on returning to one shape.
 		s.inspFor = -1
 		return
 	}
@@ -384,6 +425,9 @@ func (s *AppState) populateColorSliders() {
 	s.pickG.Value = get(1, 0)
 	s.pickB.Value = get(2, 0)
 	s.pickA.Value = get(3, 1)
+	h, sat, v := rgbToHSV(colorFromShape(sh))
+	s.pickH, s.pickS, s.pickV = h/360, sat, v
+	s.pickVf.Value = float32(v)
 }
 
 // readInspector parses the fields and applies any change to the selected shape, marking the render dirty
@@ -424,6 +468,10 @@ func (s *AppState) readInspector() {
 	}
 	if s.colorPickerOpen && s.applyColorSliders(sh) {
 		changed = true
+		// keep the disc + value slider in step when the R/G/B sliders are the driver
+		h, sat, v := rgbToHSV(colorFromShape(*sh))
+		s.pickH, s.pickS, s.pickV = h/360, sat, v
+		s.pickVf.Value = float32(v)
 	}
 	if changed {
 		s.markEditDirty()
@@ -462,12 +510,7 @@ func (s *AppState) handleEditActions(gtx C) {
 		s.eyedropMode = !s.eyedropMode
 	}
 	if s.colorPickerOpen {
-		pal := editorRainbow()
-		for i := range s.colorPalBtns {
-			if i < len(pal) && s.colorPalBtns[i].Clicked(gtx) {
-				s.applyPaletteColor(pal[i])
-			}
-		}
+		s.handleColorPicker(gtx)
 		for i := range s.recentBtns {
 			if i < len(s.recentColors) && s.recentBtns[i].Clicked(gtx) {
 				s.applyPaletteColor(s.recentColors[i])
@@ -484,7 +527,21 @@ func (s *AppState) handleEditActions(gtx C) {
 		s.duplicateSel()
 	}
 	if s.editDelete.Clicked(gtx) {
-		s.deleteSel()
+		if s.deleteArmed && gtx.Now.Before(s.deleteArmedAt.Add(3*time.Second)) {
+			s.deleteArmed = false
+			s.deleteSel()
+		} else {
+			s.deleteArmed = true
+			s.deleteArmedAt = gtx.Now
+		}
+	}
+	if s.editMirror.Clicked(gtx) {
+		s.mirrorSelection()
+	}
+	for n := range s.alignBtns {
+		if s.alignBtns[n].Clicked(gtx) {
+			s.alignSelection(n)
+		}
 	}
 }
 
@@ -514,29 +571,74 @@ func (s *AppState) sendBack() {
 
 // duplicateSel inserts a slightly-offset clone of the selected shape just above it, and selects it.
 func (s *AppState) duplicateSel() {
-	if !s.selValid() {
+	idx := s.selIndices()
+	if len(idx) == 0 {
+		return
+	}
+	if len(idx) == 1 { // single: insert the copy directly above the original
+		s.pushUndo(cloneShapes(s.EditShapes))
+		i := idx[0]
+		clone := cloneShapes(s.EditShapes[i : i+1])[0]
+		moveShapeData(&clone, 8, 8)
+		s.EditShapes = append(s.EditShapes, model.Shape{})
+		copy(s.EditShapes[i+2:], s.EditShapes[i+1:])
+		s.EditShapes[i+1] = clone
+		s.selectSingle(i + 1)
+		s.markEditDirty()
 		return
 	}
 	s.pushUndo(cloneShapes(s.EditShapes))
-	i := s.EditSel
-	clone := cloneShapes(s.EditShapes[i : i+1])[0]
-	moveShapeData(&clone, 8, 8)
-	s.EditShapes = append(s.EditShapes, model.Shape{})
-	copy(s.EditShapes[i+2:], s.EditShapes[i+1:])
-	s.EditShapes[i+1] = clone
-	s.EditSel = i + 1
+	var newIdx []int
+	for _, i := range idx {
+		if len(s.EditShapes) >= editMaxShapes {
+			break
+		}
+		clone := cloneShapes(s.EditShapes[i : i+1])[0]
+		moveShapeData(&clone, 8, 8)
+		s.EditShapes = append(s.EditShapes, clone)
+		newIdx = append(newIdx, len(s.EditShapes)-1)
+	}
+	s.selectFromSet(newIdx)
+	s.markEditDirty()
+}
+
+// mirrorSelection appends a copy of each selected shape reflected across the canvas vertical centre and
+// selects the new copies — the "build one half, mirror to the other" symmetry workflow.
+func (s *AppState) mirrorSelection() {
+	idx := s.selIndices()
+	if len(idx) == 0 {
+		return
+	}
+	s.pushUndo(cloneShapes(s.EditShapes))
+	var newIdx []int
+	for _, i := range idx {
+		if len(s.EditShapes) >= editMaxShapes {
+			break
+		}
+		clone := cloneShapes(s.EditShapes[i : i+1])[0]
+		mirrorShapeX(&clone, s.EditW)
+		s.EditShapes = append(s.EditShapes, clone)
+		newIdx = append(newIdx, len(s.EditShapes)-1)
+	}
+	if len(newIdx) == 0 {
+		return
+	}
+	s.selectFromSet(newIdx)
 	s.markEditDirty()
 }
 
 // deleteSel removes the selected shape (never the background) and clears the selection.
 func (s *AppState) deleteSel() {
-	if !s.selValid() {
+	idx := s.selIndices()
+	if len(idx) == 0 {
 		return
 	}
 	s.pushUndo(cloneShapes(s.EditShapes))
-	i := s.EditSel
-	s.EditShapes = append(s.EditShapes[:i], s.EditShapes[i+1:]...)
-	s.EditSel = -1
+	for j := len(idx) - 1; j >= 0; j-- { // descending so earlier indices stay valid
+		i := idx[j]
+		s.EditShapes = append(s.EditShapes[:i], s.EditShapes[i+1:]...)
+	}
+	s.deselectAll()
 	s.markEditDirty()
 }
 

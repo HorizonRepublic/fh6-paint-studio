@@ -68,6 +68,15 @@
   "editor.cat_decals": "Декали та символи",
 
   "editor.eyedrop": "Піпетка",
+  "editor.mirror": "Дзеркало",
+  "editor.selected_n": "Вибрано: %d",
+  "editor.align": "Вирівняти",
+  "editor.distribute_h": "Розподіл по гор.",
+  "editor.distribute_v": "Розподіл по верт.",
+  "editor.confirm_del": "Видалити?",
+  "editor.place_hint": "Клікни елемент, потім клікни на полотні, щоб поставити",
+  "editor.new_canvas": "Новий холст",
+  "editor.clear_confirm": "Скинути й почати заново?",
 
   "about.dev": "dev",
   "about.dev_build": "dev-збірка",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "Підтвердити?",
   "library.export": "Експорт",
   "library.rename": "Перейменувати",
+  "library.edit": "Редагувати",
 
   "inject.guide_toggle": "  Як працює інʼєкція",
   "inject.guide_step1": "У FH6 додайте групу вінілу щонайменше з такою кількістю шарів, скільки фігур у генерації.",

@@ -24,7 +24,8 @@ type LibraryRow struct {
 	Export        widget.Clickable
 	Rename        widget.Clickable // enter inline-edit mode; doubles as "Save" while Editing
 	RenameCancel  widget.Clickable
-	NameEd        widget.Editor // inline name editor, shown in place of the name label while Editing
+	Edit          widget.Clickable // open this livery in the shape editor
+	NameEd        widget.Editor    // inline name editor, shown in place of the name label while Editing
 	Editing       bool
 	Delete        widget.Clickable
 	ConfirmDelete bool
@@ -316,6 +317,11 @@ func (s *AppState) cardActions(gtx C, r *LibraryRow) D {
 		layout.Rigid(func(gtx C) D {
 			gtx.Constraints.Min.X = gtx.Constraints.Max.X
 			return s.injectButton(gtx, r)
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return th.SecondaryButton(gtx, &r.Edit, i18n.T("library.edit"), true)
 		}),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {

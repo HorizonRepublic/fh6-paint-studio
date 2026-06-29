@@ -68,6 +68,15 @@
   "editor.cat_decals": "贴花与符号",
 
   "editor.eyedrop": "取色",
+  "editor.mirror": "镜像",
+  "editor.selected_n": "已选 %d 个",
+  "editor.align": "对齐",
+  "editor.distribute_h": "水平分布",
+  "editor.distribute_v": "垂直分布",
+  "editor.confirm_del": "删除？",
+  "editor.place_hint": "点击项目，然后点击画布进行放置",
+  "editor.new_canvas": "新建画布",
+  "editor.clear_confirm": "放弃并重新开始？",
 
   "about.dev": "开发版",
   "about.dev_build": "开发构建",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "确认？",
   "library.export": "导出",
   "library.rename": "重命名",
+  "library.edit": "编辑",
 
   "inject.guide_toggle": "  注入原理",
   "inject.guide_step1": "在 FH6 中添加一个乙烯基组，其图层数至少等于该生成的形状数。",

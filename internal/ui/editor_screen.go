@@ -50,12 +50,16 @@ func (s *AppState) editorLeftColumn(gtx C) D {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 			layout.Rigid(func(gtx C) D { return th.Title(gtx, i18n.T("editor.title")) }),
 			layout.Rigid(GapV(10).Layout),
+			layout.Rigid(s.newCanvasRow),
+			layout.Rigid(GapV(8).Layout),
 			layout.Rigid(s.undoRedoRow),
 			layout.Rigid(GapV(12).Layout),
 			layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("editor.add")) }),
 			layout.Rigid(GapV(6).Layout),
 			layout.Rigid(s.addPaletteRows),
-			layout.Rigid(GapV(14).Layout),
+			layout.Rigid(GapV(8).Layout),
+			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, i18n.T("editor.place_hint"), th.TextDim) }),
+			layout.Rigid(GapV(10).Layout),
 			layout.Flexed(1, s.bankGrid),
 		)
 	})

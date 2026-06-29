@@ -77,9 +77,20 @@ func buildBankRows(entries []maskbank.Entry, cols int) []bankRow {
 func (s *AppState) handleBankActions(gtx C) {
 	for i := range s.bankBtns {
 		if s.bankBtns[i].Clicked(gtx) {
-			s.insertBankWord(i)
+			s.armPlaceMask(i)
 		}
 	}
+}
+
+// armPlaceMask picks up bank entry i for placement; it then rides the cursor over the canvas and drops on
+// the next click there.
+func (s *AppState) armPlaceMask(i int) {
+	entries := maskbank.All()
+	if i < 0 || i >= len(entries) {
+		return
+	}
+	s.placing, s.placeKind, s.placeWord = true, 1, int(entries[i].Word)
+	s.placeGhostOn = false
 }
 
 // bankGrid is the scrollable list of category headers + thumbnail rows.
@@ -173,7 +184,7 @@ func (s *AppState) insertBankWord(i int) {
 	}
 	s.pushUndo(cloneShapes(s.EditShapes))
 	s.EditShapes = append(s.EditShapes, defaultMaskShape(entries[i], s.EditW, s.EditH))
-	s.EditSel = len(s.EditShapes) - 1
+	s.selectSingle(len(s.EditShapes) - 1)
 	s.markEditDirty()
 }
 
@@ -230,4 +241,48 @@ func bankThumbImage(e maskbank.Entry, size int, fg color.NRGBA) *image.NRGBA {
 		}
 	}
 	return img
+}
+
+// maskByWord caches a word→entry lookup for the whole bank (built once on first use).
+var maskByWord map[uint16]maskbank.Entry
+
+func maskEntryByWord(word uint16) (maskbank.Entry, bool) {
+	if maskByWord == nil {
+		maskByWord = make(map[uint16]maskbank.Entry)
+		for _, e := range maskbank.All() {
+			maskByWord[e.Word] = e
+		}
+	}
+	e, ok := maskByWord[word]
+	return e, ok
+}
+
+// maskThumbOp returns a cached glyph silhouette thumbnail for a mask word (theme-text coloured).
+func (s *AppState) maskThumbOp(word uint16) (paint.ImageOp, bool) {
+	if op, ok := s.layerThumbs[word]; ok {
+		return op, true
+	}
+	e, ok := maskEntryByWord(word)
+	if !ok {
+		return paint.ImageOp{}, false
+	}
+	if s.layerThumbs == nil {
+		s.layerThumbs = map[uint16]paint.ImageOp{}
+	}
+	op := paint.NewImageOp(bankThumbImage(e, 48, s.Th.Text))
+	s.layerThumbs[word] = op
+	return op, true
+}
+
+// layerIcon draws the layer-row glyph: the actual mask silhouette for mask shapes (a letter looks like a
+// letter, not a generic circle), or the primitive icon otherwise.
+func (s *AppState) layerIcon(gtx C, sh model.Shape) D {
+	if model.IsMask(model.KindFromType(sh.Type)) {
+		if op, ok := s.maskThumbOp(uint16(sh.Type)); ok {
+			sz := gtx.Dp(16)
+			gtx.Constraints = layout.Exact(image.Pt(sz, sz))
+			return widget.Image{Src: op, Fit: widget.Contain, Position: layout.Center}.Layout(gtx)
+		}
+	}
+	return drawShapeIcon(gtx, iconForShape(sh), s.Th.Text, true)
 }

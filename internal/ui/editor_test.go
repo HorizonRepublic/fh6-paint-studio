@@ -1,11 +1,16 @@
 package ui
 
 import (
+	"image/color"
 	"math"
 	"testing"
 
+	"gioui.org/f32"
+	"gioui.org/io/key"
+
 	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/raster"
 )
 
 func TestEnterEditorCopies(t *testing.T) {
@@ -290,5 +295,194 @@ func TestApplyRotationTrianglePreservesCentroid(t *testing.T) {
 	}
 	if dst.Data[0] == src.Data[0] && dst.Data[1] == src.Data[1] {
 		t.Fatal("rotation did not move the first vertex")
+	}
+}
+
+func multiDoc() *AppState {
+	s := NewAppState(NewTheme())
+	s.EnterEditor([]model.Shape{
+		{Type: model.TypeRectangle, Data: []float64{0, 0, 100, 100}, Color: []int{0, 0, 0, 255}},       // 0 bg
+		{Type: model.TypeRotatedEllipse, Data: []float64{20, 20, 5, 5, 0}, Color: []int{1, 0, 0, 255}}, // 1
+		{Type: model.TypeRotatedEllipse, Data: []float64{40, 40, 5, 5, 0}, Color: []int{2, 0, 0, 255}}, // 2
+	}, 100, 100)
+	return s
+}
+
+func TestToggleSelBuildsAndShrinksGroup(t *testing.T) {
+	s := multiDoc()
+	s.toggleSel(1)
+	if s.selCount() != 1 || s.EditSel != 1 {
+		t.Fatalf("toggle 1: count=%d sel=%d", s.selCount(), s.EditSel)
+	}
+	s.toggleSel(2)
+	if s.selCount() != 2 || !s.isSelected(1) || !s.isSelected(2) {
+		t.Fatalf("toggle 2: count=%d in1=%v in2=%v", s.selCount(), s.isSelected(1), s.isSelected(2))
+	}
+	s.toggleSel(2) // remove the primary → the other survives as primary
+	if s.selCount() != 1 || s.isSelected(2) || s.EditSel != 1 {
+		t.Fatalf("untoggle 2: count=%d sel=%d", s.selCount(), s.EditSel)
+	}
+}
+
+func TestSelectAllAndDeselect(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	if s.selCount() != 2 {
+		t.Fatalf("selectAll count=%d, want 2 (background excluded)", s.selCount())
+	}
+	s.deselectAll()
+	if s.selCount() != 0 || s.selValid() {
+		t.Fatalf("deselectAll: count=%d valid=%v", s.selCount(), s.selValid())
+	}
+}
+
+func TestGroupNudgeMovesEveryShape(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	s.nudge(1, 0, key.ModShift) // +10 px to each selected shape
+	if s.EditShapes[1].Data[0] != 30 || s.EditShapes[2].Data[0] != 50 {
+		t.Fatalf("group nudge x = %v,%v, want 30,50", s.EditShapes[1].Data[0], s.EditShapes[2].Data[0])
+	}
+}
+
+func TestGroupDeleteRemovesAllSelected(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	s.deleteSel()
+	if len(s.EditShapes) != 1 || s.selValid() {
+		t.Fatalf("group delete: n=%d valid=%v, want 1 and no selection", len(s.EditShapes), s.selValid())
+	}
+}
+
+func TestGroupDuplicateAppendsAndSelectsCopies(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	s.duplicateSel()
+	if len(s.EditShapes) != 5 {
+		t.Fatalf("group duplicate n=%d, want 5", len(s.EditShapes))
+	}
+	if s.selCount() != 2 || !s.isSelected(3) || !s.isSelected(4) {
+		t.Fatalf("group duplicate should select the 2 new copies: count=%d", s.selCount())
+	}
+}
+
+func TestMirrorShapeXEllipseNegatesRotation(t *testing.T) {
+	sh := model.Shape{Type: model.TypeRotatedEllipse, Data: []float64{20, 50, 5, 8, 30}}
+	mirrorShapeX(&sh, 100)
+	if sh.Data[0] != 80 || sh.Data[4] != -30 {
+		t.Fatalf("mirror ellipse = %v, want cx 80, theta -30", sh.Data)
+	}
+}
+
+func TestMirrorShapeXTriangleReflectsVertices(t *testing.T) {
+	sh := model.Shape{Type: model.TypeTriangle, Data: []float64{10, 0, 30, 0, 20, 20}}
+	mirrorShapeX(&sh, 100)
+	want := []float64{90, 0, 70, 0, 80, 20}
+	for i := range want {
+		if sh.Data[i] != want[i] {
+			t.Fatalf("mirror triangle = %v, want %v", sh.Data, want)
+		}
+	}
+}
+
+func TestMirrorSelectionDuplicatesAcrossCentre(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.mirrorSelection()
+	if len(s.EditShapes) != 4 {
+		t.Fatalf("mirror should append one copy, n=%d", len(s.EditShapes))
+	}
+	if s.EditShapes[3].Data[0] != 80 || s.EditSel != 3 {
+		t.Fatalf("mirror copy cx=%v sel=%d, want 80 selected", s.EditShapes[3].Data[0], s.EditSel)
+	}
+}
+
+func bboxX0(s *AppState, i int) int {
+	sh := s.EditShapes[i]
+	x0, _, _, _ := raster.BBox(model.KindFromType(sh.Type), model.ParamsFromShape(sh), s.EditW, s.EditH)
+	return x0
+}
+
+func TestAlignLeftEqualisesLeftEdges(t *testing.T) {
+	s := multiDoc()
+	s.selectAll()
+	s.alignSelection(alignLeft)
+	if bboxX0(s, 1) != bboxX0(s, 2) {
+		t.Fatalf("align-left left edges differ: %d vs %d", bboxX0(s, 1), bboxX0(s, 2))
+	}
+}
+
+func TestDistributeNeedsThree(t *testing.T) {
+	s := multiDoc()
+	s.selectAll() // only 2 selected
+	before := s.EditShapes[1].Data[0]
+	s.alignSelection(distributeH)
+	if s.EditShapes[1].Data[0] != before {
+		t.Fatal("distribute with <3 shapes must be a no-op")
+	}
+}
+
+func TestPlaceShapeAtDropsAtCursor(t *testing.T) {
+	s := NewAppState(NewTheme())
+	s.EnterEditor(nil, 200, 200) // blank, just the background slot
+	s.armPlacePrimitive(primCircle)
+	if !s.placing {
+		t.Fatal("armPlacePrimitive should enter placing mode")
+	}
+	s.placeShapeAt(f32.Point{X: 0.25, Y: 0.75}) // drop at image (50,150)
+	if len(s.EditShapes) != 2 || s.EditSel != 1 {
+		t.Fatalf("place: n=%d sel=%d, want 2 and selection 1", len(s.EditShapes), s.EditSel)
+	}
+	if cx, cy := shapeCenter(s.EditShapes[1]); cx != 50 || cy != 150 {
+		t.Fatalf("placed centre = %v,%v, want 50,150", cx, cy)
+	}
+	s.disarmPlace()
+	if s.placing {
+		t.Fatal("disarmPlace should leave placing mode")
+	}
+}
+
+func TestRGBHSVRoundTrip(t *testing.T) {
+	di := func(a, b uint8) int {
+		d := int(a) - int(b)
+		if d < 0 {
+			return -d
+		}
+		return d
+	}
+	for _, c := range []color.NRGBA{
+		{R: 200, G: 40, B: 90, A: 255},
+		{R: 10, G: 220, B: 130, A: 255},
+		{R: 128, G: 128, B: 128, A: 255},
+		{R: 0, G: 0, B: 0, A: 255},
+		{R: 255, G: 255, B: 255, A: 255},
+	} {
+		h, sat, v := rgbToHSV(c)
+		got := hsvToRGB(h, sat, v)
+		if di(got.R, c.R) > 2 || di(got.G, c.G) > 2 || di(got.B, c.B) > 2 {
+			t.Fatalf("HSV roundtrip %v -> %v", c, got)
+		}
+	}
+}
+
+func TestResetEditorCanvasBlanksKeepingSize(t *testing.T) {
+	s := multiDoc() // 100x100, background + 2 shapes, 2 selected
+	s.selectAll()
+	s.resetEditorCanvas()
+	if len(s.EditShapes) != 1 || s.selValid() {
+		t.Fatalf("reset: n=%d valid=%v, want 1 (background) and no selection", len(s.EditShapes), s.selValid())
+	}
+	if s.EditW != 100 || s.EditH != 100 {
+		t.Fatalf("reset changed size to %dx%d, want 100x100", s.EditW, s.EditH)
+	}
+}
+
+func TestApplyHSVWritesShapeColour(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.pickH, s.pickS, s.pickV = 0, 1, 1 // pure red
+	s.applyHSV()
+	if c := s.EditShapes[1].Color; c[0] != 255 || c[1] != 0 || c[2] != 0 {
+		t.Fatalf("applyHSV red = %v, want [255 0 0 ...]", c)
 	}
 }

@@ -68,6 +68,15 @@
   "editor.cat_decals": "Aufkleber & Symbole",
 
   "editor.eyedrop": "Pipette",
+  "editor.mirror": "Spiegeln",
+  "editor.selected_n": "%d ausgewählt",
+  "editor.align": "Ausrichten",
+  "editor.distribute_h": "Horizontal verteilen",
+  "editor.distribute_v": "Vertikal verteilen",
+  "editor.confirm_del": "Löschen?",
+  "editor.place_hint": "Element anklicken, dann zum Platzieren auf die Leinwand klicken",
+  "editor.new_canvas": "Neue Leinwand",
+  "editor.clear_confirm": "Verwerfen und neu beginnen?",
 
   "about.dev": "dev",
   "about.dev_build": "Dev-Build",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "Bestätigen?",
   "library.export": "Exportieren",
   "library.rename": "Umbenennen",
+  "library.edit": "Bearbeiten",
 
   "inject.guide_toggle": "  So funktioniert das Injizieren",
   "inject.guide_step1": "Füge in FH6 eine Vinyl-Gruppe mit mindestens so vielen Ebenen wie Formen der Generierung hinzu.",

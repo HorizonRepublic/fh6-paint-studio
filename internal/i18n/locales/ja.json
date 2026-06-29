@@ -68,6 +68,15 @@
   "editor.cat_decals": "デカール・記号",
 
   "editor.eyedrop": "スポイト",
+  "editor.mirror": "ミラー",
+  "editor.selected_n": "%d 個選択",
+  "editor.align": "整列",
+  "editor.distribute_h": "水平分布",
+  "editor.distribute_v": "垂直分布",
+  "editor.confirm_del": "削除しますか？",
+  "editor.place_hint": "項目をクリックし、キャンバスをクリックして配置します",
+  "editor.new_canvas": "新規キャンバス",
+  "editor.clear_confirm": "破棄して新規作成しますか？",
 
   "about.dev": "開発版",
   "about.dev_build": "開発ビルド",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "確認しますか？",
   "library.export": "エクスポート",
   "library.rename": "名前を変更",
+  "library.edit": "編集",
 
   "inject.guide_toggle": "  注入の仕組み",
   "inject.guide_step1": "FH6 で、生成物のシェイプ数以上のレイヤーを持つビニールグループを追加します。",

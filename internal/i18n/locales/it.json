@@ -68,6 +68,15 @@
   "editor.cat_decals": "Decalcomanie e simboli",
 
   "editor.eyedrop": "Contagocce",
+  "editor.mirror": "Specchia",
+  "editor.selected_n": "%d selezionati",
+  "editor.align": "Allinea",
+  "editor.distribute_h": "Distribuisci O",
+  "editor.distribute_v": "Distribuisci V",
+  "editor.confirm_del": "Eliminare?",
+  "editor.place_hint": "Clicca un elemento, poi sulla tela per posizionarlo",
+  "editor.new_canvas": "Nuova tela",
+  "editor.clear_confirm": "Scartare e ricominciare?",
 
   "about.dev": "dev",
   "about.dev_build": "build dev",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "Confermi?",
   "library.export": "Esporta",
   "library.rename": "Rinomina",
+  "library.edit": "Modifica",
 
   "inject.guide_toggle": "  Come funziona l'iniezione",
   "inject.guide_step1": "In FH6, aggiungi un gruppo di vinili con almeno tanti livelli quante sono le forme della generazione.",

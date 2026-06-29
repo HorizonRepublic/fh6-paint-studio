@@ -4,6 +4,7 @@ import (
 	"image"
 	"math"
 	"strconv"
+	"time"
 
 	"gioui.org/gesture"
 	"gioui.org/io/pointer"
@@ -97,6 +98,17 @@ func (s *AppState) undoRedoRow(gtx C) D {
 	)
 }
 
+// newCanvasRow is the editor's "start fresh" button — a two-step confirm (turns red) so it can't wipe the
+// working doc by accident.
+func (s *AppState) newCanvasRow(gtx C) D {
+	th := s.Th
+	gtx.Constraints.Min.X = gtx.Constraints.Max.X
+	if s.clearArmed && gtx.Now.Before(s.clearArmedAt.Add(3*time.Second)) {
+		return th.DangerButton(gtx, &s.EditNewBtn, i18n.T("editor.clear_confirm"))
+	}
+	return th.SecondaryButton(gtx, &s.EditNewBtn, i18n.T("editor.new_canvas"), true)
+}
+
 // layersHeader is the "Layers" label with the current shape count (excluding the background).
 func (s *AppState) layersHeader(gtx C) D {
 	th := s.Th
@@ -132,7 +144,7 @@ func (s *AppState) layerList(gtx C) D {
 	return material.List(th.M, &s.editLayerList).Layout(gtx, n, func(gtx C, i int) D {
 		idx := len(s.EditShapes) - 1 - i // top row = front-most shape
 		if s.editLayerBtns[idx].Clicked(gtx) {
-			s.EditSel = idx
+			s.selectSingle(idx)
 		}
 		s.updateLayerDrag(gtx, idx)
 		return layout.Inset{Bottom: 4}.Layout(gtx, func(gtx C) D { return s.layerRow(gtx, idx) })
@@ -144,7 +156,7 @@ func (s *AppState) layerList(gtx C) D {
 func (s *AppState) layerRow(gtx C, idx int) D {
 	th := s.Th
 	sh := s.EditShapes[idx]
-	selected := idx == s.EditSel
+	selected := s.isSelected(idx)
 	return s.editLayerBtns[idx].Layout(gtx, func(gtx C) D {
 		return layout.Background{}.Layout(gtx,
 			func(gtx C) D {
@@ -169,7 +181,7 @@ func (s *AppState) layerRow(gtx C, idx int) D {
 							return D{Size: szb}
 						}),
 						layout.Rigid(GapH(8).Layout),
-						layout.Rigid(func(gtx C) D { return drawShapeIcon(gtx, iconForShape(sh), th.Text, true) }),
+						layout.Rigid(func(gtx C) D { return s.layerIcon(gtx, sh) }),
 						layout.Flexed(1, spacerW),
 						layout.Rigid(func(gtx C) D {
 							col := th.TextDim
@@ -218,7 +230,7 @@ func (s *AppState) updateLayerDrag(gtx C, idx int) {
 			s.layerDragLastY = ev.Position.Y
 			s.layerDragAccum = 0
 			s.layerDragMoved = false
-			s.EditSel = idx
+			s.selectSingle(idx)
 		case pointer.Drag:
 			if s.layerDragFrom < 1 {
 				break
@@ -263,26 +275,35 @@ func (s *AppState) swapLayers(a, b int) {
 
 // handlePaletteActions processes the add-shape, undo and redo buttons.
 func (s *AppState) handlePaletteActions(gtx C) {
-	if s.palCircle.Clicked(gtx) {
-		s.addPrimitive(primCircle)
+	prims := []struct {
+		b *widget.Clickable
+		k int
+	}{
+		{&s.palCircle, primCircle},
+		{&s.palSquare, primSquare},
+		{&s.palTriangle, primTriangle},
+		{&s.palGlow, primGlow},
+		{&s.palDisk, primDisk},
 	}
-	if s.palSquare.Clicked(gtx) {
-		s.addPrimitive(primSquare)
-	}
-	if s.palTriangle.Clicked(gtx) {
-		s.addPrimitive(primTriangle)
-	}
-	if s.palGlow.Clicked(gtx) {
-		s.addPrimitive(primGlow)
-	}
-	if s.palDisk.Clicked(gtx) {
-		s.addPrimitive(primDisk)
+	for _, p := range prims {
+		if p.b.Clicked(gtx) {
+			s.armPlacePrimitive(p.k)
+		}
 	}
 	if s.editUndoBtn.Clicked(gtx) {
 		s.undo()
 	}
 	if s.editRedoBtn.Clicked(gtx) {
 		s.redo()
+	}
+	if s.EditNewBtn.Clicked(gtx) {
+		if s.clearArmed && gtx.Now.Before(s.clearArmedAt.Add(3*time.Second)) {
+			s.clearArmed = false
+			s.resetEditorCanvas()
+		} else {
+			s.clearArmed = true
+			s.clearArmedAt = gtx.Now
+		}
 	}
 }
 
@@ -295,7 +316,7 @@ func (s *AppState) addPrimitive(kind int) {
 	}
 	s.pushUndo(cloneShapes(s.EditShapes))
 	s.EditShapes = append(s.EditShapes, defaultPrimitive(kind, s.EditW, s.EditH))
-	s.EditSel = len(s.EditShapes) - 1
+	s.selectSingle(len(s.EditShapes) - 1)
 	s.markEditDirty()
 }
 

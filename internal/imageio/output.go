@@ -274,6 +274,21 @@ func RenderFH6ImageSkip(shapes []model.Shape, transparentBG bool, w, h, skip int
 	return RenderFH6Image(rest, transparentBG, w, h, 1)
 }
 
+// RenderFH6ImageSkipSet renders every shape EXCEPT those whose index is in skip, preserving order. It
+// backs the live group-drag composite: the skipped (selected) shapes are re-composited on top each frame.
+func RenderFH6ImageSkipSet(shapes []model.Shape, transparentBG bool, w, h int, skip map[int]bool) *image.NRGBA {
+	if len(skip) == 0 {
+		return RenderFH6Image(shapes, transparentBG, w, h, 1)
+	}
+	rest := make([]model.Shape, 0, len(shapes))
+	for i, sh := range shapes {
+		if !skip[i] {
+			rest = append(rest, sh)
+		}
+	}
+	return RenderFH6Image(rest, transparentBG, w, h, 1)
+}
+
 // EncodeForDisplay sRGB-encodes a linear-light RGBA buffer (the engine's working canvas in -linear
 // mode) for preview/PNG output; alpha stays straight. A no-op when not in linear mode.
 func EncodeForDisplay(px []float32) []float32 {

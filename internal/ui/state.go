@@ -323,24 +323,30 @@ type AppState struct {
 	LogList    widget.List
 
 	// Shape editor (opt-in mode; see editor.go). Working on a deep COPY so Cancel discards cleanly.
-	EditorMode    bool
-	EditShapes    []model.Shape // working copy being edited
-	EditW, EditH  int           // canvas size of the working doc
-	EditSel       int           // selected shape index, -1 = none
-	editDrag      editorDrag    // active drag (kind + start snapshot)
-	editPanning   bool          // middle/secondary-button canvas pan in progress
-	editShift     bool          // Shift held during the active drag (rotate snaps to 15°)
-	panLast       f32.Point     // last pan pointer position
-	editWantFocus bool          // request canvas key focus next frame (Ctrl+Z / Delete)
-	editUndo      [][]model.Shape
-	editOp        paint.ImageOp    // cached render of EditShapes; rebuilt only when editDirty
-	editDirty     bool             // EditShapes changed → re-render on the next editorArea pass
-	editDragBase  *image.NRGBA     // pre-rendered shapes EXCEPT the dragged one, for live composite during a drag
-	EditBtn       widget.Clickable // enter the editor from a generated result
-	NewBlankBtn   widget.Clickable // enter the editor on a blank canvas
-	EditorTab     widget.Clickable // top-bar Editor tab
-	EditSaveBtn   widget.Clickable // save the design to the library
-	editKeyTag    int              // key-focus tag for Ctrl+Z / Ctrl+Shift+Z / Delete
+	EditorMode     bool
+	EditShapes     []model.Shape // working copy being edited
+	EditW, EditH   int           // canvas size of the working doc
+	EditSel        int           // selected shape index, -1 = none
+	editDrag       editorDrag    // active drag (kind + start snapshot)
+	editSelExtra   map[int]bool  // multi-select: selected shapes OTHER than the primary EditSel (nil/empty = single-select)
+	editDragSkip   map[int]bool  // shapes excluded from editDragBase, re-composited live each drag frame (1 for single, N for a group move)
+	editMarqueeOn  bool          // a rubber-band (marquee) selection is in progress
+	editMarqueeAdd bool          // marquee unions into the current selection instead of replacing it (Ctrl held)
+	editMarqueeA   f32.Point     // marquee start corner (image fraction)
+	editMarqueeB   f32.Point     // marquee current corner (image fraction)
+	editPanning    bool          // middle/secondary-button canvas pan in progress
+	editShift      bool          // Shift held during the active drag (rotate snaps to 15°)
+	panLast        f32.Point     // last pan pointer position
+	editWantFocus  bool          // request canvas key focus next frame (Ctrl+Z / Delete)
+	editUndo       [][]model.Shape
+	editOp         paint.ImageOp    // cached render of EditShapes; rebuilt only when editDirty
+	editDirty      bool             // EditShapes changed → re-render on the next editorArea pass
+	editDragBase   *image.NRGBA     // pre-rendered shapes EXCEPT the dragged one, for live composite during a drag
+	EditBtn        widget.Clickable // enter the editor from a generated result
+	NewBlankBtn    widget.Clickable // enter the editor on a blank canvas
+	EditorTab      widget.Clickable // top-bar Editor tab
+	EditSaveBtn    widget.Clickable // save the design to the library
+	editKeyTag     int              // key-focus tag for Ctrl+Z / Ctrl+Shift+Z / Delete
 
 	// editor save flow: a name field + an override-on-name confirmation + transient "saved" feedback.
 	EditName          widget.Editor
@@ -361,14 +367,15 @@ type AppState struct {
 	inspX, inspY, inspW, inspH, inspRot widget.Editor
 	editForward, editBack               widget.Clickable
 	editDup, editDelete                 widget.Clickable
-	colorSwatchBtn                      widget.Clickable // opens the colour picker
+	editMirror                          widget.Clickable    // duplicate the selection mirrored across the vertical centre
+	alignBtns                           [8]widget.Clickable // L,Cx,R,T,My,B, distribute-H, distribute-V
+	colorSwatchBtn                      widget.Clickable    // opens the colour picker
 	colorPickerOpen                     bool
-	pickR, pickG, pickB, pickA          widget.Float       // R/G/B/Alpha sliders (0..1)
-	colorPalBtns                        []widget.Clickable // rainbow preset swatches
-	eyedropBtn                          widget.Clickable   // eyedropper toggle
-	eyedropMode                         bool               // next canvas click samples a colour
-	editImg                             *image.NRGBA       // last full render, sampled by the eyedropper
-	recentColors                        []color.NRGBA      // recently applied colours
+	pickR, pickG, pickB, pickA          widget.Float     // R/G/B/Alpha sliders (0..1)
+	eyedropBtn                          widget.Clickable // eyedropper toggle
+	eyedropMode                         bool             // next canvas click samples a colour
+	editImg                             *image.NRGBA     // last full render, sampled by the eyedropper
+	recentColors                        []color.NRGBA    // recently applied colours
 	recentBtns                          []widget.Clickable
 
 	// editor palette + layers + redo (the undo stack is editUndo above).
@@ -390,6 +397,34 @@ type AppState struct {
 	bankThumbs      []paint.ImageOp
 	bankRows        []bankRow
 	bankThumbsBuilt bool
+
+	// editor place-from-palette: clicking a palette item picks it up; it then rides the cursor as a ghost
+	// over the canvas and drops where you click — no stray inserts, and you choose the position.
+	placing      bool
+	placeKind    int       // 1 = mask word, 2 = primitive
+	placeWord    int       // mask word id (placeKind 1)
+	placePrim    int       // primitive kind (placeKind 2)
+	placeGhost   f32.Point // cursor position over the canvas (image fraction)
+	placeGhostOn bool      // cursor is currently over the canvas
+
+	// editor destructive-action confirmation (red two-step buttons)
+	deleteArmed   bool
+	deleteArmedAt time.Time
+	clearArmed    bool
+	clearArmedAt  time.Time
+	EditNewBtn    widget.Clickable // reset the editor to a blank canvas (armed confirm)
+
+	// editor HSV colour wheel (continuous picker for any RGBA)
+	pickH, pickS, pickV float64      // authoritative HSV of the current colour (hue+sat = disc, value = slider)
+	pickVf              widget.Float // brightness/value slider
+	colorWheelTag       int          // pointer focus tag for the disc
+	colorWheelOp        paint.ImageOp
+	colorWheelSize      int // px side the cached disc was built at
+	colorWheelV         int // value bucket (0..20) the cached disc was built for
+	colorWheelBuilt     bool
+
+	// editor layer icons: cached glyph thumbnails for mask shapes, keyed by word id
+	layerThumbs map[uint16]paint.ImageOp
 }
 
 // expertGroup is the collapse state of one expert sub-section.

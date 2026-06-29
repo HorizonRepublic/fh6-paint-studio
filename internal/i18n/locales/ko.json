@@ -68,6 +68,15 @@
   "editor.cat_decals": "데칼 및 기호",
 
   "editor.eyedrop": "스포이트",
+  "editor.mirror": "미러",
+  "editor.selected_n": "%d개 선택됨",
+  "editor.align": "정렬",
+  "editor.distribute_h": "가로 분배",
+  "editor.distribute_v": "세로 분배",
+  "editor.confirm_del": "삭제할까요?",
+  "editor.place_hint": "항목을 클릭한 뒤 캔버스를 클릭하여 배치하세요",
+  "editor.new_canvas": "새 캔버스",
+  "editor.clear_confirm": "버리고 새로 시작할까요?",
 
   "about.dev": "개발",
   "about.dev_build": "개발 빌드",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "확인하시겠습니까?",
   "library.export": "내보내기",
   "library.rename": "이름 변경",
+  "library.edit": "편집",
 
   "inject.guide_toggle": "  주입 작동 방식",
   "inject.guide_step1": "FH6에서 생성된 도형 수 이상의 레이어를 가진 비닐 그룹을 추가하세요.",

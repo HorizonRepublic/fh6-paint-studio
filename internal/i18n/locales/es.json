@@ -68,6 +68,15 @@
   "editor.cat_decals": "Calcas y símbolos",
 
   "editor.eyedrop": "Cuentagotas",
+  "editor.mirror": "Reflejar",
+  "editor.selected_n": "%d seleccionados",
+  "editor.align": "Alinear",
+  "editor.distribute_h": "Distribuir H",
+  "editor.distribute_v": "Distribuir V",
+  "editor.confirm_del": "¿Eliminar?",
+  "editor.place_hint": "Haz clic en un elemento y luego en el lienzo para colocarlo",
+  "editor.new_canvas": "Lienzo nuevo",
+  "editor.clear_confirm": "¿Descartar y empezar de nuevo?",
 
   "about.dev": "dev",
   "about.dev_build": "compilación dev",
@@ -145,6 +154,7 @@
   "library.confirm_delete": "¿Confirmar?",
   "library.export": "Exportar",
   "library.rename": "Renombrar",
+  "library.edit": "Editar",
 
   "inject.guide_toggle": "  Cómo funciona la inyección",
   "inject.guide_step1": "En FH6, añade un grupo de vinilo con al menos tantas capas como formas tenga la generación.",
