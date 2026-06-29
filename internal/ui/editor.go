@@ -496,7 +496,7 @@ func (s *AppState) editorArea(gtx C) D {
 	if s.selCount() > 1 {
 		s.drawMultiSelection(gtx, rect)
 	} else if s.selValid() {
-		s.drawSelection(gtx, s.selScreenRect(rect))
+		s.drawSelection(gtx, rect)
 	}
 	if s.editMarqueeOn {
 		s.drawMarquee(gtx, rect)
@@ -716,6 +716,69 @@ func (s *AppState) pressInsideSelection(pos f32.Point, rect image.Rectangle) boo
 	return false
 }
 
+// imgPointToScreen maps an image-space point to screen pixels within rect.
+func imgPointToScreen(rect image.Rectangle, ix, iy float64, w, h int) image.Point {
+	if w <= 0 || h <= 0 {
+		return rect.Min
+	}
+	return image.Pt(
+		rect.Min.X+int(ix/float64(w)*float64(rect.Dx())+0.5),
+		rect.Min.Y+int(iy/float64(h)*float64(rect.Dy())+0.5),
+	)
+}
+
+// selHandlePts returns the 8 scale-handle screen positions for the selected shape. Rotatable shapes get an
+// oriented box that turns with the shape; triangles/lines keep their axis-aligned box.
+func (s *AppState) selHandlePts(rect image.Rectangle) [8]image.Point {
+	sh := s.EditShapes[s.EditSel]
+	k := model.KindFromType(sh.Type)
+	if k == model.KindTriangle || k == model.KindLine {
+		return cropHandlePts(s.selScreenRect(rect))
+	}
+	cx, cy := shapeCenter(sh)
+	hx, hy := shapeHalfExtents(sh)
+	th := shapeTheta(sh) * math.Pi / 180
+	c, sn := math.Cos(th), math.Sin(th)
+	var pts [8]image.Point
+	for i := range pts {
+		lx, ly := float64(handleSignX(i))*hx, float64(handleSignY(i))*hy
+		pts[i] = imgPointToScreen(rect, cx+lx*c-ly*sn, cy+lx*sn+ly*c, s.EditW, s.EditH)
+	}
+	return pts
+}
+
+// selRotateKnob is the rotate-knob screen position, along the shape's "up" direction above its top edge.
+func (s *AppState) selRotateKnob(rect image.Rectangle) image.Point {
+	sh := s.EditShapes[s.EditSel]
+	k := model.KindFromType(sh.Type)
+	if k == model.KindTriangle || k == model.KindLine {
+		return rotateHandlePt(s.selScreenRect(rect))
+	}
+	cx, cy := shapeCenter(sh)
+	_, hy := shapeHalfExtents(sh)
+	th := shapeTheta(sh) * math.Pi / 180
+	c, sn := math.Cos(th), math.Sin(th)
+	scale := math.Max(float64(rect.Dx())/float64(s.EditW), 1e-6)
+	ly := -hy - float64(editRotateStem)/scale
+	return imgPointToScreen(rect, cx-ly*sn, cy+ly*c, s.EditW, s.EditH)
+}
+
+// drawLine strokes a line between two screen points (for the rotated selection frame).
+func drawLine(gtx C, a, b image.Point, col color.NRGBA, width float32) {
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(float32(a.X), float32(a.Y)))
+	p.LineTo(f32.Pt(float32(b.X), float32(b.Y)))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: width}.Op())
+}
+
+// drawHandle draws one square scale handle centred at p.
+func drawHandle(gtx C, p image.Point, fill, border color.NRGBA) {
+	const h = 4
+	paint.FillShape(gtx.Ops, border, clip.Rect(image.Rect(p.X-h-1, p.Y-h-1, p.X+h+1, p.Y+h+1)).Op())
+	paint.FillShape(gtx.Ops, fill, clip.Rect(image.Rect(p.X-h, p.Y-h, p.X+h, p.Y+h)).Op())
+}
+
 // zoomedRect is the on-screen image rectangle for the current zoom + pan within a viewport of size sz.
 func (s *AppState) zoomedRect(sz image.Point) image.Rectangle {
 	base := fitRect(image.Pt(s.EditW, s.EditH), sz)
@@ -881,13 +944,13 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 		pointer.CursorGrab.Add(gtx.Ops)
 		c.Pop()
 	}
-	for i, h := range cropHandlePts(sel) {
+	for i, h := range s.selHandlePts(rect) {
 		const r = editHandleHitR
 		hc := clip.Rect(image.Rect(h.X-r, h.Y-r, h.X+r, h.Y+r)).Push(gtx.Ops)
 		cropCursorForHandle(i).Add(gtx.Ops)
 		hc.Pop()
 	}
-	rp := rotateHandlePt(sel)
+	rp := s.selRotateKnob(rect)
 	const rr = editHandleHitR
 	rc := clip.Rect(image.Rect(rp.X-rr, rp.Y-rr, rp.X+rr, rp.Y+rr)).Push(gtx.Ops)
 	pointer.CursorPointer.Add(gtx.Ops)
@@ -964,18 +1027,24 @@ func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
 
 // drawSelection draws the selected shape's pulsing outline (accent↔white over ~0.8s, so it reads
 // clearly over busy art), the 8 resize handles, and the rotate knob.
-func (s *AppState) drawSelection(gtx C, sel image.Rectangle) {
+func (s *AppState) drawSelection(gtx C, rect image.Rectangle) {
 	th := s.Th
-	// Static two-tone bbox frame (the pulse now lives on the shape's silhouette, drawn by overlayOp).
-	drawRectBorderW(gtx, sel, color.NRGBA{A: 160}, 2)
-	drawRectBorderW(gtx, sel, th.Accent, 1)
-	drawCropHandles(gtx, sel, th.Accent, th.Bg)
-	rp := rotateHandlePt(sel)
-	mx := (sel.Min.X + sel.Max.X) / 2
-	paint.FillShape(gtx.Ops, th.Accent, clip.Rect(image.Rect(mx-1, rp.Y, mx+1, sel.Min.Y)).Op())
-	drawKnob(gtx, rp, th.Accent, th.Bg)
-	// Centre move anchor (grab to drag — works even where the shape itself is sparse).
-	drawMoveAnchor(gtx, image.Pt(mx, (sel.Min.Y+sel.Max.Y)/2), th.Accent, th.Bg)
+	pts := s.selHandlePts(rect)
+	// Oriented frame: the four corner handles (NW,NE,SE,SW) joined in order — turns with the shape.
+	corners := [4]image.Point{pts[0], pts[2], pts[4], pts[6]}
+	for i := 0; i < 4; i++ {
+		a, b := corners[i], corners[(i+1)%4]
+		drawLine(gtx, a, b, color.NRGBA{A: 160}, 3)
+		drawLine(gtx, a, b, th.Accent, 1.5)
+	}
+	knob := s.selRotateKnob(rect)
+	drawLine(gtx, pts[1], knob, th.Accent, 1.5) // stem from the top-edge midpoint
+	drawKnob(gtx, knob, th.Accent, th.Bg)
+	for _, p := range pts {
+		drawHandle(gtx, p, th.Accent, th.Bg)
+	}
+	cx, cy := shapeCenter(s.EditShapes[s.EditSel])
+	drawMoveAnchor(gtx, imgPointToScreen(rect, cx, cy, s.EditW, s.EditH), th.Accent, th.Bg)
 }
 
 // drawMultiSelection outlines every shape in a multi-selection (pulsing) plus their shared group box
@@ -1087,12 +1156,11 @@ func drawKnob(gtx C, p image.Point, fill, border color.NRGBA) {
 func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle, additive bool) {
 	// Scale/rotate handles act only on a single primary selection (group transform = move-only).
 	if s.selValid() && s.selCount() == 1 && !additive {
-		sel := s.selScreenRect(rect)
-		if within(pos, rotateHandlePt(sel), editHandleHitR) {
+		if within(pos, s.selRotateKnob(rect), editHandleHitR) {
 			s.startTransform(dragRotate, 0, fp)
 			return
 		}
-		for i, h := range cropHandlePts(sel) {
+		for i, h := range s.selHandlePts(rect) {
 			if within(pos, h, editHandleHitR) {
 				s.startTransform(dragScale, i, fp)
 				return

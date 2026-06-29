@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image"
 	"image/color"
 	"math"
 	"testing"
@@ -451,6 +452,24 @@ func TestNiceStep(t *testing.T) {
 		if got := niceStep(c.in); got != c.want {
 			t.Fatalf("niceStep(%v) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+func TestSelHandlePtsRotates(t *testing.T) {
+	s := NewAppState(NewTheme())
+	s.EnterEditor([]model.Shape{
+		{Type: model.TypeRectangle, Data: []float64{0, 0, 100, 100}, Color: []int{0, 0, 0, 255}},
+		{Type: model.TypeRotatedEllipse, Data: []float64{50, 50, 20, 10, 90}, Color: []int{1, 0, 0, 255}},
+	}, 100, 100)
+	s.EditSel = 1
+	rect := image.Rect(0, 0, 100, 100) // screen == image coords
+	pts := s.selHandlePts(rect)
+	// At 90° the oriented box turns: NW handle (local -20,-10) lands at (60,30), SE at (40,70).
+	if pts[0].X != 60 || pts[0].Y != 30 {
+		t.Fatalf("rotated NW handle = %v, want (60,30)", pts[0])
+	}
+	if pts[4].X != 40 || pts[4].Y != 70 {
+		t.Fatalf("rotated SE handle = %v, want (40,70)", pts[4])
 	}
 }
 
