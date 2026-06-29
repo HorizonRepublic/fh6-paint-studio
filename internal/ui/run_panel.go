@@ -9,6 +9,7 @@ import (
 
 	"gioui.org/layout"
 
+	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/preset"
 )
 
@@ -28,7 +29,7 @@ func (s *AppState) activityCard(gtx C) D {
 	th := s.Th
 	gtx.Constraints.Min.Y = gtx.Constraints.Max.Y // fill the column height (content sits at the top)
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return th.Title(gtx, "Activity") }),
+		layout.Rigid(func(gtx C) D { return th.Title(gtx, i18n.T("run.activity")) }),
 		layout.Rigid(GapV(16).Layout),
 		layout.Rigid(s.activityBody),
 		layout.Flexed(1, func(gtx C) D { return D{} }),
@@ -52,12 +53,12 @@ func (s *AppState) activityBody(gtx C) D {
 func (s *AppState) activityIdle(gtx C) D {
 	th := s.Th
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 15, "Ready", th.Text) }),
+		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 15, i18n.T("run.ready"), th.Text) }),
 		layout.Rigid(GapV(6).Layout),
 		layout.Rigid(func(gtx C) D {
-			hint := "Pick a style on the left and hit Generate."
+			hint := i18n.T("hint.ready")
 			if s.Source == nil {
-				hint = "Open an image, pick a style, then Generate."
+				hint = i18n.T("hint.ready_no_image")
 			}
 			return th.Dim(gtx, hint)
 		}),
@@ -73,12 +74,12 @@ func (s *AppState) activityRunning(gtx C) D {
 	gaussian := s.Mode.Value() == "gaussian"
 	pct := int(s.progressFrac()*100 + 0.5)
 
-	head := "Building shapes"
+	head := i18n.T("run.building_shapes")
 	switch {
 	case staging:
 		head = friendlyStage(st.Stage)
 	case gaussian:
-		head = "Training"
+		head = i18n.T("run.training")
 	}
 	phases := s.phases()
 	cur := s.currentPhaseIdx(phases)
@@ -90,9 +91,9 @@ func (s *AppState) activityRunning(gtx C) D {
 				layout.Flexed(1, spacerW),
 				layout.Rigid(func(gtx C) D {
 					if staging {
-						return th.Dim(gtx, "working…")
+						return th.Dim(gtx, i18n.T("run.working"))
 					}
-					return th.Lbl(gtx, 16, fmt.Sprintf("%d%%", pct), th.Text)
+					return th.Lbl(gtx, 16, i18n.T("run.percent", pct), th.Text)
 				}),
 			)
 		}),
@@ -107,11 +108,11 @@ func (s *AppState) activityRunning(gtx C) D {
 		layout.Rigid(func(gtx C) D {
 			var l2 string
 			if gaussian {
-				l2 = fmt.Sprintf("%s elapsed", fmtDur(st.Elapsed))
+				l2 = i18n.T("run.elapsed", fmtDur(st.Elapsed))
 			} else if staging {
-				l2 = fmt.Sprintf("%s · %s shapes placed", fmtDur(st.Elapsed), group(st.Total))
+				l2 = i18n.T("run.shapes_placed", fmtDur(st.Elapsed), group(st.Total))
 			} else {
-				l2 = fmt.Sprintf("%s / %s shapes · %s · %s left", group(st.Shapes), group(st.Total), fmtDur(st.Elapsed), etaShort(st))
+				l2 = i18n.T("run.shapes_progress", group(st.Shapes), group(st.Total), fmtDur(st.Elapsed), etaShort(st))
 			}
 			return th.Dim(gtx, l2)
 		}),
@@ -124,10 +125,10 @@ func (s *AppState) activityDone(gtx C) D {
 	th := s.Th
 	st := s.Stats
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, "✓  Done", th.Good) }),
+		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, i18n.T("run.done"), th.Good) }),
 		layout.Rigid(GapV(6).Layout),
 		layout.Rigid(func(gtx C) D {
-			return th.Dim(gtx, fmt.Sprintf("%s shapes in %s · err %s", group(st.Shapes), fmtDur(st.Elapsed), fmtErr(st.Err)))
+			return th.Dim(gtx, i18n.T("run.done_stats", group(st.Shapes), fmtDur(st.Elapsed), fmtErr(st.Err)))
 		}),
 		// Auto-budget: when the knee finished BELOW the requested cap, surface that the app picked the
 		// optimal count itself (the user's number is a ceiling, not a fixed target).
@@ -140,7 +141,7 @@ func (s *AppState) activityDone(gtx C) D {
 					layout.Rigid(func(gtx C) D { return fillDot(gtx, th.Accent, 8) }),
 					layout.Rigid(GapH(8).Layout),
 					layout.Rigid(func(gtx C) D {
-						return th.Lbl(gtx, 13, fmt.Sprintf("Auto: %s shapes — optimal (cap %s)", group(st.Shapes), group(st.Cap)), th.Accent)
+						return th.Lbl(gtx, 13, i18n.T("run.auto_optimal", group(st.Shapes), group(st.Cap)), th.Accent)
 					}),
 				)
 			})
@@ -197,12 +198,14 @@ func (s *AppState) qualityBadge(gtx C) D {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx C) D { return fillDot(gtx, col, 8) }),
 				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 14, "Quality: "+q.Label, col) }),
+				layout.Rigid(func(gtx C) D {
+					return th.Lbl(gtx, 14, i18n.T("run.quality_badge", i18n.T("run.quality_"+strings.ToLower(q.Label))), col)
+				}),
 			)
 		}),
 		layout.Rigid(GapV(2).Layout),
 		layout.Rigid(func(gtx C) D {
-			return th.Dim(gtx, fmt.Sprintf("ΔE %.1f · SSIM %.2f", q.DeltaE, q.SSIM))
+			return th.Dim(gtx, i18n.T("run.quality_scores", q.DeltaE, q.SSIM))
 		}),
 	)
 }
@@ -213,13 +216,13 @@ func (s *AppState) activityError(gtx C) D {
 		s.ConsoleOpen = true
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, "✗  Failed", th.Bad) }),
+		layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, i18n.T("run.failed"), th.Bad) }),
 		layout.Rigid(GapV(6).Layout),
-		layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Something went wrong during generation.") }),
+		layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("run.error_generic")) }),
 		layout.Rigid(GapV(12).Layout),
 		layout.Rigid(func(gtx C) D {
 			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return th.SecondaryButton(gtx, &s.OpenLogBtn, "Open the log", true)
+			return th.SecondaryButton(gtx, &s.OpenLogBtn, i18n.T("run.open_log"), true)
 		}),
 	)
 }
@@ -228,11 +231,11 @@ func (s *AppState) activityError(gtx C) D {
 func (s *AppState) phases() []string {
 	switch {
 	case s.Mode.Value() == "gaussian":
-		return []string{"Train", "Done"}
+		return []string{i18n.T("run.step_train"), i18n.T("run.step_done")}
 	case preset.IsHybridMode(s.baseMode):
-		return []string{"Build", "Polish", "Ink", "Done"}
+		return []string{i18n.T("run.step_build"), i18n.T("run.step_polish"), i18n.T("run.step_ink"), i18n.T("run.step_done")}
 	default:
-		return []string{"Build", "Polish", "Done"}
+		return []string{i18n.T("run.step_build"), i18n.T("run.step_polish"), i18n.T("run.step_done")}
 	}
 }
 
@@ -249,7 +252,7 @@ func (s *AppState) currentPhaseIdx(phases []string) int {
 	case "":
 		return 0 // greedy build / gaussian training
 	default:
-		return indexOf(phases, "Polish") // polish / standout
+		return indexOf(phases, i18n.T("run.step_polish")) // polish / standout
 	}
 }
 
@@ -307,9 +310,9 @@ func (s *AppState) phaseRow(gtx C, name string, state int) D {
 func friendlyStage(stage string) string {
 	switch strings.ToLower(stage) {
 	case "polish":
-		return "Polishing"
+		return i18n.T("run.polishing")
 	case "standout":
-		return "Cleaning up"
+		return i18n.T("run.cleaning_up")
 	default:
 		return stage
 	}

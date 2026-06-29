@@ -9,6 +9,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // shapeChipKinds is the display order of the "Used shapes" icon row — circle, square, triangle — each
@@ -40,11 +42,11 @@ func (s *AppState) shapeKindsRow(gtx C) D {
 	}
 	header := layout.Rigid(func(gtx C) D {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(func(gtx C) D { return th.Dim(gtx, "Used shapes") }),
+			layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("shapes.used")) }),
 			layout.Rigid(GapH(6).Layout),
 			layout.Rigid(func(gtx C) D {
 				return s.KindsHint.Layout(gtx, th,
-					"Which primitive shapes the generator may use. All on by default; turning some off makes the result coarser but faster. At least one stays on.\n\nAffects: time and quality.")
+					i18n.T("hint.used_shapes"))
 			}),
 		)
 	})

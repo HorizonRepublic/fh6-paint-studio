@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"io"
@@ -13,6 +12,8 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // console is the shared bottom drawer: a one-line status/activity strip that is ALWAYS visible (in
@@ -77,7 +78,7 @@ func (s *AppState) consoleStrip(gtx C) D {
 			layout.Rigid(s.consoleToggle),
 			layout.Rigid(GapH(14).Layout),
 			layout.Rigid(func(gtx C) D {
-				cb := material.CheckBox(th.M, &s.SoundOn, "Sound on finish")
+				cb := material.CheckBox(th.M, &s.SoundOn, i18n.T("console.sound_on_finish"))
 				cb.Color, cb.IconColor, cb.TextSize = th.TextDim, th.Accent, 13
 				return cb.Layout(gtx)
 			}),
@@ -91,9 +92,9 @@ func (s *AppState) consoleToggle(gtx C) D {
 	if s.ConsoleOpen {
 		arrow = "▾"
 	}
-	label := arrow + "  Log"
+	label := arrow + "  " + i18n.T("console.log")
 	if n := len(s.Log); n > 0 {
-		label = fmt.Sprintf("%s  Log (%d)", arrow, n)
+		label = arrow + "  " + i18n.T("console.log_n", n)
 	}
 	return material.Clickable(gtx, &s.ConsoleToggle, func(gtx C) D {
 		return layout.UniformInset(4).Layout(gtx, func(gtx C) D { return th.Lbl(gtx, 13, label, th.Accent) })
@@ -113,22 +114,22 @@ func (s *AppState) consoleToolbar(gtx C) D {
 	if s.LogCopyBtn.Clicked(gtx) {
 		if txt := logText(s.filteredLog()); txt != "" {
 			gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(txt))})
-			s.Toast = "Activity copied to clipboard"
+			s.Toast = i18n.T("console.copied")
 		}
 	}
-	filterLabel, filterCol := "All levels", th.TextDim
+	filterLabel, filterCol := i18n.T("console.all_levels"), th.TextDim
 	if s.LogFilterErrors {
-		filterLabel, filterCol = "Errors only", th.Warn
+		filterLabel, filterCol = i18n.T("console.errors_only"), th.Warn
 	}
 	return layout.Inset{Left: 10, Right: 10, Top: 6, Bottom: 4}.Layout(gtx, func(gtx C) D {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 12, "ACTIVITY", th.TextDim) }),
+			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 12, i18n.T("console.activity_heading"), th.TextDim) }),
 			layout.Flexed(1, spacerW),
 			layout.Rigid(func(gtx C) D { return s.txtBtn(gtx, &s.LogFilterBtn, filterLabel, filterCol) }),
 			layout.Rigid(GapH(4).Layout),
-			layout.Rigid(func(gtx C) D { return s.txtBtn(gtx, &s.LogCopyBtn, "Copy", th.Accent) }),
+			layout.Rigid(func(gtx C) D { return s.txtBtn(gtx, &s.LogCopyBtn, i18n.T("console.copy"), th.Accent) }),
 			layout.Rigid(GapH(4).Layout),
-			layout.Rigid(func(gtx C) D { return s.txtBtn(gtx, &s.LogClearBtn, "Clear", th.Accent) }),
+			layout.Rigid(func(gtx C) D { return s.txtBtn(gtx, &s.LogClearBtn, i18n.T("console.clear"), th.Accent) }),
 		)
 	})
 }

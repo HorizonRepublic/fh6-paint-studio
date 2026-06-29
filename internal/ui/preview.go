@@ -12,6 +12,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/widget"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // previewArea draws the loaded source (or a reconstruction) fit-centered in the available space. In
@@ -90,7 +92,7 @@ func (s *AppState) drawZoomButton(gtx C, rect image.Rectangle) {
 			func(gtx C) D {
 				return layout.Inset{Top: 6, Bottom: 6, Left: 11, Right: 11}.Layout(gtx, func(gtx C) D {
 					pointer.CursorPointer.Add(gtx.Ops)
-					return th.Lbl(gtx, 13, "Zoom", th.Text)
+					return th.Lbl(gtx, 13, i18n.T("preview.zoom"), th.Text)
 				})
 			},
 		)
@@ -278,15 +280,15 @@ func (s *AppState) emptyStateOpen(gtx C) D {
 					return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 34, "+", th.Accent) }),
 						layout.Rigid(GapV(8).Layout),
-						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, "Open an image", th.Text) }),
+						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, i18n.T("preview.open_image"), th.Text) }),
 						layout.Rigid(GapV(4).Layout),
-						layout.Rigid(func(gtx C) D { return th.Dim(gtx, "turn any photo or drawing into FH6 vinyl shapes") }),
+						layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("hint.open_subtitle")) }),
 						layout.Rigid(GapV(18).Layout),
-						layout.Rigid(s.miniStep("1", "Open your image")),
+						layout.Rigid(s.miniStep("1", i18n.T("preview.step_open"))),
 						layout.Rigid(GapV(8).Layout),
-						layout.Rigid(s.miniStep("2", "Pick a style on the left")),
+						layout.Rigid(s.miniStep("2", i18n.T("preview.step_style"))),
 						layout.Rigid(GapV(8).Layout),
-						layout.Rigid(s.miniStep("3", "Hit Generate")),
+						layout.Rigid(s.miniStep("3", i18n.T("preview.step_generate"))),
 					)
 				})
 			}),
@@ -328,30 +330,30 @@ func (s *AppState) cropBar(gtx C) D {
 	return layout.Inset{Top: 10}.Layout(gtx, func(gtx C) D {
 		if s.CropMode {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return th.PrimaryButton(gtx, &s.CropApplyBtn, "Apply crop", true) }),
+				layout.Rigid(func(gtx C) D { return th.PrimaryButton(gtx, &s.CropApplyBtn, i18n.T("preview.apply_crop"), true) }),
 				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropCancelBtn, "Cancel", true) }),
+				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropCancelBtn, i18n.T("common.cancel"), true) }),
 				layout.Rigid(GapH(12).Layout),
 				layout.Flexed(1, func(gtx C) D {
-					return th.Dim(gtx, "drag to select · handles to resize · inside to move")
+					return th.Dim(gtx, i18n.T("hint.crop_editing"))
 				}),
 			)
 		}
 		children := []layout.FlexChild{
-			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropBtn, "Crop region", true) }),
+			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropBtn, i18n.T("preview.crop_region"), true) }),
 		}
 		if s.Cropped {
 			children = append(children,
 				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.ResetBtn, "Reset to original", true) }))
+				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.ResetBtn, i18n.T("preview.reset_original"), true) }))
 		}
 		children = append(children,
 			layout.Rigid(GapH(12).Layout),
 			layout.Flexed(1, func(gtx C) D {
 				if s.Cropped {
-					return th.Dim(gtx, "working on a crop — Generate rebuilds just this at the full budget")
+					return th.Dim(gtx, i18n.T("hint.crop_active"))
 				}
-				return th.Dim(gtx, "crop a detail (a face, a logo) to spend the whole budget on it")
+				return th.Dim(gtx, i18n.T("hint.crop_detail"))
 			}))
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
 	})

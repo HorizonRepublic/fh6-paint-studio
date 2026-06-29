@@ -8,6 +8,8 @@ import (
 	"gioui.org/op"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // MultiSelect is a combobox that floats a checklist popup: zero or more options can be ticked, and the
@@ -98,9 +100,9 @@ func (m *MultiSelect) summary() string {
 	v := m.Value()
 	switch {
 	case len(v) == 0:
-		return "none"
+		return i18n.T("multiselect.none")
 	case len(v) == len(m.options):
-		return "all"
+		return i18n.T("multiselect.all")
 	default:
 		return strings.Join(v, ", ")
 	}

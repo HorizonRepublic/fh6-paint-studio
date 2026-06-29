@@ -7,6 +7,8 @@ import (
 	"gioui.org/op"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // Dropdown is a compact enum selector: a surface box showing the current value that, when
@@ -157,11 +159,11 @@ func (d *Dropdown) popup(gtx C, th *Theme, width int) D {
 	return th.CardBg(gtx, th.SurfaceHi, 4, func(gtx C) D {
 		ch := make([]layout.FlexChild, 0, len(d.options)+2)
 		if grouped {
-			ch = append(ch, header("Built-in"))
+			ch = append(ch, header(i18n.T("dropdown.builtin")))
 		}
 		for i := range d.options {
 			if grouped && i == d.builtin {
-				ch = append(ch, header("Custom"))
+				ch = append(ch, header(i18n.T("dropdown.custom")))
 			}
 			ch = append(ch, item(i))
 		}

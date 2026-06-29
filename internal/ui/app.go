@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 
+	"fh6-paint-studio/internal/i18n"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -112,7 +113,7 @@ func (s *AppState) topBar(gtx C) D {
 			gtx.Constraints.Min.X = gtx.Constraints.Max.X
 			return layout.UniformInset(12).Layout(gtx, func(gtx C) D {
 				children := []layout.FlexChild{
-					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 18, "◣  FH6 Paint Studio", th.Accent) }),
+					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 18, "◣  "+i18n.T("app.title"), th.Accent) }),
 					layout.Rigid(GapH(16).Layout),
 					layout.Rigid(s.viewTabs),
 					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Max.X, 0)} }),
@@ -168,9 +169,9 @@ func (s *AppState) viewTabs(gtx C) D {
 		})
 	}
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-		tab(&s.StudioTab, "Studio", s.View == ViewStudio),
+		tab(&s.StudioTab, i18n.T("app.tab_studio"), s.View == ViewStudio),
 		layout.Rigid(GapH(6).Layout),
-		tab(&s.LibraryTab, "Library", s.View == ViewLibrary),
+		tab(&s.LibraryTab, i18n.T("app.tab_library"), s.View == ViewLibrary),
 	)
 }
 
@@ -228,13 +229,13 @@ func (s *AppState) wipeBar(gtx C) D {
 	}
 	return layout.Inset{Top: 10}.Layout(gtx, func(gtx C) D {
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-			layout.Rigid(func(gtx C) D { return th.Dim(gtx, "before") }),
+			layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("app.wipe_before")) }),
 			layout.Flexed(1, func(gtx C) D {
 				sl := material.Slider(th.M, &s.Wipe)
 				sl.Color = th.Accent
 				return layout.Inset{Left: 10, Right: 10}.Layout(gtx, sl.Layout)
 			}),
-			layout.Rigid(func(gtx C) D { return th.Dim(gtx, "after") }),
+			layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("app.wipe_after")) }),
 		)
 	})
 }
