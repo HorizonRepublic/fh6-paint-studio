@@ -49,7 +49,8 @@ func rgb(s uint32) color.NRGBA {
 // NewTheme builds the studio theme with the gofont collection.
 func NewTheme() *Theme {
 	m := material.NewTheme()
-	m.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
+	coll := append(gofont.Collection(), cjkFontFace()...) // Latin/Cyrillic from Go fonts; CJK runes fall back to Noto
+	m.Shaper = text.NewShaper(text.WithCollection(coll))
 	m.TextSize = 14
 
 	t := &Theme{
