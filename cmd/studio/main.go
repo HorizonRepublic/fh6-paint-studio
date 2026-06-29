@@ -252,6 +252,12 @@ func loop(w *app.Window) error {
 				winW = int(float32(e.Size.X) / e.Metric.PxPerDp)
 				winH = int(float32(e.Size.Y) / e.Metric.PxPerDp)
 			}
+			// A minimized window reports a zero frame size. Re-laying-out and presenting a zero-size
+			// surface every tick while a run drives ~8 fps invalidations can stall the GPU and starve the
+			// Win32 message pump on some drivers — the window then refuses to restore and Windows paints it
+			// "Not Responding" (issue #29). Detect it here; the run still advances (engine events are
+			// drained below), the UI just stops drawing until the window is visible again.
+			minimized := e.Size.X == 0 || e.Size.Y == 0
 
 			// --demo: auto-load the sample image and start a quick run on the first frame
 			// (used to capture a live/finished real-window screenshot for verification).
@@ -731,7 +737,9 @@ func loop(w *app.Window) error {
 				if !runStart.IsZero() {
 					st.Stats.Elapsed = time.Since(runStart)
 				}
-				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(120 * time.Millisecond)})
+				if !minimized { // don't self-wake to redraw a hidden window; engine events still wake us
+					gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(120 * time.Millisecond)})
+				}
 			}
 			// Keep the frame ticking while an inject spinner is up; revert a lingering tick/cross pill on time.
 			if st.InjectBusy() {
@@ -756,6 +764,10 @@ func loop(w *app.Window) error {
 			if title := runTitle(st); title != lastTitle { // reflect run progress in the window title
 				w.Option(app.Title(title))
 				lastTitle = title
+			}
+			if minimized { // nothing visible to draw — acknowledge the frame cheaply (see the zero-size note)
+				e.Frame(gtx.Ops)
+				break
 			}
 			st.Layout(gtx)
 			if st.Backend != nil && st.Backend.Changed() { // engine picker -> bias the next run's backend
