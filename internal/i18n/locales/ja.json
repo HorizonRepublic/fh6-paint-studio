@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "スポイト",
   "editor.mirror": "ミラー",
+  "editor.mirror_h": "左右ミラー",
+  "editor.mirror_v": "上下ミラー",
   "editor.selected_n": "%d 個選択",
   "editor.align": "整列",
   "editor.distribute_h": "水平分布",

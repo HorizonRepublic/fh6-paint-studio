@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "스포이트",
   "editor.mirror": "미러",
+  "editor.mirror_h": "좌우 미러",
+  "editor.mirror_v": "상하 미러",
   "editor.selected_n": "%d개 선택됨",
   "editor.align": "정렬",
   "editor.distribute_h": "가로 분배",

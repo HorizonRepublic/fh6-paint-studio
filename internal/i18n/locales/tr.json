@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Damlalık",
   "editor.mirror": "Yansıt",
+  "editor.mirror_h": "Yatay yansıt",
+  "editor.mirror_v": "Dikey yansıt",
   "editor.selected_n": "%d seçili",
   "editor.align": "Hizala",
   "editor.distribute_h": "Yatay dağıt",

@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Pipeta",
   "editor.mirror": "Odbij",
+  "editor.mirror_h": "Odbij poziomo",
+  "editor.mirror_v": "Odbij pionowo",
   "editor.selected_n": "Zaznaczono: %d",
   "editor.align": "Wyrównaj",
   "editor.distribute_h": "Rozłóż w poziomie",

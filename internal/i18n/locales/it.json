@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Contagocce",
   "editor.mirror": "Specchia",
+  "editor.mirror_h": "Specchia oriz.",
+  "editor.mirror_v": "Specchia vert.",
   "editor.selected_n": "%d selezionati",
   "editor.align": "Allinea",
   "editor.distribute_h": "Distribuisci O",

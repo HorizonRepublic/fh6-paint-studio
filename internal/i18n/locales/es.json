@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Cuentagotas",
   "editor.mirror": "Reflejar",
+  "editor.mirror_h": "Reflejar horiz.",
+  "editor.mirror_v": "Reflejar vert.",
   "editor.selected_n": "%d seleccionados",
   "editor.align": "Alinear",
   "editor.distribute_h": "Distribuir H",

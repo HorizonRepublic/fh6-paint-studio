@@ -367,7 +367,8 @@ type AppState struct {
 	inspX, inspY, inspW, inspH, inspRot widget.Editor
 	editForward, editBack               widget.Clickable
 	editDup, editDelete                 widget.Clickable
-	editMirror                          widget.Clickable    // duplicate the selection mirrored across the vertical centre
+	editMirror                          widget.Clickable    // mirror the selection left↔right (across the vertical centre)
+	editMirrorV                         widget.Clickable    // mirror the selection up↕down (across the horizontal centre)
 	alignBtns                           [8]widget.Clickable // L,Cx,R,T,My,B, distribute-H, distribute-V
 	colorSwatchBtn                      widget.Clickable    // opens the colour picker
 	colorPickerOpen                     bool

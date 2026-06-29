@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Піпетка",
   "editor.mirror": "Дзеркало",
+  "editor.mirror_h": "Дзерк. гориз.",
+  "editor.mirror_v": "Дзерк. верт.",
   "editor.selected_n": "Вибрано: %d",
   "editor.align": "Вирівняти",
   "editor.distribute_h": "Розподіл по гор.",

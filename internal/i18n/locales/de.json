@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Pipette",
   "editor.mirror": "Spiegeln",
+  "editor.mirror_h": "Spiegeln horiz.",
+  "editor.mirror_v": "Spiegeln vert.",
   "editor.selected_n": "%d ausgewählt",
   "editor.align": "Ausrichten",
   "editor.distribute_h": "Horizontal verteilen",

@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Conta-gotas",
   "editor.mirror": "Espelhar",
+  "editor.mirror_h": "Espelhar horiz.",
+  "editor.mirror_v": "Espelhar vert.",
   "editor.selected_n": "%d selecionados",
   "editor.align": "Alinhar",
   "editor.distribute_h": "Distribuir H",

@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "取色",
   "editor.mirror": "镜像",
+  "editor.mirror_h": "水平镜像",
+  "editor.mirror_v": "垂直镜像",
   "editor.selected_n": "已选 %d 个",
   "editor.align": "对齐",
   "editor.distribute_h": "水平分布",

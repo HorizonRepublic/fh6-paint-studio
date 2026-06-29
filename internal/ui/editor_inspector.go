@@ -48,15 +48,25 @@ func (s *AppState) inspectorBody(gtx C) D {
 		layout.Rigid(GapV(14).Layout),
 		layout.Rigid(s.inspActions),
 		layout.Rigid(GapV(8).Layout),
-		layout.Rigid(s.mirrorButton),
+		layout.Rigid(s.mirrorButtons),
 	)
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }
 
 // mirrorButton is the full-width "mirror across the vertical centre" action shared by single & multi.
-func (s *AppState) mirrorButton(gtx C) D {
-	gtx.Constraints.Min.X = gtx.Constraints.Max.X
-	return s.Th.SecondaryButton(gtx, &s.editMirror, i18n.T("editor.mirror"), true)
+func (s *AppState) mirrorButtons(gtx C) D {
+	th := s.Th
+	full := func(b *widget.Clickable, key string) layout.FlexChild {
+		return layout.Flexed(1, func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return th.SecondaryButton(gtx, b, i18n.T(key), true)
+		})
+	}
+	return layout.Flex{}.Layout(gtx,
+		full(&s.editMirror, "editor.mirror_h"),
+		layout.Rigid(GapH(8).Layout),
+		full(&s.editMirrorV, "editor.mirror_v"),
+	)
 }
 
 // multiPanel replaces the per-field inspector when several shapes are selected: align/distribute,
@@ -82,7 +92,7 @@ func (s *AppState) multiPanel(gtx C) D {
 		layout.Rigid(GapV(6).Layout),
 		layout.Rigid(full(&s.alignBtns[distributeV], "editor.distribute_v")),
 		layout.Rigid(GapV(12).Layout),
-		layout.Rigid(full(&s.editMirror, "editor.mirror")),
+		layout.Rigid(s.mirrorButtons),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
 			return layout.Flex{}.Layout(gtx,
@@ -536,7 +546,10 @@ func (s *AppState) handleEditActions(gtx C) {
 		}
 	}
 	if s.editMirror.Clicked(gtx) {
-		s.mirrorSelection()
+		s.mirrorSelection(false)
+	}
+	if s.editMirrorV.Clicked(gtx) {
+		s.mirrorSelection(true)
 	}
 	for n := range s.alignBtns {
 		if s.alignBtns[n].Clicked(gtx) {
@@ -604,7 +617,7 @@ func (s *AppState) duplicateSel() {
 
 // mirrorSelection appends a copy of each selected shape reflected across the canvas vertical centre and
 // selects the new copies — the "build one half, mirror to the other" symmetry workflow.
-func (s *AppState) mirrorSelection() {
+func (s *AppState) mirrorSelection(vertical bool) {
 	idx := s.selIndices()
 	if len(idx) == 0 {
 		return
@@ -616,7 +629,11 @@ func (s *AppState) mirrorSelection() {
 			break
 		}
 		clone := cloneShapes(s.EditShapes[i : i+1])[0]
-		mirrorShapeX(&clone, s.EditW)
+		if vertical {
+			mirrorShapeY(&clone, s.EditH)
+		} else {
+			mirrorShapeX(&clone, s.EditW)
+		}
 		s.EditShapes = append(s.EditShapes, clone)
 		newIdx = append(newIdx, len(s.EditShapes)-1)
 	}

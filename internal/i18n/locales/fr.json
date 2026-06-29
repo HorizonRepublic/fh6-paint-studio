@@ -69,6 +69,8 @@
 
   "editor.eyedrop": "Pipette",
   "editor.mirror": "Miroir",
+  "editor.mirror_h": "Miroir horiz.",
+  "editor.mirror_v": "Miroir vert.",
   "editor.selected_n": "%d sélectionnés",
   "editor.align": "Aligner",
   "editor.distribute_h": "Distribuer H",

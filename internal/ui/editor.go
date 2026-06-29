@@ -259,6 +259,30 @@ func mirrorShapeX(sh *model.Shape, w int) {
 	}
 }
 
+// mirrorShapeY reflects a shape across the canvas horizontal centre line (y → h-y) — the up/down mirror.
+// Same rules as mirrorShapeX on the other axis: triangles/lines reflect their vertices, the rotatable
+// primitives reflect the centre and negate rotation, masks reflect position/orientation only.
+func mirrorShapeY(sh *model.Shape, h int) {
+	fh := float64(h)
+	switch model.KindFromType(sh.Type) {
+	case model.KindTriangle:
+		for i := 1; i < len(sh.Data) && i < 6; i += 2 {
+			sh.Data[i] = fh - sh.Data[i]
+		}
+	case model.KindLine:
+		for i := 1; i < len(sh.Data) && i < 4; i += 2 {
+			sh.Data[i] = fh - sh.Data[i]
+		}
+	default:
+		if len(sh.Data) >= 2 {
+			sh.Data[1] = fh - sh.Data[1]
+		}
+		if len(sh.Data) >= 5 {
+			sh.Data[4] = -sh.Data[4]
+		}
+	}
+}
+
 // align modes for alignSelection (parallel to AppState.alignBtns).
 const (
 	alignLeft = iota
@@ -967,6 +991,7 @@ func (s *AppState) handleEditKeys(gtx C) {
 			key.Filter{Focus: &s.editKeyTag, Name: "D", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: "A", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: "M", Required: key.ModShortcut},
+			key.Filter{Focus: &s.editKeyTag, Name: "M", Required: key.ModShortcut | key.ModShift},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameDeleteForward},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameDeleteBackward},
 			key.Filter{Focus: &s.editKeyTag, Name: key.NameEscape},
@@ -991,8 +1016,10 @@ func (s *AppState) handleEditKeys(gtx C) {
 			s.duplicateSel()
 		case ke.Name == "A" && ke.Modifiers.Contain(key.ModShortcut):
 			s.selectAll()
+		case ke.Name == "M" && ke.Modifiers.Contain(key.ModShortcut) && ke.Modifiers.Contain(key.ModShift):
+			s.mirrorSelection(true)
 		case ke.Name == "M" && ke.Modifiers.Contain(key.ModShortcut):
-			s.mirrorSelection()
+			s.mirrorSelection(false)
 		case ke.Name == key.NameDeleteForward || ke.Name == key.NameDeleteBackward:
 			s.deleteSel()
 		case ke.Name == key.NameEscape:

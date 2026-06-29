@@ -389,12 +389,28 @@ func TestMirrorShapeXTriangleReflectsVertices(t *testing.T) {
 func TestMirrorSelectionDuplicatesAcrossCentre(t *testing.T) {
 	s := multiDoc()
 	s.selectSingle(1)
-	s.mirrorSelection()
+	s.mirrorSelection(false) // horizontal (left↔right)
 	if len(s.EditShapes) != 4 {
 		t.Fatalf("mirror should append one copy, n=%d", len(s.EditShapes))
 	}
-	if s.EditShapes[3].Data[0] != 80 || s.EditSel != 3 {
-		t.Fatalf("mirror copy cx=%v sel=%d, want 80 selected", s.EditShapes[3].Data[0], s.EditSel)
+	if s.EditShapes[3].Data[0] != 80 || s.EditShapes[3].Data[1] != 20 || s.EditSel != 3 {
+		t.Fatalf("horizontal mirror copy = (%v,%v) sel=%d, want (80,20) selected", s.EditShapes[3].Data[0], s.EditShapes[3].Data[1], s.EditSel)
+	}
+	s.selectSingle(1)
+	s.mirrorSelection(true) // vertical (up↕down)
+	if c := s.EditShapes[len(s.EditShapes)-1]; c.Data[0] != 20 || c.Data[1] != 80 {
+		t.Fatalf("vertical mirror copy = (%v,%v), want (20,80)", c.Data[0], c.Data[1])
+	}
+}
+
+func TestMirrorShapeYTriangle(t *testing.T) {
+	sh := model.Shape{Type: model.TypeTriangle, Data: []float64{10, 0, 30, 0, 20, 20}}
+	mirrorShapeY(&sh, 100)
+	want := []float64{10, 100, 30, 100, 20, 80}
+	for i := range want {
+		if sh.Data[i] != want[i] {
+			t.Fatalf("mirrorShapeY triangle = %v, want %v", sh.Data, want)
+		}
 	}
 }
 
