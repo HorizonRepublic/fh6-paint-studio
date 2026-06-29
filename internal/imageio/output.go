@@ -203,6 +203,77 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 	return out
 }
 
+// RenderFH6Image is RenderFH6 packed into an *image.NRGBA (sRGB display bytes), shared by the studio
+// preview path and the editor. RenderFH6 already returns sRGB-display floats with straight alpha, so
+// the pack is a straight per-channel clamp via u8.
+func RenderFH6Image(shapes []model.Shape, transparentBG bool, w, h, ss int) *image.NRGBA {
+	buf := RenderFH6(shapes, transparentBG, w, h, ss)
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for i := 0; i < w*h && i*4+3 < len(buf); i++ {
+		img.Pix[i*4+0] = u8(buf[i*4+0])
+		img.Pix[i*4+1] = u8(buf[i*4+1])
+		img.Pix[i*4+2] = u8(buf[i*4+2])
+		img.Pix[i*4+3] = u8(buf[i*4+3])
+	}
+	return img
+}
+
+// CompositeShapeOnto composites a single shape over an existing sRGB-display NRGBA in linear light,
+// matching RenderFH6's per-shape blend. The editor uses it to redraw only the shape being dragged on
+// top of a pre-rendered base (the other shapes), so live deformation stays smooth at any doc size.
+func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
+	if img == nil || len(s.Color) < 4 {
+		return
+	}
+	a := float32(s.Color[3]) / 255
+	if a <= 0 {
+		return
+	}
+	kind := model.KindFromType(s.Type)
+	p := scaleParams(kind, model.ParamsFromShape(s), 1)
+	cr := model.SRGBToLinear(float32(s.Color[0]) / 255)
+	cg := model.SRGBToLinear(float32(s.Color[1]) / 255)
+	cb := model.SRGBToLinear(float32(s.Color[2]) / 255)
+	isGrad := raster.IsGradient(kind)
+	xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
+	for y := yMin; y <= yMax; y++ {
+		for x := xMin; x <= xMax; x++ {
+			aEff := a
+			if isGrad {
+				cov := float32(raster.Coverage(kind, p, x, y))
+				if cov <= 0 {
+					continue
+				}
+				aEff = a * cov
+			} else if !raster.Inside(kind, p, x, y) {
+				continue
+			}
+			q := (y*w + x) * 4
+			br := model.SRGBToLinear(float32(img.Pix[q+0]) / 255)
+			bg := model.SRGBToLinear(float32(img.Pix[q+1]) / 255)
+			bb := model.SRGBToLinear(float32(img.Pix[q+2]) / 255)
+			ba := float32(img.Pix[q+3]) / 255
+			ia := 1 - aEff
+			img.Pix[q+0] = u8(model.LinearToSRGB(br*ia + cr*aEff))
+			img.Pix[q+1] = u8(model.LinearToSRGB(bg*ia + cg*aEff))
+			img.Pix[q+2] = u8(model.LinearToSRGB(bb*ia + cb*aEff))
+			img.Pix[q+3] = u8(ba*ia + aEff)
+		}
+	}
+}
+
+// RenderFH6ImageSkip is RenderFH6Image with one shape index omitted (the editor's drag base: every
+// shape except the one being dragged).
+func RenderFH6ImageSkip(shapes []model.Shape, transparentBG bool, w, h, skip int) *image.NRGBA {
+	if skip < 0 || skip >= len(shapes) {
+		return RenderFH6Image(shapes, transparentBG, w, h, 1)
+	}
+	rest := make([]model.Shape, 0, len(shapes)-1)
+	rest = append(rest, shapes[:skip]...)
+	rest = append(rest, shapes[skip+1:]...)
+	return RenderFH6Image(rest, transparentBG, w, h, 1)
+}
+
 // EncodeForDisplay sRGB-encodes a linear-light RGBA buffer (the engine's working canvas in -linear
 // mode) for preview/PNG output; alpha stays straight. A no-op when not in linear mode.
 func EncodeForDisplay(px []float32) []float32 {
