@@ -21,3 +21,18 @@ func TestTInterpolates(t *testing.T) {
 		t.Fatalf("T(run.shapes_n,7)=%q, want %q", got, "7 shapes")
 	}
 }
+
+func TestMatch(t *testing.T) {
+	cases := map[string]string{
+		"uk-UA": "uk", "de-DE": "de", "pt-PT": "pt-BR", "zh-CN": "zh-CN",
+		"zh-Hans": "zh-CN", "ja-JP": "ja", "en-GB": "en",
+	}
+	for in, want := range cases {
+		if got, ok := Match(in); !ok || got != want {
+			t.Errorf("Match(%q)=(%q,%v), want (%q,true)", in, got, ok, want)
+		}
+	}
+	if got, ok := Match("ru-RU"); ok {
+		t.Errorf("Match(ru-RU)=(%q,true), want no-match (Russian is not supported)", got)
+	}
+}

@@ -6,6 +6,7 @@ require (
 	gioui.org v0.10.0
 	golang.org/x/image v0.42.0
 	golang.org/x/sys v0.46.0
+	golang.org/x/text v0.38.0
 )
 
 require (
@@ -13,5 +14,4 @@ require (
 	github.com/go-text/typesetting v0.3.4 // indirect
 	golang.org/x/exp/shiny v0.0.0-20260603202125-055de637280b // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
 )
