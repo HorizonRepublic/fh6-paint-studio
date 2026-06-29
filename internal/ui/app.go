@@ -123,14 +123,21 @@ func (s *AppState) topBar(gtx C) D {
 						layout.Rigid(GapH(10).Layout),
 					)
 				}
-				children = append(children,
-					layout.Rigid(func(gtx C) D {
-						if s.Backend != nil { // >1 backend works -> a picker; else the static label
+				if s.Backend != nil { // engine picker only when >1 backend works; no static label (it lives in About)
+					children = append(children,
+						layout.Rigid(func(gtx C) D {
 							gtx.Constraints.Min.X = 0
 							gtx.Constraints.Max.X = gtx.Dp(128)
 							return s.Backend.Layout(gtx, th)
-						}
-						return th.Dim(gtx, s.BackendLabel)
+						}),
+						layout.Rigid(GapH(10).Layout),
+					)
+				}
+				children = append(children,
+					layout.Rigid(func(gtx C) D {
+						gtx.Constraints.Min.X = 0
+						gtx.Constraints.Max.X = gtx.Dp(150)
+						return s.Lang.Layout(gtx, th)
 					}),
 					layout.Rigid(GapH(10).Layout),
 					layout.Rigid(s.aboutChip),

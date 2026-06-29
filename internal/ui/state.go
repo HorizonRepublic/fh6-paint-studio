@@ -12,6 +12,7 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/widget"
 
+	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/userpreset"
 )
@@ -106,6 +107,7 @@ type AppState struct {
 	Version      string
 	BackendLabel string
 	Backend      *Dropdown // engine picker (CUDA/Vulkan); nil when only one backend works (no choice to make)
+	Lang         *Dropdown // UI language picker (endonym options); drives i18n.SetLocale
 
 	// loaded image
 	ImgPath   string
@@ -365,6 +367,18 @@ func NewAppState(th *Theme) *AppState {
 	s.GridEd.SingleLine = true
 	s.OverdrawEd.SingleLine = true
 	s.QualityDD = NewDropdown([]string{"fast", "balanced", "max", "quality", "ultra"}, 3)
+	{
+		av := i18n.Available()
+		endonyms := make([]string, len(av))
+		sel := 0
+		for i, l := range av {
+			endonyms[i] = l.Endonym
+			if l.Tag == i18n.Current() {
+				sel = i
+			}
+		}
+		s.Lang = NewDropdown(endonyms, sel)
+	}
 	s.InjectLayers.SingleLine = true
 	s.InjectScale.SingleLine = true
 	s.InjectScale.SetText("1.0")
