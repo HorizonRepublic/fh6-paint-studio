@@ -88,12 +88,12 @@ func (s *AppState) undoRedoRow(gtx C) D {
 	return layout.Flex{}.Layout(gtx,
 		layout.Flexed(1, func(gtx C) D {
 			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return th.SecondaryButton(gtx, &s.editUndoBtn, i18n.T("editor.undo"), len(s.editUndo) > 0)
+			return th.ArrowButton(gtx, &s.editUndoBtn, true, i18n.T("editor.undo"), len(s.editUndo) > 0)
 		}),
 		layout.Rigid(GapH(8).Layout),
 		layout.Flexed(1, func(gtx C) D {
 			gtx.Constraints.Min.X = gtx.Constraints.Max.X
-			return th.SecondaryButton(gtx, &s.editRedoBtn, i18n.T("editor.redo"), len(s.editRedo) > 0)
+			return th.ArrowButton(gtx, &s.editRedoBtn, false, i18n.T("editor.redo"), len(s.editRedo) > 0)
 		}),
 	)
 }

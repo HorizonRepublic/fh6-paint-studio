@@ -134,3 +134,25 @@ func drawShapeIcon(gtx C, kind string, col color.NRGBA, filled bool) D {
 	}
 	return D{Size: image.Pt(s, s)}
 }
+
+// drawArrowIcon draws a left/right arrow in an 18dp box, used by the undo/redo buttons.
+func drawArrowIcon(gtx C, left bool, col color.NRGBA) D {
+	s := float32(gtx.Dp(18))
+	w := float32(gtx.Dp(2))
+	mid := s / 2
+	var x0, x1, hx float32
+	if left {
+		x0, x1, hx = 0.80*s, 0.20*s, 0.44*s
+	} else {
+		x0, x1, hx = 0.20*s, 0.80*s, 0.56*s
+	}
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(x0, mid))
+	p.LineTo(f32.Pt(x1, mid))
+	p.MoveTo(f32.Pt(hx, 0.28*s))
+	p.LineTo(f32.Pt(x1, mid))
+	p.LineTo(f32.Pt(hx, 0.72*s))
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: w}.Op())
+	return D{Size: image.Pt(gtx.Dp(18), gtx.Dp(18))}
+}
