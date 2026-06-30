@@ -458,6 +458,11 @@ type AppState struct {
 	SymBtn       widget.Clickable
 	MirrorAllBtn widget.Clickable
 
+	// editor shortcuts legend (a "?" toolbar toggle opens a dismiss-on-click overlay)
+	showShortcuts  bool
+	ShortcutsBtn   widget.Clickable
+	shortcutsScrim widget.Clickable
+
 	// editor drag-and-drop: drag a shape from the bank/primitive palette onto the canvas. A full-window
 	// pass-through pointer layer tracks the cursor in window coords; the window→canvas offset is observed
 	// while hovering the canvas so the drop maps to the right image position.

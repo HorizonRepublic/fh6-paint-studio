@@ -1,10 +1,15 @@
 package ui
 
 import (
+	"image"
+	"image/color"
 	"math"
 	"strconv"
 
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 
 	"fh6-paint-studio/internal/i18n"
@@ -39,7 +44,76 @@ func (s *AppState) editorScreen(gtx C) D {
 	})
 	// Drag-and-drop layer on top of everything (pass-through, so it never steals clicks).
 	s.dragOverlay(gtx, sz)
+	if s.showShortcuts {
+		s.shortcutsOverlay(gtx, sz)
+	}
+	if s.shortcutsScrim.Clicked(gtx) {
+		s.showShortcuts = false
+	}
 	return dims
+}
+
+// shortcutsOverlay dims the editor and centres the keyboard/mouse legend; a click anywhere dismisses it.
+func (s *AppState) shortcutsOverlay(gtx C, sz image.Point) {
+	s.shortcutsScrim.Layout(gtx, func(gtx C) D {
+		paint.FillShape(gtx.Ops, color.NRGBA{A: 175}, clip.Rect{Max: sz}.Op())
+		pointer.CursorPointer.Add(gtx.Ops)
+		return layout.Center.Layout(gtx, s.shortcutsCard)
+	})
+}
+
+// shortcutsCard is the legend panel: a fixed-width card of combo → action rows.
+func (s *AppState) shortcutsCard(gtx C) D {
+	th := s.Th
+	rows := []struct{ combo, action string }{
+		{"Ctrl+Z", i18n.T("editor.undo")},
+		{"Ctrl+Shift+Z", i18n.T("editor.redo")},
+		{"Ctrl+D", i18n.T("editor.duplicate")},
+		{"Ctrl+A", i18n.T("editor.sc_select_all")},
+		{"Ctrl+Click", i18n.T("editor.sc_multiselect")},
+		{"Del", i18n.T("editor.delete")},
+		{"Esc", i18n.T("editor.sc_deselect")},
+		{"Arrows", i18n.T("editor.sc_nudge")},
+		{"Ctrl+M", i18n.T("editor.mirror_h")},
+		{"Ctrl+Shift+M", i18n.T("editor.mirror_v")},
+		{"Ctrl+Wheel", i18n.T("editor.sc_scale")},
+		{"Wheel", i18n.T("editor.sc_zoom")},
+		{"Dbl-click", i18n.T("editor.sc_add")},
+	}
+	w := gtx.Dp(340)
+	gtx.Constraints.Min.X, gtx.Constraints.Max.X = w, w
+	return layout.Background{}.Layout(gtx,
+		func(gtx C) D {
+			sz := gtx.Constraints.Min
+			borderRRect(gtx, th.Border, th.Surface, sz, 12, 1)
+			return D{Size: sz}
+		},
+		func(gtx C) D {
+			return layout.UniformInset(18).Layout(gtx, func(gtx C) D {
+				children := []layout.FlexChild{
+					layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, i18n.T("editor.shortcuts"), th.Text) }),
+					layout.Rigid(GapV(12).Layout),
+				}
+				for _, r := range rows {
+					r := r
+					children = append(children,
+						layout.Rigid(func(gtx C) D {
+							return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx C) D {
+									cw := gtx.Dp(132)
+									gtx.Constraints.Min.X, gtx.Constraints.Max.X = cw, cw
+									return th.Lbl(gtx, 13, r.combo, th.Accent)
+								}),
+								layout.Flexed(1, func(gtx C) D { return th.Lbl(gtx, 13, r.action, th.Text) }),
+							)
+						}),
+						layout.Rigid(GapV(7).Layout),
+					)
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+			})
+		},
+	)
 }
 
 // editorLeftColumn is undo/redo + the add-primitive quick palette + the categorized dictionary grid.
@@ -111,6 +185,9 @@ func (s *AppState) editorToolbar(gtx C) D {
 	if s.MirrorAllBtn.Clicked(gtx) {
 		s.mirrorWholeDesign()
 	}
+	if s.ShortcutsBtn.Clicked(gtx) {
+		s.showShortcuts = !s.showShortcuts
+	}
 	pct := strconv.Itoa(int(s.editZoom*100+0.5)) + "%"
 	children := []layout.FlexChild{
 		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.editZoomOut, "−", true) }),
@@ -136,6 +213,8 @@ func (s *AppState) editorToolbar(gtx C) D {
 			}
 			return th.SecondaryButton(gtx, &s.SymBtn, i18n.T(s.symModeKey()), true)
 		}),
+		layout.Rigid(GapH(6).Layout),
+		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.ShortcutsBtn, "?", true) }),
 	}
 	if s.symMode != symOff {
 		children = append(children,
