@@ -116,9 +116,9 @@ func (t *Theme) SecondaryButton(gtx C, btn *widget.Clickable, label string, enab
 	return b.Layout(gtx)
 }
 
-// ArrowButton is a full-width undo/redo button: a directional arrow plus label that glows accent when
-// usable and goes grey when its stack is empty, so the available direction is unmistakable at a glance.
-func (t *Theme) ArrowButton(gtx C, btn *widget.Clickable, left bool, label string, enabled bool) D {
+// ArrowButton is an undo/redo button showing just a curved directional arrow that glows accent when its
+// stack has something to apply and goes grey when it is empty, so the available direction is obvious.
+func (t *Theme) ArrowButton(gtx C, btn *widget.Clickable, left bool, enabled bool) D {
 	fg, bg := t.Accent, t.SurfaceHi
 	if !enabled {
 		fg, bg = t.TextDim, t.Surface
@@ -130,16 +130,8 @@ func (t *Theme) ArrowButton(gtx C, btn *widget.Clickable, left bool, label strin
 				return D{Size: gtx.Constraints.Min}
 			}),
 			layout.Stacked(func(gtx C) D {
-				return layout.Inset{Top: 8, Bottom: 8, Left: 12, Right: 14}.Layout(gtx, func(gtx C) D {
-					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-						layout.Rigid(func(gtx C) D { return drawArrowIcon(gtx, left, fg) }),
-						layout.Rigid(GapH(8).Layout),
-						layout.Rigid(func(gtx C) D {
-							lb := material.Label(t.M, 14, label)
-							lb.Color, lb.MaxLines = fg, 1
-							return lb.Layout(gtx)
-						}),
-					)
+				return layout.Inset{Top: 8, Bottom: 8, Left: 12, Right: 12}.Layout(gtx, func(gtx C) D {
+					return drawArrowIcon(gtx, left, fg)
 				})
 			}),
 		)
