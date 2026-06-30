@@ -565,6 +565,35 @@ func TestLockedSurvivesClone(t *testing.T) {
 	}
 }
 
+func TestRecentColorsDedupAndCap(t *testing.T) {
+	s := NewAppState(NewTheme())
+	for i := 0; i < 30; i++ {
+		s.pushRecentColor(color.NRGBA{R: uint8(i), A: 255})
+	}
+	if len(s.recentColors) != 20 {
+		t.Fatalf("recent cap = %d, want 20 (two rows)", len(s.recentColors))
+	}
+	mid := s.recentColors[5]
+	before := len(s.recentColors)
+	s.pushRecentColor(mid)
+	if len(s.recentColors) != before {
+		t.Fatalf("re-pushing an existing colour grew the list to %d", len(s.recentColors))
+	}
+	if s.recentColors[0] != mid {
+		t.Fatalf("re-pushed colour should move to front")
+	}
+}
+
+func TestCommitRecentColorIsDeduped(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.commitRecentColor()
+	s.commitRecentColor() // settling the same colour twice must not pile up
+	if len(s.recentColors) != 1 {
+		t.Fatalf("commit recorded %d colours, want 1", len(s.recentColors))
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()

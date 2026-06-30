@@ -389,6 +389,7 @@ func (s *AppState) finishDrag() {
 	}
 	if s.editDragMoved {
 		s.pushUndo(s.editDrag.start)
+		s.commitRecentColor() // a placed shape's colour is a "settled" one worth remembering
 	}
 	s.editDrag = editorDrag{}
 	s.editDragBase = nil

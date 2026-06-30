@@ -124,11 +124,8 @@ func (s *AppState) colorWheel(gtx C) D {
 		switch pe.Kind {
 		case pointer.Press, pointer.Drag:
 			s.setWheelFromPoint(pe.Position, side)
-		case pointer.Release:
-			if s.selValid() {
-				s.pushRecentColor(colorFromShape(s.EditShapes[s.EditSel]))
-			}
 		}
+		// Recents are recorded when the colour is settled (picker closes / shape moves), not per wheel click.
 	}
 	return D{Size: image.Pt(side, side)}
 }

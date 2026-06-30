@@ -243,8 +243,18 @@ func (s *AppState) pushRecentColor(c color.NRGBA) {
 		}
 	}
 	s.recentColors = append([]color.NRGBA{c}, s.recentColors...)
-	if len(s.recentColors) > 10 {
-		s.recentColors = s.recentColors[:10]
+	const cap = 20 // two rows of swatches
+	if len(s.recentColors) > cap {
+		s.recentColors = s.recentColors[:cap]
+	}
+}
+
+// commitRecentColor records the selected shape's current colour as a recent — called when a colour is
+// settled (the picker closes or the shape is moved), not on every exploratory wheel click. Dedup in
+// pushRecentColor keeps repeats from piling up.
+func (s *AppState) commitRecentColor() {
+	if s.selValid() {
+		s.pushRecentColor(colorFromShape(s.EditShapes[s.EditSel]))
 	}
 }
 
@@ -272,15 +282,28 @@ func (s *AppState) recentColorsRow(gtx C) D {
 	for len(s.recentBtns) < len(s.recentColors) {
 		s.recentBtns = append(s.recentBtns, widget.Clickable{})
 	}
-	var cells []layout.FlexChild
-	for i, c := range s.recentColors {
-		if i > 0 {
-			cells = append(cells, layout.Rigid(GapH(4).Layout))
+	const perRow = 10
+	row := func(lo, hi int) layout.Widget {
+		return func(gtx C) D {
+			var cells []layout.FlexChild
+			for i := lo; i < hi && i < len(s.recentColors); i++ {
+				if i > lo {
+					cells = append(cells, layout.Rigid(GapH(4).Layout))
+				}
+				i := i
+				cells = append(cells, layout.Rigid(func(gtx C) D { return s.colorChipBtn(gtx, &s.recentBtns[i], s.recentColors[i]) }))
+			}
+			return layout.Flex{}.Layout(gtx, cells...)
 		}
-		i, c := i, c
-		cells = append(cells, layout.Rigid(func(gtx C) D { return s.colorChipBtn(gtx, &s.recentBtns[i], c) }))
 	}
-	return layout.Flex{}.Layout(gtx, cells...)
+	if len(s.recentColors) <= perRow {
+		return row(0, perRow)(gtx)
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(row(0, perRow)),
+		layout.Rigid(GapV(4).Layout),
+		layout.Rigid(row(perRow, 2*perRow)),
+	)
 }
 
 // colorChipBtn is a small fixed swatch button for a given colour + clickable.
@@ -518,6 +541,8 @@ func (s *AppState) handleEditActions(gtx C) {
 		s.colorPickerOpen = !s.colorPickerOpen
 		if s.colorPickerOpen && s.selValid() {
 			s.populateColorSliders()
+		} else if !s.colorPickerOpen {
+			s.commitRecentColor() // closing the picker records the settled colour
 		}
 	}
 	if s.eyedropBtn.Clicked(gtx) {
