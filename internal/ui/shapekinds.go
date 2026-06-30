@@ -135,24 +135,32 @@ func drawShapeIcon(gtx C, kind string, col color.NRGBA, filled bool) D {
 	return D{Size: image.Pt(s, s)}
 }
 
-// drawArrowIcon draws a left/right arrow in an 18dp box, used by the undo/redo buttons.
+// drawArrowIcon draws a curved undo/redo arrow — a loop over the top whose head swoops down one side, in
+// an 18dp box. left=true is undo (head curls down the left), left=false is redo (mirrored to the right).
+// drawArrowIcon draws a filled curved undo/redo arrow (the Material "undo" glyph) in an 18dp box.
+// left=true is undo; left=false mirrors it horizontally into redo.
 func drawArrowIcon(gtx C, left bool, col color.NRGBA) D {
-	s := float32(gtx.Dp(18))
-	w := float32(gtx.Dp(2))
-	mid := s / 2
-	var x0, x1, hx float32
-	if left {
-		x0, x1, hx = 0.80*s, 0.20*s, 0.44*s
-	} else {
-		x0, x1, hx = 0.20*s, 0.80*s, 0.56*s
+	box := gtx.Dp(18)
+	sc := float64(box) / 24 // the path is authored on a 24×24 grid
+	tf := func(x, y float64) f32.Point {
+		if !left {
+			x = 24 - x
+		}
+		return f32.Pt(float32(x*sc), float32(y*sc))
 	}
 	var p clip.Path
 	p.Begin(gtx.Ops)
-	p.MoveTo(f32.Pt(x0, mid))
-	p.LineTo(f32.Pt(x1, mid))
-	p.MoveTo(f32.Pt(hx, 0.28*s))
-	p.LineTo(f32.Pt(x1, mid))
-	p.LineTo(f32.Pt(hx, 0.72*s))
-	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: w}.Op())
-	return D{Size: image.Pt(gtx.Dp(18), gtx.Dp(18))}
+	p.MoveTo(tf(12.5, 8))
+	p.CubeTo(tf(9.85, 8), tf(7.45, 8.99), tf(5.6, 10.6))
+	p.LineTo(tf(2, 7))
+	p.LineTo(tf(2, 16))
+	p.LineTo(tf(11, 16))
+	p.LineTo(tf(7.38, 12.38))
+	p.CubeTo(tf(8.77, 11.22), tf(10.54, 10.5), tf(12.5, 10.5))
+	p.CubeTo(tf(16.04, 10.5), tf(19.05, 12.81), tf(20.1, 16))
+	p.LineTo(tf(22.47, 15.22))
+	p.CubeTo(tf(21.08, 11.03), tf(17.15, 8), tf(12.5, 8))
+	p.Close()
+	paint.FillShape(gtx.Ops, col, clip.Outline{Path: p.End()}.Op())
+	return D{Size: image.Pt(box, box)}
 }

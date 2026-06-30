@@ -134,7 +134,11 @@ func (t *Theme) ArrowButton(gtx C, btn *widget.Clickable, left bool, label strin
 					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx C) D { return drawArrowIcon(gtx, left, fg) }),
 						layout.Rigid(GapH(8).Layout),
-						layout.Rigid(func(gtx C) D { return t.Lbl(gtx, 14, label, fg) }),
+						layout.Rigid(func(gtx C) D {
+							lb := material.Label(t.M, 14, label)
+							lb.Color, lb.MaxLines = fg, 1
+							return lb.Layout(gtx)
+						}),
 					)
 				})
 			}),
