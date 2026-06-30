@@ -380,6 +380,22 @@ func (s *AppState) pushUndo(snapshot []model.Shape) {
 	s.editRedo = nil
 }
 
+// beginEditUndo records one undo step for a live-edit session (typing an inspector field, dragging the
+// colour wheel) the first time it actually changes the shape. The pre-edit snapshot is captured when the
+// selection settles (populateInspector / finishDrag); the session coalesces every subsequent tweak into
+// that one step until the selection changes or the shape is dragged.
+func (s *AppState) beginEditUndo() {
+	if s.editSession || !s.selValid() {
+		return
+	}
+	if s.editPre != nil {
+		s.pushUndo(s.editPre)
+	} else {
+		s.pushUndo(cloneShapes(s.EditShapes))
+	}
+	s.editSession = true
+}
+
 // finishDrag commits an active drag: it records an undo step only if the drag actually changed something
 // (a click that selects a shape but never moves it must not push a no-op snapshot, or undo appears dead),
 // then clears the drag state and triggers a full re-render.
@@ -396,6 +412,8 @@ func (s *AppState) finishDrag() {
 	s.editDragBaseOp = paint.ImageOp{}
 	s.editDragSkip = nil
 	s.editDragMoved = false
+	s.editPre = cloneShapes(s.EditShapes) // post-drag baseline for subsequent field/colour edits
+	s.editSession = false
 	s.markEditDirty()
 }
 
@@ -967,7 +985,12 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 		rect := s.zoomedRect(sz)
 		switch pe.Kind {
 		case pointer.Scroll:
-			s.zoomAbout(pe.Position, math.Exp(float64(-pe.Scroll.Y)*0.0015), sz)
+			factor := math.Exp(float64(-pe.Scroll.Y) * 0.0015)
+			if pe.Modifiers.Contain(key.ModShortcut) && s.selCount() >= 1 {
+				s.scaleSelection(factor) // Ctrl+wheel scales the selected shape, not the canvas
+			} else {
+				s.zoomAbout(pe.Position, factor, sz)
+			}
 		case pointer.Move:
 			s.canvasLocal = pe.Position
 			s.canvasHover = true
@@ -1178,6 +1201,34 @@ func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
 	s.pushUndo(cloneShapes(s.EditShapes))
 	for _, i := range idx {
 		moveShapeData(&s.EditShapes[i], dx*step, dy*step)
+	}
+	s.markEditDirty()
+}
+
+// scaleSelection multiplies the size of every (unlocked) selected shape about its own centre — driven by
+// Ctrl+wheel. The size fields are kept in step so readInspector does not fight the change.
+func (s *AppState) scaleSelection(factor float64) {
+	if factor <= 0 {
+		return
+	}
+	var idx []int
+	for _, i := range s.selIndices() {
+		if !s.EditShapes[i].Locked {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) == 0 {
+		return
+	}
+	s.beginEditUndo()
+	for _, i := range idx {
+		hx, hy := shapeHalfExtents(s.EditShapes[i])
+		setShapeScale(&s.EditShapes[i], hx*factor, hy*factor)
+	}
+	if s.selValid() && s.selCount() == 1 {
+		hx, hy := shapeHalfExtents(s.EditShapes[s.EditSel])
+		s.inspW.SetText(formatFloat(round1(hx * 2)))
+		s.inspH.SetText(formatFloat(round1(hy * 2)))
 	}
 	s.markEditDirty()
 }

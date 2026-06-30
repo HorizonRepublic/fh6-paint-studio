@@ -217,6 +217,7 @@ func (s *AppState) applyPaletteColor(c color.NRGBA) {
 	if !s.selValid() {
 		return
 	}
+	s.beginEditUndo()
 	sh := &s.EditShapes[s.EditSel]
 	if len(sh.Color) < 4 {
 		nc := make([]int, 4)
@@ -447,6 +448,10 @@ func (s *AppState) populateInspector() {
 	s.inspH.SetText(formatFloat(round1(hy * 2)))
 	s.inspRot.SetText(formatFloat(round1(shapeTheta(sh))))
 	s.populateColorSliders()
+	if s.editDrag.kind == dragNone { // settle the undo baseline for live field/colour edits on selection change
+		s.editPre = cloneShapes(s.EditShapes)
+		s.editSession = false
+	}
 }
 
 // populateColorSliders sets the R/G/B/A sliders (0..1) from the selected shape's colour.
@@ -511,6 +516,7 @@ func (s *AppState) readInspector() {
 		s.pickVf.Value = float32(v)
 	}
 	if changed {
+		s.beginEditUndo()
 		s.markEditDirty()
 	}
 }

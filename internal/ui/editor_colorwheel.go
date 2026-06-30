@@ -161,6 +161,7 @@ func (s *AppState) applyHSV() {
 	if !s.selValid() {
 		return
 	}
+	s.beginEditUndo()
 	c := hsvToRGB(s.pickH*360, s.pickS, s.pickV)
 	sh := &s.EditShapes[s.EditSel]
 	if len(sh.Color) < 4 {

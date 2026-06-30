@@ -340,6 +340,8 @@ type AppState struct {
 	panLast        f32.Point     // last pan pointer position
 	editWantFocus  bool          // request canvas key focus next frame (Ctrl+Z / Delete)
 	editUndo       [][]model.Shape
+	editPre        []model.Shape    // pre-edit snapshot for the current live-edit session (inspector fields / colour)
+	editSession    bool             // a live-edit session is in progress (one coalesced undo step until selection/drag changes)
 	editOp         paint.ImageOp    // cached render of EditShapes; rebuilt only when editDirty
 	editDirty      bool             // EditShapes changed → re-render on the next editorArea pass
 	editDragBase   *image.NRGBA     // pre-rendered shapes EXCEPT the dragged one, for live composite during a drag

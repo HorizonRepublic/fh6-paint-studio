@@ -594,6 +594,69 @@ func TestCommitRecentColorIsDeduped(t *testing.T) {
 	}
 }
 
+func TestInspectorEditIsUndoableAndCoalesced(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.populateInspector() // settle the undo baseline
+	s.inspX.SetText("50")
+	s.readInspector() // move shape1 from x=20 to 50
+	if len(s.editUndo) != 1 {
+		t.Fatalf("first field edit pushed %d undo steps, want 1", len(s.editUndo))
+	}
+	s.inspY.SetText("60")
+	s.readInspector() // same session → coalesced
+	if len(s.editUndo) != 1 {
+		t.Fatalf("coalesced session grew undo to %d, want 1", len(s.editUndo))
+	}
+	s.undo()
+	if s.EditShapes[1].Data[0] != 20 {
+		t.Fatalf("undo did not restore x: got %v, want 20", s.EditShapes[1].Data[0])
+	}
+}
+
+func TestColorEditIsUndoable(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.populateInspector()
+	r0 := s.EditShapes[1].Color[0]
+	s.pickH, s.pickS, s.pickV = 0.5, 0.8, 0.7
+	s.applyHSV()
+	if len(s.editUndo) != 1 {
+		t.Fatalf("colour edit pushed %d undo steps, want 1", len(s.editUndo))
+	}
+	s.undo()
+	if s.EditShapes[1].Color[0] != r0 {
+		t.Fatalf("undo did not restore colour: got %v, want %v", s.EditShapes[1].Color[0], r0)
+	}
+}
+
+func TestScaleSelectionResizesAndUndoes(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1) // ellipse hx=hy=5
+	s.populateInspector()
+	s.scaleSelection(2)
+	if hx, _ := shapeHalfExtents(s.EditShapes[1]); math.Abs(hx-10) > 1e-9 {
+		t.Fatalf("scaled half-extent = %v, want 10", hx)
+	}
+	if len(s.editUndo) != 1 {
+		t.Fatalf("scale pushed %d undo steps, want 1", len(s.editUndo))
+	}
+	s.undo()
+	if hx, _ := shapeHalfExtents(s.EditShapes[1]); math.Abs(hx-5) > 1e-9 {
+		t.Fatalf("undo did not restore size: %v", hx)
+	}
+}
+
+func TestScaleSelectionSkipsLocked(t *testing.T) {
+	s := multiDoc()
+	s.EditShapes[1].Locked = true
+	s.selectSingle(1)
+	s.scaleSelection(2)
+	if hx, _ := shapeHalfExtents(s.EditShapes[1]); math.Abs(hx-5) > 1e-9 {
+		t.Fatalf("locked shape was scaled: %v", hx)
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()
