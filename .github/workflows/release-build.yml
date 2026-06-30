@@ -16,6 +16,11 @@ on:
         description: "Release tag to build and attach assets to (e.g. v0.1.0)"
         required: true
         type: string
+      publish_nexus:
+        description: "Also publish this build to Nexus Mods (manual republish of a tag)"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - "scripts/**"
@@ -106,13 +111,13 @@ jobs:
       # touch Nexus, so re-attaching GitHub assets can't create a duplicate Nexus version. Runs last,
       # after the GitHub release is already populated, so a Nexus hiccup never blocks the release.
       - name: Nexus version string
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_nexus)
         shell: pwsh
         run: |
           $v = '${{ inputs.tag }}'.TrimStart('v')
           "NEXUS_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Publish to Nexus Mods
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_nexus)
         uses: Nexus-Mods/upload-action@v1.0.0-beta.8
         with:
           api_key: ${{ secrets.NEXUS_API_KEY }}
