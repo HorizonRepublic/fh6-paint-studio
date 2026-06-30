@@ -3,6 +3,7 @@ package ui
 import (
 	"image"
 	"image/color"
+	"image/draw"
 	"math"
 	"sort"
 	"strings"
@@ -447,6 +448,7 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	s.arrayCount.SingleLine = true
 	s.arrayCount.SetText("6")
 	s.symMode = symOff
+	s.fastDrag = true
 	s.EditorMode = true
 	s.View = ViewEditor
 }
@@ -493,24 +495,22 @@ func (s *AppState) editorArea(gtx C) D {
 	s.canvasImgRect = rect // recorded for the drag-and-drop drop mapping
 
 	cl := clip.Rect(vp).Push(gtx.Ops)
-	// During a shape drag, composite ONLY the selected shape(s) over the pre-rendered base. Off-drag,
-	// rebuild the full render when dirty, then let overlayOp add the pulsing selection tint / placement
-	// ghost on top of a copy.
-	if s.editDrag.kind != dragNone && s.editDragBase != nil && len(s.editDragSkip) > 0 {
+	dragging := s.editDrag.kind != dragNone && s.editDragBase != nil && len(s.editDragSkip) > 0
+	// During a shape drag, composite ONLY the selected shape(s) over the pre-rendered base. The fast path
+	// keeps that base as a texture uploaded once and re-rasters just the dragged shape's region each frame
+	// (drawn after the base); the slow path rebuilds the whole canvas image per frame. Off-drag, rebuild the
+	// full render when dirty, then let overlayOp add the pulsing selection tint on top of a copy.
+	switch {
+	case dragging && s.fastDrag:
+		s.editOp = s.editDragBaseOp
+	case dragging:
 		img := image.NewNRGBA(s.editDragBase.Bounds())
 		copy(img.Pix, s.editDragBase.Pix)
-		ks := make([]int, 0, len(s.editDragSkip))
-		for i := range s.editDragSkip {
-			ks = append(ks, i)
-		}
-		sort.Ints(ks) // composite in z-order
-		for _, i := range ks {
-			if i >= 0 && i < len(s.EditShapes) {
-				imageio.CompositeShapeOnto(img, s.EditShapes[i], s.EditW, s.EditH)
-			}
+		for _, i := range s.dragIndices() {
+			imageio.CompositeShapeOnto(img, s.EditShapes[i], s.EditW, s.EditH)
 		}
 		s.editOp = paint.NewImageOp(img)
-	} else {
+	default:
 		if s.editDirty {
 			s.editImg = imageio.RenderFH6Image(s.EditShapes, true, s.EditW, s.EditH, 1)
 			s.editDirty = false
@@ -519,6 +519,9 @@ func (s *AppState) editorArea(gtx C) D {
 	}
 	s.drawCanvasBackdrop(gtx, rect)
 	drawImageIn(gtx, s.editOp, rect)
+	if dragging && s.fastDrag {
+		s.drawDragSprite(gtx, rect)
+	}
 	s.drawCanvasGuide(gtx, vp, rect)
 	s.drawSymmetryAxis(gtx, vp, rect)
 	if s.selCount() > 1 {
@@ -542,6 +545,53 @@ func (s *AppState) editorArea(gtx C) D {
 		gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(40 * time.Millisecond)})
 	}
 	return D{Size: sz}
+}
+
+// dragIndices is the sorted, valid set of shapes being dragged (z-order for compositing).
+func (s *AppState) dragIndices() []int {
+	out := make([]int, 0, len(s.editDragSkip))
+	for i := range s.editDragSkip {
+		if i >= 0 && i < len(s.EditShapes) {
+			out = append(out, i)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// drawDragSprite refreshes only the dragged shapes' region: it copies that sub-rectangle of the cached
+// base, composites the dragged shapes onto it (the exact linear-light render, just localized), and draws
+// that small sprite over the base — so a drag costs a tiny raster + upload instead of the whole canvas.
+func (s *AppState) drawDragSprite(gtx C, rect image.Rectangle) {
+	idx := s.dragIndices()
+	if len(idx) == 0 {
+		return
+	}
+	bx0, by0, bx1, by1, first := 0, 0, 0, 0, true
+	for _, i := range idx {
+		sh := s.EditShapes[i]
+		x0, y0, x1, y1 := raster.BBox(model.KindFromType(sh.Type), model.ParamsFromShape(sh), s.EditW, s.EditH)
+		if first {
+			bx0, by0, bx1, by1, first = x0, y0, x1, y1, false
+		} else {
+			bx0, by0 = min(bx0, x0), min(by0, y0)
+			bx1, by1 = max(bx1, x1), max(by1, y1)
+		}
+	}
+	if first {
+		return
+	}
+	b := image.Rect(bx0-1, by0-1, bx1+2, by1+2).Intersect(image.Rect(0, 0, s.EditW, s.EditH))
+	if b.Empty() {
+		return
+	}
+	sprite := image.NewNRGBA(b)
+	draw.Draw(sprite, b, s.editDragBase, b.Min, draw.Src)
+	for _, i := range idx {
+		imageio.CompositeShapeOnto(sprite, s.EditShapes[i], s.EditW, s.EditH)
+	}
+	screen := imgBBoxToScreen(rect, b.Min.X, b.Min.Y, b.Max.X-1, b.Max.Y-1, s.EditW, s.EditH)
+	drawImageIn(gtx, paint.NewImageOp(sprite), screen)
 }
 
 // selValid reports whether a selectable shape (not the background) is currently selected.
@@ -931,6 +981,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 				s.pushUndo(s.editDrag.start)
 				s.editDrag = editorDrag{}
 				s.editDragBase = nil
+				s.editDragBaseOp = paint.ImageOp{}
 				s.editDragSkip = nil
 				s.markEditDirty() // full render now that the drag is committed
 			}
@@ -1330,6 +1381,9 @@ func (s *AppState) startTransform(kind, handle int, fp f32.Point) {
 		}
 		s.editDragSkip = skip
 		s.editDragBase = imageio.RenderFH6ImageSkipSet(s.EditShapes, true, s.EditW, s.EditH, skip)
+		if s.fastDrag {
+			s.editDragBaseOp = paint.NewImageOp(s.editDragBase) // upload the static base once, not every frame
+		}
 	}
 	s.editDrag = d
 }

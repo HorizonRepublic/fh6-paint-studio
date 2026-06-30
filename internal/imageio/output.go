@@ -236,6 +236,21 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 	cb := model.SRGBToLinear(float32(s.Color[2]) / 255)
 	isGrad := raster.IsGradient(kind)
 	xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
+	// Clamp the write window to img's bounds (which may be a sub-rectangle of the full w×h canvas) and
+	// index via PixOffset, so this also composites into a small sprite covering just the shape's region.
+	b := img.Bounds()
+	if xMin < b.Min.X {
+		xMin = b.Min.X
+	}
+	if yMin < b.Min.Y {
+		yMin = b.Min.Y
+	}
+	if xMax > b.Max.X-1 {
+		xMax = b.Max.X - 1
+	}
+	if yMax > b.Max.Y-1 {
+		yMax = b.Max.Y - 1
+	}
 	for y := yMin; y <= yMax; y++ {
 		for x := xMin; x <= xMax; x++ {
 			aEff := a
@@ -248,7 +263,7 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 			} else if !raster.Inside(kind, p, x, y) {
 				continue
 			}
-			q := (y*w + x) * 4
+			q := img.PixOffset(x, y)
 			br := model.SRGBToLinear(float32(img.Pix[q+0]) / 255)
 			bg := model.SRGBToLinear(float32(img.Pix[q+1]) / 255)
 			bb := model.SRGBToLinear(float32(img.Pix[q+2]) / 255)

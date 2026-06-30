@@ -342,6 +342,8 @@ type AppState struct {
 	editOp         paint.ImageOp    // cached render of EditShapes; rebuilt only when editDirty
 	editDirty      bool             // EditShapes changed → re-render on the next editorArea pass
 	editDragBase   *image.NRGBA     // pre-rendered shapes EXCEPT the dragged one, for live composite during a drag
+	editDragBaseOp paint.ImageOp    // editDragBase uploaded once at drag start (fast-drag: base stays a cached GPU texture)
+	fastDrag       bool             // fast-drag path: cache the static base, re-raster only the dragged shape's region
 	EditBtn        widget.Clickable // enter the editor from a generated result
 	NewBlankBtn    widget.Clickable // enter the editor on a blank canvas
 	EditorTab      widget.Clickable // top-bar Editor tab
