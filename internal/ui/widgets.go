@@ -120,8 +120,13 @@ func (t *Theme) SecondaryButton(gtx C, btn *widget.Clickable, label string, enab
 // stack has something to apply and goes grey when it is empty, so the available direction is obvious.
 func (t *Theme) ArrowButton(gtx C, btn *widget.Clickable, left bool, enabled bool) D {
 	fg, bg := t.Accent, t.SurfaceHi
-	if !enabled {
+	switch {
+	case !enabled:
 		fg, bg = t.TextDim, t.Surface
+	case btn.Pressed():
+		bg = lerpColor(t.SurfaceHi, t.Accent, 0.40) // clear press feedback
+	case btn.Hovered():
+		bg = lerpColor(t.SurfaceHi, t.Accent, 0.18) // hover highlight
 	}
 	return btn.Layout(gtx, func(gtx C) D {
 		return layout.Stack{Alignment: layout.Center}.Layout(gtx,

@@ -377,6 +377,24 @@ func (s *AppState) pushUndo(snapshot []model.Shape) {
 	s.editRedo = nil
 }
 
+// finishDrag commits an active drag: it records an undo step only if the drag actually changed something
+// (a click that selects a shape but never moves it must not push a no-op snapshot, or undo appears dead),
+// then clears the drag state and triggers a full re-render.
+func (s *AppState) finishDrag() {
+	if s.editDrag.kind == dragNone {
+		return
+	}
+	if s.editDragMoved {
+		s.pushUndo(s.editDrag.start)
+	}
+	s.editDrag = editorDrag{}
+	s.editDragBase = nil
+	s.editDragBaseOp = paint.ImageOp{}
+	s.editDragSkip = nil
+	s.editDragMoved = false
+	s.markEditDirty()
+}
+
 // undo restores the most recent pre-edit snapshot, pushing the current state onto the redo stack.
 func (s *AppState) undo() {
 	if len(s.editUndo) == 0 {
@@ -961,6 +979,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 			} else if s.editMarqueeOn {
 				s.editMarqueeB = pxToFrac(pe.Position, rect)
 			} else {
+				s.editDragMoved = true
 				s.editShift = pe.Modifiers.Contain(key.ModShift)
 				s.editAlt = pe.Modifiers.Contain(key.ModAlt)
 				scale := float64(rect.Dx()) / math.Max(float64(s.EditW), 1)
@@ -978,12 +997,7 @@ func (s *AppState) updateCanvas(gtx C, sz image.Point) {
 				s.finishMarquee()
 				s.editMarqueeOn = false
 			} else if s.editDrag.kind != dragNone {
-				s.pushUndo(s.editDrag.start)
-				s.editDrag = editorDrag{}
-				s.editDragBase = nil
-				s.editDragBaseOp = paint.ImageOp{}
-				s.editDragSkip = nil
-				s.markEditDirty() // full render now that the drag is committed
+				s.finishDrag()
 			}
 			s.snapShowX, s.snapShowY = false, false
 		}
@@ -1386,6 +1400,7 @@ func (s *AppState) startTransform(kind, handle int, fp f32.Point) {
 		}
 	}
 	s.editDrag = d
+	s.editDragMoved = false
 }
 
 // dragEditor recomputes the selected shape for the current pointer fraction, per the active drag kind.

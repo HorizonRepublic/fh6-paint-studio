@@ -515,6 +515,27 @@ func TestMirrorWholeDesignReflectsEveryShape(t *testing.T) {
 	}
 }
 
+func TestClickSelectPushesNoUndo(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.startTransform(dragMove, 0, f32.Point{X: 0.2, Y: 0.2}) // press to select, never dragged
+	s.finishDrag()
+	if len(s.editUndo) != 0 {
+		t.Fatalf("a click-to-select pushed %d undo steps, want 0", len(s.editUndo))
+	}
+}
+
+func TestRealDragPushesOneUndo(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.startTransform(dragMove, 0, f32.Point{X: 0.2, Y: 0.2})
+	s.editDragMoved = true // updateCanvas sets this on the first Drag event
+	s.finishDrag()
+	if len(s.editUndo) != 1 {
+		t.Fatalf("a move pushed %d undo steps, want 1", len(s.editUndo))
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()

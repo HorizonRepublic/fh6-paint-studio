@@ -328,6 +328,7 @@ type AppState struct {
 	EditW, EditH   int           // canvas size of the working doc
 	EditSel        int           // selected shape index, -1 = none
 	editDrag       editorDrag    // active drag (kind + start snapshot)
+	editDragMoved  bool          // the active drag actually moved/scaled/rotated (else a click-to-select pushes no undo)
 	editSelExtra   map[int]bool  // multi-select: selected shapes OTHER than the primary EditSel (nil/empty = single-select)
 	editDragSkip   map[int]bool  // shapes excluded from editDragBase, re-composited live each drag frame (1 for single, N for a group move)
 	editMarqueeOn  bool          // a rubber-band (marquee) selection is in progress
