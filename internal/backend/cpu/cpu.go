@@ -65,6 +65,10 @@ func (c *CPU) SetWeight(weight []float32) {
 
 var _ backend.Backend = (*CPU)(nil)
 
+// MasksOnDevice reports mask-word support: the CPU reference renders the bank natively via
+// raster.Coverage, so the engine's glyph proposer is always available here.
+func (c *CPU) MasksOnDevice() bool { return true }
+
 // Evaluate scores all candidates in parallel across CPU cores. evalShape only
 // reads shared state (target/canvas/weight) and writes to a distinct out[i],
 // so concurrent evaluation is data-race free.

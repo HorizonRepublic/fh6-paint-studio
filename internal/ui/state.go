@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image"
+	"image/color"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"gioui.org/op/paint"
 	"gioui.org/widget"
 
+	"fh6-paint-studio/internal/i18n"
+	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/userpreset"
 )
@@ -32,6 +35,7 @@ type View int
 const (
 	ViewStudio View = iota
 	ViewLibrary
+	ViewEditor
 )
 
 // RunStats is the live telemetry shown in the run panel.
@@ -106,6 +110,7 @@ type AppState struct {
 	Version      string
 	BackendLabel string
 	Backend      *Dropdown // engine picker (CUDA/Vulkan); nil when only one backend works (no choice to make)
+	Lang         *Dropdown // UI language picker (endonym options); drives i18n.SetLocale
 
 	// loaded image
 	ImgPath   string
@@ -147,6 +152,7 @@ type AppState struct {
 	Backfit      widget.Bool
 	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
 	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	SourceRes    widget.Bool // fit the ENGINE at the image's original resolution instead of the working cap — maximum detail on large sources, much slower (display stays at the working size)
 	Mono         widget.Bool // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
 	Economy      widget.Bool // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
 	Seed         widget.Editor
@@ -155,6 +161,7 @@ type AppState struct {
 	BackfitHint    Hint
 	BoundaryHint   Hint
 	KeepInsideHint Hint
+	SourceResHint  Hint
 	MonoHint       Hint
 	EconomyHint    Hint
 	BudgetHint     Hint
@@ -202,6 +209,7 @@ type AppState struct {
 	KindsHint       Hint
 	KindWeightEds   []widget.Editor // one per kind (parallel to preset.KindNames); only selected ones render
 	KindWeightsHint Hint
+	ShapeChips      []widget.Clickable // "Used shapes" icon toggles in Adjust — a second view on KindsSel
 
 	StandoutSlider widget.Float // post-polish standout suppression tolerance; 0 = off
 	StandoutHint   Hint
@@ -233,10 +241,8 @@ type AppState struct {
 	// actions
 	OpenBtn          widget.Clickable
 	PreviewOpen      widget.Clickable // the empty-state preview area doubles as an Open button
-	Recent           []string         // recently opened image paths (newest first); rendered in the Source card
-	RecentBtns       []widget.Clickable
-	escTag           int // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
-	lightboxTag      int // pointer tag for the lightbox scrim — captures clicks so they dismiss it (and don't fall through to the gallery thumbs behind)
+	escTag           int              // key-focus tag for Esc-dismisses-overlay (focus is only grabbed while a modal is up)
+	lightboxTag      int              // pointer tag for the lightbox scrim — captures clicks so they dismiss it (and don't fall through to the gallery thumbs behind)
 	GenBtn           widget.Clickable
 	CancelBtn        widget.Clickable
 	InjectLayers     widget.Editor // exact FH6 template layer count for injection (library inject controls)
@@ -315,6 +321,162 @@ type AppState struct {
 	// scrolling
 	LeftScroll widget.List // left column (source + settings) — scrolls when toggles overflow the height
 	LogList    widget.List
+
+	// Shape editor (opt-in mode; see editor.go). Working on a deep COPY so Cancel discards cleanly.
+	EditorMode     bool
+	EditShapes     []model.Shape // working copy being edited
+	EditW, EditH   int           // canvas size of the working doc
+	EditSel        int           // selected shape index, -1 = none
+	editDrag       editorDrag    // active drag (kind + start snapshot)
+	editDragMoved  bool          // the active drag actually moved/scaled/rotated (else a click-to-select pushes no undo)
+	editSelExtra   map[int]bool  // multi-select: selected shapes OTHER than the primary EditSel (nil/empty = single-select)
+	editDragSkip   map[int]bool  // shapes excluded from editDragBase, re-composited live each drag frame (1 for single, N for a group move)
+	editMarqueeOn  bool          // a rubber-band (marquee) selection is in progress
+	editMarqueeAdd bool          // marquee unions into the current selection instead of replacing it (Ctrl held)
+	editMarqueeA   f32.Point     // marquee start corner (image fraction)
+	editMarqueeB   f32.Point     // marquee current corner (image fraction)
+	editPanning    bool          // middle/secondary-button canvas pan in progress
+	editShift      bool          // Shift held during the active drag (rotate snaps to 15°)
+	panLast        f32.Point     // last pan pointer position
+	editWantFocus  bool          // request canvas key focus next frame (Ctrl+Z / Delete)
+	editUndo       [][]model.Shape
+	editPre        []model.Shape    // pre-edit snapshot for the current live-edit session (inspector fields / colour)
+	editSession    bool             // a live-edit session is in progress (one coalesced undo step until selection/drag changes)
+	editOp         paint.ImageOp    // cached render of EditShapes; rebuilt only when editDirty
+	editDirty      bool             // EditShapes changed → re-render on the next editorArea pass
+	editDragBase   *image.NRGBA     // pre-rendered shapes EXCEPT the dragged one, for live composite during a drag
+	editDragBaseOp paint.ImageOp    // editDragBase uploaded once at drag start (fast-drag: base stays a cached GPU texture)
+	fastDrag       bool             // fast-drag path: cache the static base, re-raster only the dragged shape's region
+	EditBtn        widget.Clickable // enter the editor from a generated result
+	NewBlankBtn    widget.Clickable // enter the editor on a blank canvas
+	EditorTab      widget.Clickable // top-bar Editor tab
+	EditSaveBtn    widget.Clickable // save the design to the library
+	editKeyTag     int              // key-focus tag for Ctrl+Z / Ctrl+Shift+Z / Delete
+
+	// editor save flow: a name field + an override-on-name confirmation + transient "saved" feedback.
+	EditName          widget.Editor
+	EditOverrideBtn   widget.Clickable
+	EditSaveCancelBtn widget.Clickable
+	editSavePending   bool   // a name-collision override confirmation is showing
+	editPendingName   string // the name awaiting override confirmation
+	editSavedMsg      string // transient post-save feedback
+	editSavedUntil    time.Time
+
+	// editor canvas zoom + pan
+	editZoom                             float64 // 1 = fit
+	editPan                              f32.Point
+	editZoomIn, editZoomOut, editZoomFit widget.Clickable
+
+	// editor inspector: numeric controls for the selected shape (two-way synced) + colour picker.
+	inspFor                             int         // shape index the fields currently reflect (-1 = none)
+	inspShape                           model.Shape // snapshot of that shape — if it changes by another path (undo/nudge), refresh the fields
+	inspX, inspY, inspW, inspH, inspRot widget.Editor
+	editForward, editBack               widget.Clickable
+	editDup, editDelete                 widget.Clickable
+	editMirror                          widget.Clickable    // mirror the selection left↔right (across the vertical centre)
+	editMirrorV                         widget.Clickable    // mirror the selection up↕down (across the horizontal centre)
+	alignBtns                           [8]widget.Clickable // L,Cx,R,T,My,B, distribute-H, distribute-V
+	colorSwatchBtn                      widget.Clickable    // opens the colour picker
+	colorPickerOpen                     bool
+	pickR, pickG, pickB, pickA          widget.Float     // R/G/B/Alpha sliders (0..1)
+	eyedropBtn                          widget.Clickable // eyedropper toggle
+	eyedropMode                         bool             // next canvas click samples a colour
+	editImg                             *image.NRGBA     // last full render, sampled by the eyedropper
+	recentColors                        []color.NRGBA    // recently applied colours
+	recentBtns                          []widget.Clickable
+
+	// editor array/radial duplicate: repeat the selection in a row or evenly around the canvas centre.
+	arrayCount   widget.Editor // how many copies in total (2..24)
+	arrayRowBtn  widget.Clickable
+	arrayRingBtn widget.Clickable
+
+	// editor palette + layers + redo (the undo stack is editUndo above).
+	palCircle, palSquare, palTriangle widget.Clickable
+	palGlow, palDisk                  widget.Clickable
+	editUndoBtn, editRedoBtn          widget.Clickable
+	editRedo                          [][]model.Shape
+	editLayerList                     widget.List
+	editLayerBtns                     []widget.Clickable
+	editLockBtns                      []widget.Clickable // per-row lock toggle
+	layerDrags                        []gesture.Drag     // per-row drag-to-reorder grips
+	layerDragFrom                     int                // shape index being dragged (-1 = none)
+	layerDragAccum                    float64            // accumulated drag px toward the next row swap
+	layerDragLastY                    float32            // last drag pointer Y
+	layerDragMoved                    bool               // a swap happened this drag (one undo per drag)
+
+	// editor bank palette (curves/decorative/glyphs), always shown in the left column.
+	bankList        widget.List
+	bankBtns        []widget.Clickable
+	bankThumbs      []paint.ImageOp
+	bankRows        []bankRow
+	bankThumbsBuilt bool
+
+	// editor double-click-to-spawn: a single stray click on a palette item no longer spawns a shape; a
+	// double-click drops it on the canvas.
+	dblTag int       // which palette fired the previous click (1=bank thumbnail, 2=primitive chip)
+	dblIdx int       // index within that palette
+	dblAt  time.Time // timestamp of that click
+
+	// editor destructive-action confirmation (red two-step buttons)
+	clearArmed   bool
+	clearArmedAt time.Time
+	EditNewBtn   widget.Clickable // reset the editor to a blank canvas (armed confirm)
+
+	// editor HSV colour wheel (continuous picker for any RGBA)
+	pickH, pickS, pickV float64      // authoritative HSV of the current colour (hue+sat = disc, value = slider)
+	pickVf              widget.Float // brightness/value slider
+	colorWheelTag       int          // pointer focus tag for the disc
+	colorWheelOp        paint.ImageOp
+	colorWheelSize      int // px side the cached disc was built at
+	colorWheelV         int // value bucket (0..20) the cached disc was built for
+	colorWheelBuilt     bool
+
+	// editor layer icons: cached glyph thumbnails for mask shapes, keyed by word id
+	layerThumbs map[uint16]paint.ImageOp
+
+	// editor canvas backdrop / measurement guide (checkerboard / grid / ruler), cycled from the toolbar
+	canvasGuide int
+	GuideBtn    widget.Clickable
+
+	// editor smart snapping (toolbar toggle, default OFF). While moving a shape/group its bbox edges and
+	// centres snap to other shapes, the canvas edges/centre and (when the grid guide is on) grid lines;
+	// Alt suspends it for the duration of the press.
+	snapOn        bool             // toggle state
+	SnapBtn       widget.Clickable // toolbar toggle button
+	editAlt       bool             // Alt held during the active drag (suspends snapping)
+	snapThreshImg float64          // snap distance for this drag, in image px (screen threshold ÷ zoom)
+	snapGridStep  float64          // grid spacing in image px to snap to (0 = grid not active)
+	snapGuideX    float64          // active vertical snap line (image px)
+	snapGuideY    float64          // active horizontal snap line (image px)
+	snapShowX     bool             // a vertical guide is active this frame
+	snapShowY     bool             // a horizontal guide is active this frame
+
+	// editor symmetry stamping: a toolbar cycle (off / mirror-across-vertical / mirror-across-horizontal).
+	// While on, every added shape also drops a mirrored copy; "Mirror all" reflects the whole design.
+	symMode      int // symOff / symVert / symHorz
+	SymBtn       widget.Clickable
+	MirrorAllBtn widget.Clickable
+
+	// editor shortcuts legend (a "?" toolbar toggle opens a dismiss-on-click overlay)
+	showShortcuts bool
+	ShortcutsBtn  widget.Clickable
+	shortcutsTag  int // pointer tag for the dismiss scrim
+
+	// editor drag-and-drop: drag a shape from the bank/primitive palette onto the canvas. A full-window
+	// pass-through pointer layer tracks the cursor in window coords; the window→canvas offset is observed
+	// while hovering the canvas so the drop maps to the right image position.
+	bankCandKind  int       // 0 none, 1 mask, 2 primitive — a press that may become a drag
+	bankCandWord  int       // mask word (bankCandKind 1)
+	bankCandPrim  int       // primitive kind (bankCandKind 2)
+	bankDragging  bool      // a drag past the threshold is underway (ghost shown)
+	dragTag       int       // top-level pass-through pointer tag
+	dragStartWin  f32.Point // press position (overlay/window coords)
+	dragWin       f32.Point // current cursor (overlay/window coords)
+	canvasHover   bool      // cursor currently over the canvas (offset capture)
+	canvasLocal   f32.Point // cursor in canvas-local coords (last hover)
+	canvasOff     f32.Point // window minus canvas-local (constant while the layout holds)
+	canvasOffOK   bool
+	canvasImgRect image.Rectangle // the zoomed image rect in canvas-local coords
 }
 
 // expertGroup is the collapse state of one expert sub-section.
@@ -353,6 +515,7 @@ func NewAppState(th *Theme) *AppState {
 		allKinds[i] = true
 	}
 	s.KindsSel = NewMultiSelect(preset.KindNames, allKinds)
+	s.ShapeChips = make([]widget.Clickable, len(shapeChipKinds))
 	s.KindWeightEds = make([]widget.Editor, len(preset.KindNames))
 	for i := range s.KindWeightEds {
 		s.KindWeightEds[i].SingleLine = true
@@ -361,6 +524,18 @@ func NewAppState(th *Theme) *AppState {
 	s.GridEd.SingleLine = true
 	s.OverdrawEd.SingleLine = true
 	s.QualityDD = NewDropdown([]string{"fast", "balanced", "max", "quality", "ultra"}, 3)
+	{
+		av := i18n.Available()
+		endonyms := make([]string, len(av))
+		sel := 0
+		for i, l := range av {
+			endonyms[i] = l.Endonym
+			if l.Tag == i18n.Current() {
+				sel = i
+			}
+		}
+		s.Lang = NewDropdown(endonyms, sel)
+	}
 	s.InjectLayers.SingleLine = true
 	s.InjectScale.SingleLine = true
 	s.InjectScale.SetText("1.0")
@@ -517,12 +692,6 @@ func (s *AppState) SetPreview(img *image.NRGBA) {
 	s.PreviewOp = paint.NewImageOp(img)
 }
 
-// SetRecent stores the recently-opened image paths (newest first) and rebuilds their click targets.
-func (s *AppState) SetRecent(paths []string) {
-	s.Recent = paths
-	s.RecentBtns = make([]widget.Clickable, len(paths))
-}
-
 // AppendLog adds a line to the activity feed, inferring its severity from the text (capped to 600).
 func (s *AppState) AppendLog(line string) { s.AppendLogLvl(classifyLog(line), line) }
 
@@ -619,6 +788,11 @@ func (s *AppState) Choices() preset.Choices {
 		c.MonoColor = "auto"
 	}
 	c.Economy = s.Economy.Value // opt-in low-budget co-adaptation (slow); curated toggle, applied in both modes
+	// Used-shapes picker (top of Advanced): a curated control like Mono/Economy — a restricted set keeps
+	// applying even when Advanced is collapsed again. All-on stays "" so the mode keeps its default mix.
+	if s.KindsSel.OnCount() < len(preset.KindNames) {
+		c.Kinds = s.KindsSel.ValueCSV()
+	}
 	if !s.Expert.Value {
 		return c
 	}

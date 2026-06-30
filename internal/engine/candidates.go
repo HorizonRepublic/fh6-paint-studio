@@ -253,6 +253,29 @@ func MutateShape(rng *rand.Rand, base model.Candidate, count int, w, h, moveStep
 	out := make([]model.Candidate, 0, count)
 	for i := 0; i < count; i++ {
 		c := base
+		if model.IsMask(base.Kind) {
+			// Mask stamp [cx,cy,Hx,Hy,rot,skew]: extents are SIGNED (negative Hx = mirror) — jitter
+			// their magnitude, keep the sign and the skew.
+			c.P[0] = clampF(c.P[0]+randRange(rng, -moveStep, moveStep), 0, w-1)
+			c.P[1] = clampF(c.P[1]+randRange(rng, -moveStep, moveStep), 0, h-1)
+			for _, j := range [2]int{2, 3} {
+				mag := c.P[j]
+				if mag < 0 {
+					mag = -mag
+				}
+				mag = maxF(2, mag+randRange(rng, -radiusStep, radiusStep))
+				if c.P[j] < 0 {
+					mag = -mag
+				}
+				c.P[j] = mag
+			}
+			c.P[4] += randRange(rng, -30, 30)
+			if allowAlpha {
+				c.Color.A = clampF(c.Color.A+randRange(rng, -0.1, 0.1), alphaMin, 1)
+			}
+			out = append(out, c)
+			continue
+		}
 		switch base.Kind {
 		case model.KindTriangle:
 			for j := 0; j < 6; j += 2 {

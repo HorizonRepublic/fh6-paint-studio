@@ -1,8 +1,8 @@
 // Package maskbank holds the FH6 native-dictionary silhouettes ("words") as embedded 256² coverage
 // textures. At init it decodes each mask and registers its word with the model (KindMaskBase+i, in
 // manifest order), so the engine can render any dictionary shape 1:1 with the game. The assets are
-// generated from the live calibration by debug/calib/gen_maskbank.py (source masks live in
-// debug/calib/masks/; see docs/research/lineart/MASKSTAMP.md).
+// produced by the local calibration tooling (debug/, not published): exact vector silhouettes with
+// sub-pixel edges and true gradient ramps, framed by the calibrated manifest extents.
 package maskbank
 
 import (
@@ -10,6 +10,7 @@ import (
 	"embed"
 	"encoding/json"
 	"image/png"
+	"strings"
 
 	"fh6-paint-studio/internal/model"
 )
@@ -18,13 +19,45 @@ import (
 var assets embed.FS
 
 // Entry is one decoded mask: a W×H coverage grid (0..1, row-major, v=0 = top) plus the word's native
-// size and the ShapeKind it registered as.
+// size and the ShapeKind it registered as. Category groups the word for the editor palette.
 type Entry struct {
 	Word             uint16
 	Kind             model.ShapeKind
 	NativeW, NativeH float32
 	W, H             int
 	Cov              []float32
+	Label            string
+	Category         string // "primitive" | "curve" | "decorative" | "glyph"
+}
+
+// letterWords is the curated set of alphabet glyph words in the bank (the "glyph" pool is otherwise a
+// grab-bag of decorative decals). This is the contiguous lowercase block 0x04b1..0x04ca — a..z with the
+// font's gaps (no e/p/q/u/y in this bank); there are no digit glyphs.
+var letterWords = func() map[uint16]bool {
+	m := map[uint16]bool{}
+	for w := uint16(0x04b1); w <= 0x04ca; w++ {
+		m[w] = true
+	}
+	return m
+}()
+
+// classify buckets a word for the editor palette: the three hard primitives (surfaced separately),
+// curated letters, curve/arc shapes (by label), and everything else as decorative decals/symbols.
+func classify(label string, word uint16) string {
+	switch word {
+	case 0x65, 0x66, 0x68:
+		return "primitive"
+	}
+	if letterWords[word] {
+		return "letter"
+	}
+	for _, p := range []string{"arc", "gentlearc", "straight", "crescent", "openC", "swoosh", "wave",
+		"half", "quarter", "banana", "boomerang", "lens", "capsule", "dashed", "break", "checkmark"} {
+		if strings.HasPrefix(label, p) {
+			return "curve"
+		}
+	}
+	return "decal" // glyph grab-bag (stars/flames/flags/…) + comma/ring/teardrop/gradbar
 }
 
 type manifestShape struct {
@@ -57,6 +90,7 @@ func init() {
 		entries = append(entries, Entry{
 			Word: ms.Word, Kind: kind, NativeW: ms.NativeW, NativeH: ms.NativeH,
 			W: w, H: h, Cov: cov,
+			Label: ms.Label, Category: classify(ms.Label, ms.Word),
 		})
 	}
 }

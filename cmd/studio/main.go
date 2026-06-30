@@ -27,6 +27,7 @@ import (
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/hybrid"
+	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/inject"
 	"fh6-paint-studio/internal/library"
@@ -95,7 +96,6 @@ func loop(w *app.Window) error {
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
 	st.LastSeen = prefs.LastSeenVersion
-	st.SetRecent(prefs.Recent) // restore the recently-opened images
 
 	// Warm the shell file-dialog infrastructure in the background so the first Open shows the native
 	// dialog without a cold-start delay.
@@ -133,6 +133,18 @@ func loop(w *app.Window) error {
 	if prefs.KeepInside != nil {
 		st.KeepInside.Value = *prefs.KeepInside
 	}
+	if prefs.SourceRes != nil {
+		st.SourceRes.Value = *prefs.SourceRes
+	}
+
+	// Language: an explicit saved choice wins; otherwise match the OS UI language on first run, falling
+	// back to English. The picker reflects whatever we land on.
+	if prefs.Locale != "" {
+		i18n.SetLocale(prefs.Locale)
+	} else if tag, ok := i18n.Detect(); ok {
+		i18n.SetLocale(tag)
+	}
+	st.Lang.Set(i18n.EndonymOf(i18n.Current()))
 
 	q := newEventQueue()
 	var ops op.Ops
@@ -183,36 +195,19 @@ func loop(w *app.Window) error {
 
 	// savePrefs persists the UI preferences (window size + sound) to studio.json — called on exit and
 	// whenever a persisted toggle changes, so a preference survives even an unclean shutdown.
-	recent := append([]string(nil), prefs.Recent...) // recently-opened images, newest first
 	savePrefs := func() {
 		on := st.SoundOn.Value
 		keep := st.KeepInside.Value
+		srcRes := st.SourceRes.Value
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
-			KeepInside: &keep, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
-			LastSeenVersion: st.LastSeen, Recent: recent}
+			KeepInside: &keep, SourceRes: &srcRes, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
+			LastSeenVersion: st.LastSeen, Locale: i18n.Current()}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
 		}
 		saveConfig(c)
 	}
-	// pushRecent moves a freshly-opened image to the front of the recent list (deduped, capped) and
-	// persists it, so it survives a restart and shows in the Source card.
-	pushRecent := func(p string) {
-		if p == "" {
-			return
-		}
-		out := []string{p}
-		for _, q := range recent {
-			if q != p && len(out) < 8 {
-				out = append(out, q)
-			}
-		}
-		recent = out
-		st.SetRecent(recent)
-		savePrefs()
-	}
-
 	post := func(e runner.Event) { q.push(e); w.Invalidate() }
 
 	upd := newUpdater()
@@ -257,6 +252,12 @@ func loop(w *app.Window) error {
 				winW = int(float32(e.Size.X) / e.Metric.PxPerDp)
 				winH = int(float32(e.Size.Y) / e.Metric.PxPerDp)
 			}
+			// A minimized window reports a zero frame size. Re-laying-out and presenting a zero-size
+			// surface every tick while a run drives ~8 fps invalidations can stall the GPU and starve the
+			// Win32 message pump on some drivers — the window then refuses to restore and Windows paints it
+			// "Not Responding" (issue #29). Detect it here; the run still advances (engine events are
+			// drained below), the UI just stops drawing until the window is visible again.
+			minimized := e.Size.X == 0 || e.Size.Y == 0
 
 			// --demo: auto-load the sample image and start a quick run on the first frame
 			// (used to capture a live/finished real-window screenshot for verification).
@@ -393,7 +394,6 @@ func loop(w *app.Window) error {
 					st.SetSource(res.img, res.path)
 					st.Toast = ""
 					st.Log = nil
-					pushRecent(res.path)
 				}
 			}
 
@@ -412,12 +412,6 @@ func loop(w *app.Window) error {
 				// Gio's main thread would make the modal SendMessage to that thread and deadlock.
 				picking = true
 				go func() { openPick.put(pickFile(0)); w.Invalidate() }()
-			}
-			// Reopen a recently-used image (clicked in the Source card).
-			for i := range st.RecentBtns {
-				if st.RecentBtns[i].Clicked(gtx) && !opening && !picking && i < len(st.Recent) {
-					beginOpen(st.Recent[i])
-				}
 			}
 			if p, ok := openPick.take(); ok {
 				picking = false
@@ -457,11 +451,59 @@ func loop(w *app.Window) error {
 					st.Toast = "Reset failed: " + err.Error()
 				}
 			}
+			// Shape editor: enter from a finished generation (Edit) or a blank canvas (New); Apply
+			// commits the edited shapes back as the working geometry + preview, Cancel discards.
+			if st.EditBtn.Clicked(gtx) && len(lastShapes) > 0 {
+				st.EnterEditor(lastShapes, lastW, lastH) // loads the generated design into the editor
+			}
+			if st.NewBlankBtn.Clicked(gtx) {
+				st.EnterEditor(nil, 1024, 1024)
+			}
+			if st.EditorTab.Clicked(gtx) {
+				if st.EditorMode {
+					st.View = ui.ViewEditor // continue the current session
+				} else {
+					st.EnterEditor(nil, 1024, 1024)
+				}
+			}
+			if st.EditSaveBtn.Clicked(gtx) { // persist the edited design to the library (injectable)
+				name := st.SaveDesignName()
+				exists := false
+				if store != nil {
+					if entries, err := store.List(); err == nil {
+						for _, e := range entries {
+							if e.Name == name {
+								exists = true
+								break
+							}
+						}
+					}
+				}
+				if exists {
+					st.RequestOverride(name) // ask before overwriting a same-named design
+				} else {
+					saveEditedDesign(st, store, name, false)
+				}
+			}
+			if st.EditOverrideBtn.Clicked(gtx) {
+				saveEditedDesign(st, store, st.PendingSaveName(), true)
+			}
+			if st.EditSaveCancelBtn.Clicked(gtx) {
+				st.CancelOverride()
+			}
 			if st.GenBtn.Clicked(gtx) && curPrep != nil && st.Phase != ui.PhaseRunning && !opening {
 				st.Toast = ""
 				st.Log = nil
 				// The working source IS the (optionally cropped) image, so generate on curPrep directly.
 				genPrep := curPrep
+				ch := st.Choices()
+				// Hi-res fit (flat/anime): re-decode the ENGINE input at up to genMaxRes — thin strokes
+				// at the display resolution degrade to ~1px of gray AA the search can neither detect nor
+				// cover. The display (and crop UI) stays at studioMaxRes.
+				if hi := hiResPrep(st, ch.Mode, viewAbs, genPrep.W, genPrep.H); hi != nil {
+					genPrep = hi
+					st.AppendLog(fmt.Sprintf("hi-res fit: engine input %dx%d (display stays at %dpx)", hi.W, hi.H, studioMaxRes))
+				}
 				runPadPx, runOrigW, runOrigH = 0, genPrep.W, genPrep.H
 				// Keep shapes inside image: always wrap the target in a transparent surround so the spill
 				// penalty bounds every shape on all four edges, then map the geometry/canvas back to the
@@ -478,7 +520,6 @@ func loop(w *app.Window) error {
 				runCancelled = false
 				runStart = time.Now()
 				tb.indeterminate() // instant taskbar feedback until the first progress tick
-				ch := st.Choices()
 				r := preset.Resolve(*genPrep, ch)
 				hybridInk = 0
 				if preset.IsHybridMode(ch.Mode) { // reserve part of the budget for the FDoG ink (appended in Done)
@@ -668,6 +709,19 @@ func loop(w *app.Window) error {
 						}
 					}
 				}
+				if r.Edit.Clicked(gtx) && store != nil {
+					if g, err := store.LoadGeometry(r.Entry.ID); err == nil {
+						ew, eh := r.Entry.Width, r.Entry.Height
+						if ew <= 0 || eh <= 0 {
+							ew, eh = 1024, 1024
+						}
+						st.EnterEditor(g.Shapes, ew, eh)
+						st.EditName.SetText(r.Entry.Name)
+					} else {
+						st.Toast = "Load failed: " + err.Error()
+					}
+					continue
+				}
 				if r.Export.Clicked(gtx) && store != nil && !saving {
 					saving = true
 					pendingExportID = r.Entry.ID
@@ -736,7 +790,9 @@ func loop(w *app.Window) error {
 				if !runStart.IsZero() {
 					st.Stats.Elapsed = time.Since(runStart)
 				}
-				gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(120 * time.Millisecond)})
+				if !minimized { // don't self-wake to redraw a hidden window; engine events still wake us
+					gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(120 * time.Millisecond)})
+				}
 			}
 			// Keep the frame ticking while an inject spinner is up; revert a lingering tick/cross pill on time.
 			if st.InjectBusy() {
@@ -750,6 +806,9 @@ func loop(w *app.Window) error {
 			if st.SoundOn.Update(gtx) { // persist the "sound on finish" toggle the moment it changes
 				savePrefs()
 			}
+			if st.SourceRes.Update(gtx) { // persist the "use source resolution" toggle the moment it changes
+				savePrefs()
+			}
 			if st.InjectLayersErr { // clear the red FH6-layers highlight once a valid count is entered
 				if l, _ := injectParams(st); l > 0 {
 					st.InjectLayersErr = false
@@ -759,10 +818,20 @@ func loop(w *app.Window) error {
 				w.Option(app.Title(title))
 				lastTitle = title
 			}
+			if minimized { // nothing visible to draw — acknowledge the frame cheaply (see the zero-size note)
+				e.Frame(gtx.Ops)
+				break
+			}
 			st.Layout(gtx)
 			if st.Backend != nil && st.Backend.Changed() { // engine picker -> bias the next run's backend
 				runner.BackendPreference = st.Backend.Value()
 				st.BackendLabel = "shape engine · " + st.Backend.Value()
+			}
+			if st.Lang.Changed() { // user picked a language -> switch live and persist
+				if tag := i18n.TagForEndonym(st.Lang.Value()); tag != "" {
+					i18n.SetLocale(tag)
+					savePrefs()
+				}
 			}
 			e.Frame(gtx.Ops)
 		}
@@ -919,6 +988,34 @@ func saveDecalToLibrary(st *ui.AppState, store *library.Store, shapes []model.Sh
 	reloadLibrary(st, store)
 }
 
+// saveEditedDesign saves an edited design to the library under name, optionally overwriting same-named
+// entries first (manual designs allow override; auto-generations never do). Shows in-editor feedback.
+func saveEditedDesign(st *ui.AppState, store *library.Store, name string, override bool) {
+	if store == nil || len(st.EditShapes) == 0 {
+		return
+	}
+	st.SetPreview(imageio.RenderFH6Image(st.EditShapes, true, st.EditW, st.EditH, 1))
+	if override {
+		if entries, err := store.List(); err == nil {
+			for _, e := range entries {
+				if e.Name == name {
+					_ = store.Delete(e.ID)
+				}
+			}
+		}
+	}
+	meta := libMeta(st, st.EditW, st.EditH)
+	meta.Name = name
+	if _, err := store.Save(st.EditShapes, st.Preview, meta); err != nil {
+		st.AppendLog("library save: " + err.Error())
+		st.Toast = "Save failed: " + err.Error()
+		st.CancelOverride()
+		return
+	}
+	reloadLibrary(st, store)
+	st.SetSavedFeedback(name)
+}
+
 // exportLibraryEntry copies a stored generation's geometry to dst (+ preview.png beside it).
 func exportLibraryEntry(store *library.Store, id, dst string) string {
 	if store == nil {
@@ -1037,6 +1134,59 @@ func loadCropRegion(path string, abs image.Rectangle) (*imageio.Prepared, *image
 		return nil, nil, err
 	}
 	return prep, nrgbaFromPrep(prep), nil
+}
+
+// genMaxRes is the engine-side fit resolution for the modes that benefit from it. Thin strokes at
+// studioMaxRes degrade to ~1px of gray AA the search can neither detect nor cover; fitting the same
+// budget at up to this long side measured (seed 1, NEXTGEN): line-art 3541px native −69% SSE, flat
+// 1560px −21%, anime 1920px −11% — with no low-view tradeoff and ≤2× wall. Photo measured a wash and
+// stays at studioMaxRes.
+const genMaxRes = 2000
+
+// srcResCap bounds the "Use source resolution" toggle: measured on a 3541px line-art source the
+// gain keeps growing all the way to native (−40% vs the 2000 cap, no low-view tradeoff, ~2× wall),
+// so the toggle fits at the TRUE source size — this ceiling only protects time/VRAM from
+// pathological scans.
+const srcResCap = 4096
+
+// hiResPrep re-decodes the current view for the ENGINE above the display cap when it pays: at
+// genMaxRes for the modes measured to benefit (flat/anime), or at the source's own resolution for
+// ANY mode when the user asks for maximum quality (the "Use source resolution" toggle). Returns nil
+// to fit on the display-resolution prep: no benefit for the mode, sources at/below studioMaxRes, no
+// source path (demo), or a failed re-decode. The re-derivation mirrors the state exactly: un-cropped
+// views go through the same auto-crop (+checker-strip) pipeline as loadImage; crops re-use the crop
+// tool's absolute-rect primitive, so the engine sees the same content rectangle at a higher
+// resolution.
+func hiResPrep(st *ui.AppState, mode string, viewAbs image.Rectangle, curW, curH int) *imageio.Prepared {
+	capPx := srcResCap
+	if !st.SourceRes.Value {
+		switch preset.PresetMode(mode) {
+		case "flat", "anime":
+			capPx = genMaxRes
+		default:
+			return nil
+		}
+	}
+	if st.ImgPath == "" || (curW < studioMaxRes && curH < studioMaxRes) {
+		return nil // demo source, or the display load never hit the cap — nothing extra to gain
+	}
+	var (
+		prep *imageio.Prepared
+		err  error
+	)
+	if st.Cropped {
+		prep, err = imageio.LoadAbsRegion(st.ImgPath, capPx, viewAbs)
+	} else {
+		prep, _, err = imageio.LoadAutoCropped(st.ImgPath, capPx)
+	}
+	if err != nil {
+		st.AppendLog("hi-res fit unavailable (" + err.Error() + "); fitting at display resolution")
+		return nil
+	}
+	if prep.W <= curW && prep.H <= curH {
+		return nil // source had no extra pixels beyond the display load
+	}
+	return prep
 }
 
 func nrgbaFromPrep(prep *imageio.Prepared) *image.NRGBA {

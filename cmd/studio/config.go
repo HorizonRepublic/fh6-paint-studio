@@ -18,12 +18,13 @@ type studioConfig struct {
 	Budget      int    `json:"budget,omitempty"`        // last shape budget
 	// Generator toggles (pointer = tri-state: absent -> the NewAppState default). Persisted so a
 	// preferred setup survives a restart.
-	KeepInside *bool `json:"keep_inside,omitempty"` // default ON
+	KeepInside *bool  `json:"keep_inside,omitempty"` // default ON
+	SourceRes  *bool  `json:"source_res,omitempty"`  // default OFF: fit the engine at the image's original resolution (max quality, much slower)
+	Locale     string `json:"locale,omitempty"`      // chosen UI language tag (e.g. "uk", "pt-BR"); empty = auto-detect from the OS
 
 	CheckUpdates    *bool     `json:"check_updates,omitempty"` // tri-state, nil = on
 	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
 	LastSeenVersion string    `json:"last_seen_version,omitempty"`
-	Recent          []string  `json:"recent,omitempty"` // recently opened image paths, newest first
 }
 
 // SoundOn reports the saved sound preference, defaulting to ON when unset.

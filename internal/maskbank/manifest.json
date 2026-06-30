@@ -324,6 +324,3867 @@
    "alpha_w": 127.8,
    "alpha_h": 127.8,
    "file": "m_0068.png"
+  },
+  {
+   "alpha_h": 59.1,
+   "alpha_w": 59.1,
+   "file": "m_08a4.png",
+   "label": "arc-90-thin_08a4",
+   "native_h": 60.54,
+   "native_w": 60.54,
+   "word": 2212
+  },
+  {
+   "alpha_h": 52.6,
+   "alpha_w": 52.6,
+   "file": "m_08b4.png",
+   "label": "arc-90-mid_08b4",
+   "native_h": 53.87,
+   "native_w": 53.87,
+   "word": 2228
+  },
+  {
+   "alpha_h": 63.9,
+   "alpha_w": 63.9,
+   "file": "m_08ac.png",
+   "label": "arc-90-wide_08ac",
+   "native_h": 65.48,
+   "native_w": 65.48,
+   "word": 2220
+  },
+  {
+   "alpha_h": 59.1,
+   "alpha_w": 118.2,
+   "file": "m_08a3.png",
+   "label": "arc-180-thin_08a3",
+   "native_h": 60.54,
+   "native_w": 121,
+   "word": 2211
+  },
+  {
+   "alpha_h": 52.6,
+   "alpha_w": 105.2,
+   "file": "m_08b3.png",
+   "label": "arc-180-mid_08b3",
+   "native_h": 53.87,
+   "native_w": 107.74,
+   "word": 2227
+  },
+  {
+   "alpha_h": 63.9,
+   "alpha_w": 127.9,
+   "file": "m_08ab.png",
+   "label": "arc-180-wide_08ab",
+   "native_h": 65.48,
+   "native_w": 130.97,
+   "word": 2219
+  },
+  {
+   "alpha_h": 110.9,
+   "alpha_w": 128,
+   "file": "m_0067.png",
+   "label": "glyph-0067",
+   "native_h": 114.44,
+   "native_w": 132.14,
+   "word": 103
+  },
+  {
+   "alpha_h": 110.9,
+   "alpha_w": 128,
+   "file": "m_0069.png",
+   "label": "glyph-0069",
+   "native_h": 114.43,
+   "native_w": 132.13,
+   "word": 105
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_006a.png",
+   "label": "glyph-006a",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 106
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_006b.png",
+   "label": "glyph-006b",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 107
+  },
+  {
+   "alpha_h": 121.7,
+   "alpha_w": 127.9,
+   "file": "m_006c.png",
+   "label": "glyph-006c",
+   "native_h": 125.59,
+   "native_w": 132.05,
+   "word": 108
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 123.4,
+   "file": "m_006e.png",
+   "label": "glyph-006e",
+   "native_h": 132.13,
+   "native_w": 127.43,
+   "word": 110
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_006f.png",
+   "label": "glyph-006f",
+   "native_h": 132.13,
+   "native_w": 132.14,
+   "word": 111
+  },
+  {
+   "alpha_h": 110.8,
+   "alpha_w": 127.9,
+   "file": "m_0071.png",
+   "label": "glyph-0071",
+   "native_h": 114.36,
+   "native_w": 132.05,
+   "word": 113
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_0072.png",
+   "label": "glyph-0072",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 114
+  },
+  {
+   "alpha_h": 110.9,
+   "alpha_w": 128,
+   "file": "m_0073.png",
+   "label": "glyph-0073",
+   "native_h": 114.43,
+   "native_w": 132.13,
+   "word": 115
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_0074.png",
+   "label": "glyph-0074",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 116
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_0075.png",
+   "label": "glyph-0075",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 117
+  },
+  {
+   "alpha_h": 121.8,
+   "alpha_w": 128,
+   "file": "m_0076.png",
+   "label": "glyph-0076",
+   "native_h": 125.7,
+   "native_w": 132.17,
+   "word": 118
+  },
+  {
+   "alpha_h": 64,
+   "alpha_w": 128,
+   "file": "m_0077.png",
+   "label": "glyph-0077",
+   "native_h": 66.06,
+   "native_w": 132.13,
+   "word": 119
+  },
+  {
+   "alpha_h": 121.7,
+   "alpha_w": 128,
+   "file": "m_0079.png",
+   "label": "glyph-0079",
+   "native_h": 125.67,
+   "native_w": 132.14,
+   "word": 121
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 127.4,
+   "file": "m_007b.png",
+   "label": "glyph-007b",
+   "native_h": 132.11,
+   "native_w": 131.46,
+   "word": 123
+  },
+  {
+   "alpha_h": 127.1,
+   "alpha_w": 77.4,
+   "file": "m_007c.png",
+   "label": "glyph-007c",
+   "native_h": 131.19,
+   "native_w": 79.88,
+   "word": 124
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_007d.png",
+   "label": "glyph-007d",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 125
+  },
+  {
+   "alpha_h": 127.8,
+   "alpha_w": 90.9,
+   "file": "m_007e.png",
+   "label": "glyph-007e",
+   "native_h": 131.94,
+   "native_w": 93.84,
+   "word": 126
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_0082.png",
+   "label": "glyph-0082",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 130
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 64,
+   "file": "m_0083.png",
+   "label": "glyph-0083",
+   "native_h": 132.13,
+   "native_w": 66.06,
+   "word": 131
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 128,
+   "file": "m_0085.png",
+   "label": "glyph-0085",
+   "native_h": 132.13,
+   "native_w": 132.13,
+   "word": 133
+  },
+  {
+   "alpha_h": 126.1,
+   "alpha_w": 127.3,
+   "file": "m_0086.png",
+   "label": "glyph-0086",
+   "native_h": 130.21,
+   "native_w": 131.44,
+   "word": 134
+  },
+  {
+   "alpha_h": 121.6,
+   "alpha_w": 127.8,
+   "file": "m_0087.png",
+   "label": "glyph-0087",
+   "native_h": 125.49,
+   "native_w": 131.95,
+   "word": 135
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 33.4,
+   "file": "m_0088.png",
+   "label": "glyph-0088",
+   "native_h": 132.13,
+   "native_w": 34.51,
+   "word": 136
+  },
+  {
+   "alpha_h": 127,
+   "alpha_w": 59.2,
+   "file": "m_008b.png",
+   "label": "glyph-008b",
+   "native_h": 131.09,
+   "native_w": 61.14,
+   "word": 139
+  },
+  {
+   "alpha_h": 121.8,
+   "alpha_w": 128.1,
+   "file": "m_008c.png",
+   "label": "glyph-008c",
+   "native_h": 125.73,
+   "native_w": 132.2,
+   "word": 140
+  },
+  {
+   "alpha_h": 127.9,
+   "alpha_w": 314,
+   "file": "m_00ca.png",
+   "label": "glyph-00ca",
+   "native_h": 132.07,
+   "native_w": 324.09,
+   "word": 202
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 155.8,
+   "file": "m_00cb.png",
+   "label": "glyph-00cb",
+   "native_h": 132.16,
+   "native_w": 160.84,
+   "word": 203
+  },
+  {
+   "alpha_h": 83.2,
+   "alpha_w": 367.5,
+   "file": "m_00ce.png",
+   "label": "glyph-00ce",
+   "native_h": 85.92,
+   "native_w": 379.31,
+   "word": 206
+  },
+  {
+   "alpha_h": 220,
+   "alpha_w": 216.8,
+   "file": "m_012e.png",
+   "label": "glyph-012e",
+   "native_h": 227.11,
+   "native_w": 223.78,
+   "word": 302
+  },
+  {
+   "alpha_h": 219.1,
+   "alpha_w": 218.6,
+   "file": "m_012f.png",
+   "label": "glyph-012f",
+   "native_h": 226.2,
+   "native_w": 225.64,
+   "word": 303
+  },
+  {
+   "alpha_h": 217,
+   "alpha_w": 71.5,
+   "file": "m_0130.png",
+   "label": "glyph-0130",
+   "native_h": 223.98,
+   "native_w": 73.86,
+   "word": 304
+  },
+  {
+   "alpha_h": 119,
+   "alpha_w": 214,
+   "file": "m_0131.png",
+   "label": "glyph-0131",
+   "native_h": 122.81,
+   "native_w": 220.93,
+   "word": 305
+  },
+  {
+   "alpha_h": 210.6,
+   "alpha_w": 63.6,
+   "file": "m_0132.png",
+   "label": "glyph-0132",
+   "native_h": 217.43,
+   "native_w": 65.7,
+   "word": 306
+  },
+  {
+   "alpha_h": 214.2,
+   "alpha_w": 78.4,
+   "file": "m_0133.png",
+   "label": "glyph-0133",
+   "native_h": 221.09,
+   "native_w": 80.91,
+   "word": 307
+  },
+  {
+   "alpha_h": 212.4,
+   "alpha_w": 57.2,
+   "file": "m_0134.png",
+   "label": "glyph-0134",
+   "native_h": 219.29,
+   "native_w": 59.09,
+   "word": 308
+  },
+  {
+   "alpha_h": 216.6,
+   "alpha_w": 206.2,
+   "file": "m_0135.png",
+   "label": "glyph-0135",
+   "native_h": 223.62,
+   "native_w": 212.88,
+   "word": 309
+  },
+  {
+   "alpha_h": 218.2,
+   "alpha_w": 305.4,
+   "file": "m_0136.png",
+   "label": "glyph-0136",
+   "native_h": 225.26,
+   "native_w": 315.28,
+   "word": 310
+  },
+  {
+   "alpha_h": 26.8,
+   "alpha_w": 213.8,
+   "file": "m_0137.png",
+   "label": "glyph-0137",
+   "native_h": 27.64,
+   "native_w": 220.74,
+   "word": 311
+  },
+  {
+   "alpha_h": 69.3,
+   "alpha_w": 208.7,
+   "file": "m_0138.png",
+   "label": "glyph-0138",
+   "native_h": 71.57,
+   "native_w": 215.41,
+   "word": 312
+  },
+  {
+   "alpha_h": 210.7,
+   "alpha_w": 86,
+   "file": "m_0139.png",
+   "label": "glyph-0139",
+   "native_h": 217.45,
+   "native_w": 88.77,
+   "word": 313
+  },
+  {
+   "alpha_h": 214,
+   "alpha_w": 32.2,
+   "file": "m_013a.png",
+   "label": "glyph-013a",
+   "native_h": 220.92,
+   "native_w": 33.23,
+   "word": 314
+  },
+  {
+   "alpha_h": 33.3,
+   "alpha_w": 210.3,
+   "file": "m_013b.png",
+   "label": "glyph-013b",
+   "native_h": 34.33,
+   "native_w": 217.12,
+   "word": 315
+  },
+  {
+   "alpha_h": 217.7,
+   "alpha_w": 217.7,
+   "file": "m_013c.png",
+   "label": "glyph-013c",
+   "native_h": 224.68,
+   "native_w": 224.68,
+   "word": 316
+  },
+  {
+   "alpha_h": 14.6,
+   "alpha_w": 209.9,
+   "file": "m_013d.png",
+   "label": "glyph-013d",
+   "native_h": 15.08,
+   "native_w": 216.71,
+   "word": 317
+  },
+  {
+   "alpha_h": 217.3,
+   "alpha_w": 211.2,
+   "file": "m_013e.png",
+   "label": "glyph-013e",
+   "native_h": 224.34,
+   "native_w": 218.05,
+   "word": 318
+  },
+  {
+   "alpha_h": 64.7,
+   "alpha_w": 212.9,
+   "file": "m_013f.png",
+   "label": "glyph-013f",
+   "native_h": 66.82,
+   "native_w": 219.81,
+   "word": 319
+  },
+  {
+   "alpha_h": 33.7,
+   "alpha_w": 210.7,
+   "file": "m_0140.png",
+   "label": "glyph-0140",
+   "native_h": 34.78,
+   "native_w": 217.53,
+   "word": 320
+  },
+  {
+   "alpha_h": 70.6,
+   "alpha_w": 210.4,
+   "file": "m_0143.png",
+   "label": "glyph-0143",
+   "native_h": 72.9,
+   "native_w": 217.14,
+   "word": 323
+  },
+  {
+   "alpha_h": 212.8,
+   "alpha_w": 103.8,
+   "file": "m_0144.png",
+   "label": "glyph-0144",
+   "native_h": 219.65,
+   "native_w": 107.17,
+   "word": 324
+  },
+  {
+   "alpha_h": 69.4,
+   "alpha_w": 212.1,
+   "file": "m_0147.png",
+   "label": "glyph-0147",
+   "native_h": 71.66,
+   "native_w": 218.89,
+   "word": 327
+  },
+  {
+   "alpha_h": 215.4,
+   "alpha_w": 182.5,
+   "file": "m_0148.png",
+   "label": "glyph-0148",
+   "native_h": 222.33,
+   "native_w": 188.38,
+   "word": 328
+  },
+  {
+   "alpha_h": 43.6,
+   "alpha_w": 214.2,
+   "file": "m_0149.png",
+   "label": "glyph-0149",
+   "native_h": 44.96,
+   "native_w": 221.1,
+   "word": 329
+  },
+  {
+   "alpha_h": 215.1,
+   "alpha_w": 35.8,
+   "file": "m_014a.png",
+   "label": "glyph-014a",
+   "native_h": 222.03,
+   "native_w": 37,
+   "word": 330
+  },
+  {
+   "alpha_h": 217.2,
+   "alpha_w": 217.2,
+   "file": "m_014b.png",
+   "label": "glyph-014b",
+   "native_h": 224.17,
+   "native_w": 224.18,
+   "word": 331
+  },
+  {
+   "alpha_h": 210.3,
+   "alpha_w": 125.9,
+   "file": "m_014c.png",
+   "label": "glyph-014c",
+   "native_h": 217.11,
+   "native_w": 129.98,
+   "word": 332
+  },
+  {
+   "alpha_h": 210.4,
+   "alpha_w": 44.4,
+   "file": "m_014d.png",
+   "label": "glyph-014d",
+   "native_h": 217.2,
+   "native_w": 45.86,
+   "word": 333
+  },
+  {
+   "alpha_h": 213.8,
+   "alpha_w": 73,
+   "file": "m_014e.png",
+   "label": "glyph-014e",
+   "native_h": 220.74,
+   "native_w": 75.35,
+   "word": 334
+  },
+  {
+   "alpha_h": 212.4,
+   "alpha_w": 44,
+   "file": "m_014f.png",
+   "label": "glyph-014f",
+   "native_h": 219.24,
+   "native_w": 45.42,
+   "word": 335
+  },
+  {
+   "alpha_h": 209.3,
+   "alpha_w": 66.4,
+   "file": "m_0150.png",
+   "label": "glyph-0150",
+   "native_h": 216.02,
+   "native_w": 68.57,
+   "word": 336
+  },
+  {
+   "alpha_h": 67.8,
+   "alpha_w": 210.4,
+   "file": "m_0151.png",
+   "label": "glyph-0151",
+   "native_h": 69.95,
+   "native_w": 217.15,
+   "word": 337
+  },
+  {
+   "alpha_h": 127.4,
+   "alpha_w": 482.9,
+   "file": "m_0152.png",
+   "label": "glyph-0152",
+   "native_h": 131.51,
+   "native_w": 498.52,
+   "word": 338
+  },
+  {
+   "alpha_h": 44.3,
+   "alpha_w": 162.8,
+   "file": "m_0153.png",
+   "label": "glyph-0153",
+   "native_h": 45.76,
+   "native_w": 168.06,
+   "word": 339
+  },
+  {
+   "alpha_h": 127.8,
+   "alpha_w": 557.1,
+   "file": "m_0154.png",
+   "label": "glyph-0154",
+   "native_h": 131.94,
+   "native_w": 575.02,
+   "word": 340
+  },
+  {
+   "alpha_h": 52.3,
+   "alpha_w": 216.8,
+   "file": "m_0192.png",
+   "label": "glyph-0192",
+   "native_h": 54,
+   "native_w": 223.84,
+   "word": 402
+  },
+  {
+   "alpha_h": 102.4,
+   "alpha_w": 217.5,
+   "file": "m_0193.png",
+   "label": "glyph-0193",
+   "native_h": 105.75,
+   "native_w": 224.54,
+   "word": 403
+  },
+  {
+   "alpha_h": 62.7,
+   "alpha_w": 212.1,
+   "file": "m_0194.png",
+   "label": "glyph-0194",
+   "native_h": 64.74,
+   "native_w": 218.95,
+   "word": 404
+  },
+  {
+   "alpha_h": 45.1,
+   "alpha_w": 211.9,
+   "file": "m_0195.png",
+   "label": "glyph-0195",
+   "native_h": 46.6,
+   "native_w": 218.74,
+   "word": 405
+  },
+  {
+   "alpha_h": 71.5,
+   "alpha_w": 215.4,
+   "file": "m_0196.png",
+   "label": "glyph-0196",
+   "native_h": 73.8,
+   "native_w": 222.35,
+   "word": 406
+  },
+  {
+   "alpha_h": 33.9,
+   "alpha_w": 212.5,
+   "file": "m_0197.png",
+   "label": "glyph-0197",
+   "native_h": 34.97,
+   "native_w": 219.33,
+   "word": 407
+  },
+  {
+   "alpha_h": 33.6,
+   "alpha_w": 217.6,
+   "file": "m_0198.png",
+   "label": "glyph-0198",
+   "native_h": 34.71,
+   "native_w": 224.59,
+   "word": 408
+  },
+  {
+   "alpha_h": 54.1,
+   "alpha_w": 213.4,
+   "file": "m_0199.png",
+   "label": "glyph-0199",
+   "native_h": 55.81,
+   "native_w": 220.32,
+   "word": 409
+  },
+  {
+   "alpha_h": 210.6,
+   "alpha_w": 78,
+   "file": "m_019a.png",
+   "label": "glyph-019a",
+   "native_h": 217.41,
+   "native_w": 80.5,
+   "word": 410
+  },
+  {
+   "alpha_h": 212.5,
+   "alpha_w": 217.2,
+   "file": "m_019b.png",
+   "label": "glyph-019b",
+   "native_h": 219.38,
+   "native_w": 224.16,
+   "word": 411
+  },
+  {
+   "alpha_h": 199.6,
+   "alpha_w": 219.4,
+   "file": "m_019c.png",
+   "label": "glyph-019c",
+   "native_h": 206,
+   "native_w": 226.51,
+   "word": 412
+  },
+  {
+   "alpha_h": 216.2,
+   "alpha_w": 219.4,
+   "file": "m_019d.png",
+   "label": "glyph-019d",
+   "native_h": 223.13,
+   "native_w": 226.46,
+   "word": 413
+  },
+  {
+   "alpha_h": 155.9,
+   "alpha_w": 219.2,
+   "file": "m_019e.png",
+   "label": "glyph-019e",
+   "native_h": 160.9,
+   "native_w": 226.26,
+   "word": 414
+  },
+  {
+   "alpha_h": 159.9,
+   "alpha_w": 216.4,
+   "file": "m_019f.png",
+   "label": "glyph-019f",
+   "native_h": 165.06,
+   "native_w": 223.37,
+   "word": 415
+  },
+  {
+   "alpha_h": 218.8,
+   "alpha_w": 126.1,
+   "file": "m_01a0.png",
+   "label": "glyph-01a0",
+   "native_h": 225.86,
+   "native_w": 130.21,
+   "word": 416
+  },
+  {
+   "alpha_h": 217.9,
+   "alpha_w": 116.7,
+   "file": "m_01a1.png",
+   "label": "glyph-01a1",
+   "native_h": 224.96,
+   "native_w": 120.51,
+   "word": 417
+  },
+  {
+   "alpha_h": 214.6,
+   "alpha_w": 215.7,
+   "file": "m_01a2.png",
+   "label": "glyph-01a2",
+   "native_h": 221.57,
+   "native_w": 222.62,
+   "word": 418
+  },
+  {
+   "alpha_h": 256.1,
+   "alpha_w": 249.7,
+   "file": "m_01a3.png",
+   "label": "glyph-01a3",
+   "native_h": 264.32,
+   "native_w": 257.78,
+   "word": 419
+  },
+  {
+   "alpha_h": 143.5,
+   "alpha_w": 255.6,
+   "file": "m_01a4.png",
+   "label": "glyph-01a4",
+   "native_h": 148.1,
+   "native_w": 263.81,
+   "word": 420
+  },
+  {
+   "alpha_h": 106.9,
+   "alpha_w": 210.4,
+   "file": "m_01a5.png",
+   "label": "glyph-01a5",
+   "native_h": 110.4,
+   "native_w": 217.17,
+   "word": 421
+  },
+  {
+   "alpha_h": 122.1,
+   "alpha_w": 215.5,
+   "file": "m_01a6.png",
+   "label": "glyph-01a6",
+   "native_h": 126.06,
+   "native_w": 222.43,
+   "word": 422
+  },
+  {
+   "alpha_h": 57.7,
+   "alpha_w": 211.2,
+   "file": "m_01a7.png",
+   "label": "glyph-01a7",
+   "native_h": 59.6,
+   "native_w": 218.06,
+   "word": 423
+  },
+  {
+   "alpha_h": 136.7,
+   "alpha_w": 192.8,
+   "file": "m_01a8.png",
+   "label": "glyph-01a8",
+   "native_h": 141.06,
+   "native_w": 199.01,
+   "word": 424
+  },
+  {
+   "alpha_h": 145.5,
+   "alpha_w": 217.6,
+   "file": "m_01a9.png",
+   "label": "glyph-01a9",
+   "native_h": 150.18,
+   "native_w": 224.67,
+   "word": 425
+  },
+  {
+   "alpha_h": 187.5,
+   "alpha_w": 215.6,
+   "file": "m_01aa.png",
+   "label": "glyph-01aa",
+   "native_h": 193.53,
+   "native_w": 222.59,
+   "word": 426
+  },
+  {
+   "alpha_h": 92.4,
+   "alpha_w": 161.3,
+   "file": "m_01ab.png",
+   "label": "glyph-01ab",
+   "native_h": 95.33,
+   "native_w": 166.5,
+   "word": 427
+  },
+  {
+   "alpha_h": 211.9,
+   "alpha_w": 97.6,
+   "file": "m_01ac.png",
+   "label": "glyph-01ac",
+   "native_h": 218.69,
+   "native_w": 100.72,
+   "word": 428
+  },
+  {
+   "alpha_h": 213.2,
+   "alpha_w": 206.2,
+   "file": "m_01ad.png",
+   "label": "glyph-01ad",
+   "native_h": 220.1,
+   "native_w": 212.84,
+   "word": 429
+  },
+  {
+   "alpha_h": 206.5,
+   "alpha_w": 215.4,
+   "file": "m_01ae.png",
+   "label": "glyph-01ae",
+   "native_h": 213.16,
+   "native_w": 222.35,
+   "word": 430
+  },
+  {
+   "alpha_h": 131.5,
+   "alpha_w": 212.8,
+   "file": "m_01af.png",
+   "label": "glyph-01af",
+   "native_h": 135.7,
+   "native_w": 219.62,
+   "word": 431
+  },
+  {
+   "alpha_h": 43.9,
+   "alpha_w": 215.6,
+   "file": "m_01b0.png",
+   "label": "glyph-01b0",
+   "native_h": 45.31,
+   "native_w": 222.54,
+   "word": 432
+  },
+  {
+   "alpha_h": 130.7,
+   "alpha_w": 213.9,
+   "file": "m_01b1.png",
+   "label": "glyph-01b1",
+   "native_h": 134.93,
+   "native_w": 220.8,
+   "word": 433
+  },
+  {
+   "alpha_h": 170,
+   "alpha_w": 215.3,
+   "file": "m_01b2.png",
+   "label": "glyph-01b2",
+   "native_h": 175.46,
+   "native_w": 222.24,
+   "word": 434
+  },
+  {
+   "alpha_h": 71.3,
+   "alpha_w": 214.6,
+   "file": "m_01b3.png",
+   "label": "glyph-01b3",
+   "native_h": 73.61,
+   "native_w": 221.55,
+   "word": 435
+  },
+  {
+   "alpha_h": 48.2,
+   "alpha_w": 214.9,
+   "file": "m_01b4.png",
+   "label": "glyph-01b4",
+   "native_h": 49.77,
+   "native_w": 221.82,
+   "word": 436
+  },
+  {
+   "alpha_h": 78.3,
+   "alpha_w": 218.7,
+   "file": "m_01b5.png",
+   "label": "glyph-01b5",
+   "native_h": 80.86,
+   "native_w": 225.76,
+   "word": 437
+  },
+  {
+   "alpha_h": 213.7,
+   "alpha_w": 197.6,
+   "file": "m_01b6.png",
+   "label": "glyph-01b6",
+   "native_h": 220.62,
+   "native_w": 204.01,
+   "word": 438
+  },
+  {
+   "alpha_h": 78.8,
+   "alpha_w": 215.6,
+   "file": "m_01b7.png",
+   "label": "glyph-01b7",
+   "native_h": 81.39,
+   "native_w": 222.58,
+   "word": 439
+  },
+  {
+   "alpha_h": 138.1,
+   "alpha_w": 155.6,
+   "file": "m_01b8.png",
+   "label": "glyph-01b8",
+   "native_h": 142.51,
+   "native_w": 160.67,
+   "word": 440
+  },
+  {
+   "alpha_h": 164.8,
+   "alpha_w": 322,
+   "file": "m_01f5.png",
+   "label": "glyph-01f5",
+   "native_h": 170.1,
+   "native_w": 332.39,
+   "word": 501
+  },
+  {
+   "alpha_h": 196,
+   "alpha_w": 317.9,
+   "file": "m_01f6.png",
+   "label": "glyph-01f6",
+   "native_h": 202.34,
+   "native_w": 328.14,
+   "word": 502
+  },
+  {
+   "alpha_h": 123,
+   "alpha_w": 319.2,
+   "file": "m_01f7.png",
+   "label": "glyph-01f7",
+   "native_h": 126.93,
+   "native_w": 329.54,
+   "word": 503
+  },
+  {
+   "alpha_h": 90.8,
+   "alpha_w": 326.2,
+   "file": "m_01f8.png",
+   "label": "glyph-01f8",
+   "native_h": 93.71,
+   "native_w": 336.75,
+   "word": 504
+  },
+  {
+   "alpha_h": 139.3,
+   "alpha_w": 278.6,
+   "file": "m_01f9.png",
+   "label": "glyph-01f9",
+   "native_h": 143.81,
+   "native_w": 287.61,
+   "word": 505
+  },
+  {
+   "alpha_h": 97.5,
+   "alpha_w": 308.7,
+   "file": "m_01fa.png",
+   "label": "glyph-01fa",
+   "native_h": 100.64,
+   "native_w": 318.65,
+   "word": 506
+  },
+  {
+   "alpha_h": 119.4,
+   "alpha_w": 403.3,
+   "file": "m_01fb.png",
+   "label": "glyph-01fb",
+   "native_h": 123.21,
+   "native_w": 416.27,
+   "word": 507
+  },
+  {
+   "alpha_h": 74.1,
+   "alpha_w": 301.8,
+   "file": "m_01fc.png",
+   "label": "glyph-01fc",
+   "native_h": 76.45,
+   "native_w": 311.51,
+   "word": 508
+  },
+  {
+   "alpha_h": 50.4,
+   "alpha_w": 219.2,
+   "file": "m_01fd.png",
+   "label": "glyph-01fd",
+   "native_h": 52.01,
+   "native_w": 226.28,
+   "word": 509
+  },
+  {
+   "alpha_h": 61.6,
+   "alpha_w": 417.8,
+   "file": "m_01fe.png",
+   "label": "glyph-01fe",
+   "native_h": 63.57,
+   "native_w": 431.23,
+   "word": 510
+  },
+  {
+   "alpha_h": 53.3,
+   "alpha_w": 304.6,
+   "file": "m_01ff.png",
+   "label": "glyph-01ff",
+   "native_h": 55.04,
+   "native_w": 314.47,
+   "word": 511
+  },
+  {
+   "alpha_h": 56.8,
+   "alpha_w": 328.2,
+   "file": "m_0200.png",
+   "label": "glyph-0200",
+   "native_h": 58.64,
+   "native_w": 338.78,
+   "word": 512
+  },
+  {
+   "alpha_h": 129.5,
+   "alpha_w": 222.2,
+   "file": "m_0201.png",
+   "label": "glyph-0201",
+   "native_h": 133.63,
+   "native_w": 229.39,
+   "word": 513
+  },
+  {
+   "alpha_h": 61.8,
+   "alpha_w": 300,
+   "file": "m_0202.png",
+   "label": "glyph-0202",
+   "native_h": 63.82,
+   "native_w": 309.7,
+   "word": 514
+  },
+  {
+   "alpha_h": 253.5,
+   "alpha_w": 275.6,
+   "file": "m_0203.png",
+   "label": "glyph-0203",
+   "native_h": 261.63,
+   "native_w": 284.48,
+   "word": 515
+  },
+  {
+   "alpha_h": 228.4,
+   "alpha_w": 321.8,
+   "file": "m_0204.png",
+   "label": "glyph-0204",
+   "native_h": 235.73,
+   "native_w": 332.23,
+   "word": 516
+  },
+  {
+   "alpha_h": 75.7,
+   "alpha_w": 328.2,
+   "file": "m_0205.png",
+   "label": "glyph-0205",
+   "native_h": 78.18,
+   "native_w": 338.74,
+   "word": 517
+  },
+  {
+   "alpha_h": 77.3,
+   "alpha_w": 292.8,
+   "file": "m_0206.png",
+   "label": "glyph-0206",
+   "native_h": 79.8,
+   "native_w": 302.25,
+   "word": 518
+  },
+  {
+   "alpha_h": 163.9,
+   "alpha_w": 322.2,
+   "file": "m_0207.png",
+   "label": "glyph-0207",
+   "native_h": 169.17,
+   "native_w": 332.6,
+   "word": 519
+  },
+  {
+   "alpha_h": 290.1,
+   "alpha_w": 290.1,
+   "file": "m_0208.png",
+   "label": "glyph-0208",
+   "native_h": 299.49,
+   "native_w": 299.5,
+   "word": 520
+  },
+  {
+   "alpha_h": 124.4,
+   "alpha_w": 290.5,
+   "file": "m_0209.png",
+   "label": "glyph-0209",
+   "native_h": 128.44,
+   "native_w": 299.84,
+   "word": 521
+  },
+  {
+   "alpha_h": 111.1,
+   "alpha_w": 328.1,
+   "file": "m_020a.png",
+   "label": "glyph-020a",
+   "native_h": 114.7,
+   "native_w": 338.69,
+   "word": 522
+  },
+  {
+   "alpha_h": 119.4,
+   "alpha_w": 315,
+   "file": "m_020b.png",
+   "label": "glyph-020b",
+   "native_h": 123.27,
+   "native_w": 325.14,
+   "word": 523
+  },
+  {
+   "alpha_h": 102.8,
+   "alpha_w": 241.5,
+   "file": "m_020c.png",
+   "label": "glyph-020c",
+   "native_h": 106.14,
+   "native_w": 249.29,
+   "word": 524
+  },
+  {
+   "alpha_h": 77.5,
+   "alpha_w": 287.2,
+   "file": "m_020d.png",
+   "label": "glyph-020d",
+   "native_h": 79.95,
+   "native_w": 296.42,
+   "word": 525
+  },
+  {
+   "alpha_h": 89.8,
+   "alpha_w": 292.9,
+   "file": "m_020e.png",
+   "label": "glyph-020e",
+   "native_h": 92.69,
+   "native_w": 302.34,
+   "word": 526
+  },
+  {
+   "alpha_h": 65.7,
+   "alpha_w": 278.6,
+   "file": "m_020f.png",
+   "label": "glyph-020f",
+   "native_h": 67.81,
+   "native_w": 287.62,
+   "word": 527
+  },
+  {
+   "alpha_h": 60.2,
+   "alpha_w": 309.2,
+   "file": "m_0210.png",
+   "label": "glyph-0210",
+   "native_h": 62.14,
+   "native_w": 319.22,
+   "word": 528
+  },
+  {
+   "alpha_h": 44.2,
+   "alpha_w": 322.2,
+   "file": "m_0211.png",
+   "label": "glyph-0211",
+   "native_h": 45.66,
+   "native_w": 332.61,
+   "word": 529
+  },
+  {
+   "alpha_h": 44.8,
+   "alpha_w": 282.2,
+   "file": "m_0212.png",
+   "label": "glyph-0212",
+   "native_h": 46.25,
+   "native_w": 291.29,
+   "word": 530
+  },
+  {
+   "alpha_h": 318.1,
+   "alpha_w": 215.1,
+   "file": "m_0213.png",
+   "label": "glyph-0213",
+   "native_h": 328.39,
+   "native_w": 221.99,
+   "word": 531
+  },
+  {
+   "alpha_h": 267.9,
+   "alpha_w": 144,
+   "file": "m_0214.png",
+   "label": "glyph-0214",
+   "native_h": 276.49,
+   "native_w": 148.65,
+   "word": 532
+  },
+  {
+   "alpha_h": 112.4,
+   "alpha_w": 112.4,
+   "file": "m_0215.png",
+   "label": "glyph-0215",
+   "native_h": 116.07,
+   "native_w": 116.07,
+   "word": 533
+  },
+  {
+   "alpha_h": 131.5,
+   "alpha_w": 290.9,
+   "file": "m_0216.png",
+   "label": "glyph-0216",
+   "native_h": 135.75,
+   "native_w": 300.27,
+   "word": 534
+  },
+  {
+   "alpha_h": 182.1,
+   "alpha_w": 216.9,
+   "file": "m_0217.png",
+   "label": "glyph-0217",
+   "native_h": 187.97,
+   "native_w": 223.92,
+   "word": 535
+  },
+  {
+   "alpha_h": 220.1,
+   "alpha_w": 197.7,
+   "file": "m_0218.png",
+   "label": "glyph-0218",
+   "native_h": 227.23,
+   "native_w": 204.11,
+   "word": 536
+  },
+  {
+   "alpha_h": 219.3,
+   "alpha_w": 224.8,
+   "file": "m_0219.png",
+   "label": "glyph-0219",
+   "native_h": 226.34,
+   "native_w": 232.07,
+   "word": 537
+  },
+  {
+   "alpha_h": 288.9,
+   "alpha_w": 178.2,
+   "file": "m_021a.png",
+   "label": "glyph-021a",
+   "native_h": 298.24,
+   "native_w": 183.91,
+   "word": 538
+  },
+  {
+   "alpha_h": 254.5,
+   "alpha_w": 254.5,
+   "file": "m_021b.png",
+   "label": "glyph-021b",
+   "native_h": 262.76,
+   "native_w": 262.75,
+   "word": 539
+  },
+  {
+   "alpha_h": 265.7,
+   "alpha_w": 265.7,
+   "file": "m_021c.png",
+   "label": "glyph-021c",
+   "native_h": 274.26,
+   "native_w": 274.26,
+   "word": 540
+  },
+  {
+   "alpha_h": 83.2,
+   "alpha_w": 214.7,
+   "file": "m_0259.png",
+   "label": "glyph-0259",
+   "native_h": 85.83,
+   "native_w": 221.58,
+   "word": 601
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 214.3,
+   "file": "m_025a.png",
+   "label": "glyph-025a",
+   "native_h": 146.11,
+   "native_w": 221.25,
+   "word": 602
+  },
+  {
+   "alpha_h": 91.2,
+   "alpha_w": 213.1,
+   "file": "m_025b.png",
+   "label": "glyph-025b",
+   "native_h": 94.13,
+   "native_w": 219.98,
+   "word": 603
+  },
+  {
+   "alpha_h": 116.1,
+   "alpha_w": 212.3,
+   "file": "m_025c.png",
+   "label": "glyph-025c",
+   "native_h": 119.86,
+   "native_w": 219.13,
+   "word": 604
+  },
+  {
+   "alpha_h": 95.1,
+   "alpha_w": 213.3,
+   "file": "m_025d.png",
+   "label": "glyph-025d",
+   "native_h": 98.18,
+   "native_w": 220.21,
+   "word": 605
+  },
+  {
+   "alpha_h": 82.5,
+   "alpha_w": 212.2,
+   "file": "m_025e.png",
+   "label": "glyph-025e",
+   "native_h": 85.21,
+   "native_w": 219.03,
+   "word": 606
+  },
+  {
+   "alpha_h": 210,
+   "alpha_w": 131.6,
+   "file": "m_025f.png",
+   "label": "glyph-025f",
+   "native_h": 216.76,
+   "native_w": 135.84,
+   "word": 607
+  },
+  {
+   "alpha_h": 210.9,
+   "alpha_w": 108.6,
+   "file": "m_0260.png",
+   "label": "glyph-0260",
+   "native_h": 217.67,
+   "native_w": 112.14,
+   "word": 608
+  },
+  {
+   "alpha_h": 211.3,
+   "alpha_w": 181,
+   "file": "m_0261.png",
+   "label": "glyph-0261",
+   "native_h": 218.14,
+   "native_w": 186.89,
+   "word": 609
+  },
+  {
+   "alpha_h": 209.4,
+   "alpha_w": 118.9,
+   "file": "m_0262.png",
+   "label": "glyph-0262",
+   "native_h": 216.16,
+   "native_w": 122.76,
+   "word": 610
+  },
+  {
+   "alpha_h": 39.8,
+   "alpha_w": 211.2,
+   "file": "m_0263.png",
+   "label": "glyph-0263",
+   "native_h": 41.11,
+   "native_w": 218.06,
+   "word": 611
+  },
+  {
+   "alpha_h": 60,
+   "alpha_w": 215.4,
+   "file": "m_0264.png",
+   "label": "glyph-0264",
+   "native_h": 61.89,
+   "native_w": 222.39,
+   "word": 612
+  },
+  {
+   "alpha_h": 39,
+   "alpha_w": 216.4,
+   "file": "m_0265.png",
+   "label": "glyph-0265",
+   "native_h": 40.23,
+   "native_w": 223.38,
+   "word": 613
+  },
+  {
+   "alpha_h": 164.7,
+   "alpha_w": 213.6,
+   "file": "m_0266.png",
+   "label": "glyph-0266",
+   "native_h": 170.04,
+   "native_w": 220.51,
+   "word": 614
+  },
+  {
+   "alpha_h": 95.1,
+   "alpha_w": 217.7,
+   "file": "m_0267.png",
+   "label": "glyph-0267",
+   "native_h": 98.14,
+   "native_w": 224.72,
+   "word": 615
+  },
+  {
+   "alpha_h": 104.9,
+   "alpha_w": 213.5,
+   "file": "m_0268.png",
+   "label": "glyph-0268",
+   "native_h": 108.3,
+   "native_w": 220.34,
+   "word": 616
+  },
+  {
+   "alpha_h": 212.1,
+   "alpha_w": 185.1,
+   "file": "m_0269.png",
+   "label": "glyph-0269",
+   "native_h": 218.95,
+   "native_w": 191.1,
+   "word": 617
+  },
+  {
+   "alpha_h": 210.8,
+   "alpha_w": 202.6,
+   "file": "m_026a.png",
+   "label": "glyph-026a",
+   "native_h": 217.65,
+   "native_w": 209.17,
+   "word": 618
+  },
+  {
+   "alpha_h": 122.1,
+   "alpha_w": 212.3,
+   "file": "m_026b.png",
+   "label": "glyph-026b",
+   "native_h": 126.03,
+   "native_w": 219.17,
+   "word": 619
+  },
+  {
+   "alpha_h": 58.4,
+   "alpha_w": 211.9,
+   "file": "m_026c.png",
+   "label": "glyph-026c",
+   "native_h": 60.29,
+   "native_w": 218.77,
+   "word": 620
+  },
+  {
+   "alpha_h": 209.7,
+   "alpha_w": 189.3,
+   "file": "m_026d.png",
+   "label": "glyph-026d",
+   "native_h": 216.46,
+   "native_w": 195.41,
+   "word": 621
+  },
+  {
+   "alpha_h": 206.8,
+   "alpha_w": 202.3,
+   "file": "m_026e.png",
+   "label": "glyph-026e",
+   "native_h": 213.48,
+   "native_w": 208.83,
+   "word": 622
+  },
+  {
+   "alpha_h": 87.5,
+   "alpha_w": 212.6,
+   "file": "m_026f.png",
+   "label": "glyph-026f",
+   "native_h": 90.33,
+   "native_w": 219.43,
+   "word": 623
+  },
+  {
+   "alpha_h": 165.4,
+   "alpha_w": 212.8,
+   "file": "m_0270.png",
+   "label": "glyph-0270",
+   "native_h": 170.7,
+   "native_w": 219.66,
+   "word": 624
+  },
+  {
+   "alpha_h": 137.4,
+   "alpha_w": 213.2,
+   "file": "m_0271.png",
+   "label": "glyph-0271",
+   "native_h": 141.83,
+   "native_w": 220.07,
+   "word": 625
+  },
+  {
+   "alpha_h": 210.1,
+   "alpha_w": 146.5,
+   "file": "m_0272.png",
+   "label": "glyph-0272",
+   "native_h": 216.92,
+   "native_w": 151.23,
+   "word": 626
+  },
+  {
+   "alpha_h": 211.1,
+   "alpha_w": 134.3,
+   "file": "m_0273.png",
+   "label": "glyph-0273",
+   "native_h": 217.96,
+   "native_w": 138.62,
+   "word": 627
+  },
+  {
+   "alpha_h": 196.1,
+   "alpha_w": 212.1,
+   "file": "m_0274.png",
+   "label": "glyph-0274",
+   "native_h": 202.42,
+   "native_w": 218.98,
+   "word": 628
+  },
+  {
+   "alpha_h": 170.7,
+   "alpha_w": 212.9,
+   "file": "m_0275.png",
+   "label": "glyph-0275",
+   "native_h": 176.23,
+   "native_w": 219.72,
+   "word": 629
+  },
+  {
+   "alpha_h": 88,
+   "alpha_w": 211.4,
+   "file": "m_0276.png",
+   "label": "glyph-0276",
+   "native_h": 90.86,
+   "native_w": 218.21,
+   "word": 630
+  },
+  {
+   "alpha_h": 64.6,
+   "alpha_w": 216.7,
+   "file": "m_0277.png",
+   "label": "glyph-0277",
+   "native_h": 66.66,
+   "native_w": 223.66,
+   "word": 631
+  },
+  {
+   "alpha_h": 73.5,
+   "alpha_w": 215.3,
+   "file": "m_0278.png",
+   "label": "glyph-0278",
+   "native_h": 75.9,
+   "native_w": 222.24,
+   "word": 632
+  },
+  {
+   "alpha_h": 212.3,
+   "alpha_w": 155.4,
+   "file": "m_0279.png",
+   "label": "glyph-0279",
+   "native_h": 219.16,
+   "native_w": 160.41,
+   "word": 633
+  },
+  {
+   "alpha_h": 211.4,
+   "alpha_w": 208.1,
+   "file": "m_027a.png",
+   "label": "glyph-027a",
+   "native_h": 218.24,
+   "native_w": 214.76,
+   "word": 634
+  },
+  {
+   "alpha_h": 57.3,
+   "alpha_w": 213.6,
+   "file": "m_027b.png",
+   "label": "glyph-027b",
+   "native_h": 59.17,
+   "native_w": 220.5,
+   "word": 635
+  },
+  {
+   "alpha_h": 112.4,
+   "alpha_w": 212.9,
+   "file": "m_027c.png",
+   "label": "glyph-027c",
+   "native_h": 116.02,
+   "native_w": 219.8,
+   "word": 636
+  },
+  {
+   "alpha_h": 47.2,
+   "alpha_w": 211.2,
+   "file": "m_027d.png",
+   "label": "glyph-027d",
+   "native_h": 48.76,
+   "native_w": 218.03,
+   "word": 637
+  },
+  {
+   "alpha_h": 192.5,
+   "alpha_w": 73.7,
+   "file": "m_027e.png",
+   "label": "glyph-027e",
+   "native_h": 198.69,
+   "native_w": 76.09,
+   "word": 638
+  },
+  {
+   "alpha_h": 211.1,
+   "alpha_w": 95.7,
+   "file": "m_027f.png",
+   "label": "glyph-027f",
+   "native_h": 217.92,
+   "native_w": 98.79,
+   "word": 639
+  },
+  {
+   "alpha_h": 197.9,
+   "alpha_w": 154.6,
+   "file": "m_0280.png",
+   "label": "glyph-0280",
+   "native_h": 204.3,
+   "native_w": 159.61,
+   "word": 640
+  },
+  {
+   "alpha_h": 211.4,
+   "alpha_w": 212.1,
+   "file": "m_02bd.png",
+   "label": "glyph-02bd",
+   "native_h": 218.23,
+   "native_w": 218.91,
+   "word": 701
+  },
+  {
+   "alpha_h": 203.8,
+   "alpha_w": 211.8,
+   "file": "m_02be.png",
+   "label": "glyph-02be",
+   "native_h": 210.41,
+   "native_w": 218.67,
+   "word": 702
+  },
+  {
+   "alpha_h": 211.4,
+   "alpha_w": 195.6,
+   "file": "m_02bf.png",
+   "label": "glyph-02bf",
+   "native_h": 218.25,
+   "native_w": 201.91,
+   "word": 703
+  },
+  {
+   "alpha_h": 182.7,
+   "alpha_w": 211.6,
+   "file": "m_02c0.png",
+   "label": "glyph-02c0",
+   "native_h": 188.55,
+   "native_w": 218.38,
+   "word": 704
+  },
+  {
+   "alpha_h": 207.2,
+   "alpha_w": 195.8,
+   "file": "m_02c1.png",
+   "label": "glyph-02c1",
+   "native_h": 213.85,
+   "native_w": 202.15,
+   "word": 705
+  },
+  {
+   "alpha_h": 214.3,
+   "alpha_w": 199.8,
+   "file": "m_02c2.png",
+   "label": "glyph-02c2",
+   "native_h": 221.16,
+   "native_w": 206.28,
+   "word": 706
+  },
+  {
+   "alpha_h": 188.1,
+   "alpha_w": 211.8,
+   "file": "m_02c3.png",
+   "label": "glyph-02c3",
+   "native_h": 194.22,
+   "native_w": 218.59,
+   "word": 707
+  },
+  {
+   "alpha_h": 167.5,
+   "alpha_w": 211.5,
+   "file": "m_02c4.png",
+   "label": "glyph-02c4",
+   "native_h": 172.88,
+   "native_w": 218.33,
+   "word": 708
+  },
+  {
+   "alpha_h": 136.3,
+   "alpha_w": 216.1,
+   "file": "m_02c5.png",
+   "label": "glyph-02c5",
+   "native_h": 140.72,
+   "native_w": 223.02,
+   "word": 709
+  },
+  {
+   "alpha_h": 118.2,
+   "alpha_w": 211.5,
+   "file": "m_02c6.png",
+   "label": "glyph-02c6",
+   "native_h": 122.05,
+   "native_w": 218.35,
+   "word": 710
+  },
+  {
+   "alpha_h": 38.2,
+   "alpha_w": 213.5,
+   "file": "m_02c7.png",
+   "label": "glyph-02c7",
+   "native_h": 39.41,
+   "native_w": 220.38,
+   "word": 711
+  },
+  {
+   "alpha_h": 75.3,
+   "alpha_w": 217.9,
+   "file": "m_02c8.png",
+   "label": "glyph-02c8",
+   "native_h": 77.77,
+   "native_w": 224.93,
+   "word": 712
+  },
+  {
+   "alpha_h": 69,
+   "alpha_w": 217.1,
+   "file": "m_02c9.png",
+   "label": "glyph-02c9",
+   "native_h": 71.18,
+   "native_w": 224.1,
+   "word": 713
+  },
+  {
+   "alpha_h": 56.7,
+   "alpha_w": 214.6,
+   "file": "m_02ca.png",
+   "label": "glyph-02ca",
+   "native_h": 58.51,
+   "native_w": 221.5,
+   "word": 714
+  },
+  {
+   "alpha_h": 77.1,
+   "alpha_w": 216.1,
+   "file": "m_02cb.png",
+   "label": "glyph-02cb",
+   "native_h": 79.56,
+   "native_w": 223.05,
+   "word": 715
+  },
+  {
+   "alpha_h": 67.4,
+   "alpha_w": 211.9,
+   "file": "m_02cc.png",
+   "label": "glyph-02cc",
+   "native_h": 69.55,
+   "native_w": 218.72,
+   "word": 716
+  },
+  {
+   "alpha_h": 85.2,
+   "alpha_w": 216.6,
+   "file": "m_02cd.png",
+   "label": "glyph-02cd",
+   "native_h": 87.98,
+   "native_w": 223.58,
+   "word": 717
+  },
+  {
+   "alpha_h": 52.3,
+   "alpha_w": 214.4,
+   "file": "m_02ce.png",
+   "label": "glyph-02ce",
+   "native_h": 54.03,
+   "native_w": 221.27,
+   "word": 718
+  },
+  {
+   "alpha_h": 188.5,
+   "alpha_w": 212.2,
+   "file": "m_02cf.png",
+   "label": "glyph-02cf",
+   "native_h": 194.58,
+   "native_w": 219.08,
+   "word": 719
+  },
+  {
+   "alpha_h": 197.5,
+   "alpha_w": 212.4,
+   "file": "m_02d0.png",
+   "label": "glyph-02d0",
+   "native_h": 203.89,
+   "native_w": 219.21,
+   "word": 720
+  },
+  {
+   "alpha_h": 159.4,
+   "alpha_w": 211.4,
+   "file": "m_02d1.png",
+   "label": "glyph-02d1",
+   "native_h": 164.59,
+   "native_w": 218.18,
+   "word": 721
+  },
+  {
+   "alpha_h": 188.6,
+   "alpha_w": 210.5,
+   "file": "m_02d2.png",
+   "label": "glyph-02d2",
+   "native_h": 194.66,
+   "native_w": 217.29,
+   "word": 722
+  },
+  {
+   "alpha_h": 53.5,
+   "alpha_w": 211.2,
+   "file": "m_02d3.png",
+   "label": "glyph-02d3",
+   "native_h": 55.23,
+   "native_w": 217.99,
+   "word": 723
+  },
+  {
+   "alpha_h": 60.8,
+   "alpha_w": 211.6,
+   "file": "m_02d4.png",
+   "label": "glyph-02d4",
+   "native_h": 62.81,
+   "native_w": 218.39,
+   "word": 724
+  },
+  {
+   "alpha_h": 84.6,
+   "alpha_w": 206.9,
+   "file": "m_02d5.png",
+   "label": "glyph-02d5",
+   "native_h": 87.31,
+   "native_w": 213.54,
+   "word": 725
+  },
+  {
+   "alpha_h": 61.7,
+   "alpha_w": 211.9,
+   "file": "m_02d6.png",
+   "label": "glyph-02d6",
+   "native_h": 63.72,
+   "native_w": 218.74,
+   "word": 726
+  },
+  {
+   "alpha_h": 84.5,
+   "alpha_w": 215.5,
+   "file": "m_02d7.png",
+   "label": "glyph-02d7",
+   "native_h": 87.23,
+   "native_w": 222.43,
+   "word": 727
+  },
+  {
+   "alpha_h": 68.3,
+   "alpha_w": 212.8,
+   "file": "m_02d8.png",
+   "label": "glyph-02d8",
+   "native_h": 70.52,
+   "native_w": 219.69,
+   "word": 728
+  },
+  {
+   "alpha_h": 210.5,
+   "alpha_w": 146.9,
+   "file": "m_02d9.png",
+   "label": "glyph-02d9",
+   "native_h": 217.24,
+   "native_w": 151.64,
+   "word": 729
+  },
+  {
+   "alpha_h": 44.3,
+   "alpha_w": 214.4,
+   "file": "m_02da.png",
+   "label": "glyph-02da",
+   "native_h": 45.71,
+   "native_w": 221.3,
+   "word": 730
+  },
+  {
+   "alpha_h": 190.9,
+   "alpha_w": 211,
+   "file": "m_02db.png",
+   "label": "glyph-02db",
+   "native_h": 197.05,
+   "native_w": 217.78,
+   "word": 731
+  },
+  {
+   "alpha_h": 77.5,
+   "alpha_w": 212.8,
+   "file": "m_02dc.png",
+   "label": "glyph-02dc",
+   "native_h": 80,
+   "native_w": 219.65,
+   "word": 732
+  },
+  {
+   "alpha_h": 212.1,
+   "alpha_w": 193.4,
+   "file": "m_02dd.png",
+   "label": "glyph-02dd",
+   "native_h": 218.95,
+   "native_w": 199.64,
+   "word": 733
+  },
+  {
+   "alpha_h": 56.7,
+   "alpha_w": 211.4,
+   "file": "m_02de.png",
+   "label": "glyph-02de",
+   "native_h": 58.51,
+   "native_w": 218.18,
+   "word": 734
+  },
+  {
+   "alpha_h": 161.7,
+   "alpha_w": 210.6,
+   "file": "m_02df.png",
+   "label": "glyph-02df",
+   "native_h": 166.89,
+   "native_w": 217.36,
+   "word": 735
+  },
+  {
+   "alpha_h": 88.8,
+   "alpha_w": 213.5,
+   "file": "m_02e0.png",
+   "label": "glyph-02e0",
+   "native_h": 91.69,
+   "native_w": 220.37,
+   "word": 736
+  },
+  {
+   "alpha_h": 31.9,
+   "alpha_w": 214.1,
+   "file": "m_02e1.png",
+   "label": "glyph-02e1",
+   "native_h": 32.97,
+   "native_w": 221.01,
+   "word": 737
+  },
+  {
+   "alpha_h": 32.3,
+   "alpha_w": 155.3,
+   "file": "m_02e2.png",
+   "label": "glyph-02e2",
+   "native_h": 33.32,
+   "native_w": 160.33,
+   "word": 738
+  },
+  {
+   "alpha_h": 249.1,
+   "alpha_w": 249.3,
+   "file": "m_02e3.png",
+   "label": "glyph-02e3",
+   "native_h": 257.17,
+   "native_w": 257.32,
+   "word": 739
+  },
+  {
+   "alpha_h": 196.5,
+   "alpha_w": 207.8,
+   "file": "m_02e4.png",
+   "label": "glyph-02e4",
+   "native_h": 202.86,
+   "native_w": 214.55,
+   "word": 740
+  },
+  {
+   "alpha_h": 29.8,
+   "alpha_w": 216,
+   "file": "m_0321.png",
+   "label": "glyph-0321",
+   "native_h": 30.74,
+   "native_w": 222.93,
+   "word": 801
+  },
+  {
+   "alpha_h": 45.5,
+   "alpha_w": 217.1,
+   "file": "m_0322.png",
+   "label": "glyph-0322",
+   "native_h": 46.97,
+   "native_w": 224.11,
+   "word": 802
+  },
+  {
+   "alpha_h": 67,
+   "alpha_w": 215.1,
+   "file": "m_0323.png",
+   "label": "glyph-0323",
+   "native_h": 69.2,
+   "native_w": 222.04,
+   "word": 803
+  },
+  {
+   "alpha_h": 78.3,
+   "alpha_w": 213.5,
+   "file": "m_0324.png",
+   "label": "glyph-0324",
+   "native_h": 80.85,
+   "native_w": 220.38,
+   "word": 804
+  },
+  {
+   "alpha_h": 40.5,
+   "alpha_w": 217.5,
+   "file": "m_0325.png",
+   "label": "glyph-0325",
+   "native_h": 41.76,
+   "native_w": 224.49,
+   "word": 805
+  },
+  {
+   "alpha_h": 64.3,
+   "alpha_w": 216.8,
+   "file": "m_0326.png",
+   "label": "glyph-0326",
+   "native_h": 66.37,
+   "native_w": 223.75,
+   "word": 806
+  },
+  {
+   "alpha_h": 30.5,
+   "alpha_w": 214.6,
+   "file": "m_0327.png",
+   "label": "glyph-0327",
+   "native_h": 31.53,
+   "native_w": 221.48,
+   "word": 807
+  },
+  {
+   "alpha_h": 94.1,
+   "alpha_w": 213.2,
+   "file": "m_0328.png",
+   "label": "glyph-0328",
+   "native_h": 97.17,
+   "native_w": 220.08,
+   "word": 808
+  },
+  {
+   "alpha_h": 63.3,
+   "alpha_w": 215.7,
+   "file": "m_0329.png",
+   "label": "glyph-0329",
+   "native_h": 65.37,
+   "native_w": 222.63,
+   "word": 809
+  },
+  {
+   "alpha_h": 66.9,
+   "alpha_w": 215.1,
+   "file": "m_032a.png",
+   "label": "glyph-032a",
+   "native_h": 69.1,
+   "native_w": 222.03,
+   "word": 810
+  },
+  {
+   "alpha_h": 58.3,
+   "alpha_w": 218.4,
+   "file": "m_032b.png",
+   "label": "glyph-032b",
+   "native_h": 60.16,
+   "native_w": 225.4,
+   "word": 811
+  },
+  {
+   "alpha_h": 50.3,
+   "alpha_w": 217.5,
+   "file": "m_032c.png",
+   "label": "glyph-032c",
+   "native_h": 51.91,
+   "native_w": 224.55,
+   "word": 812
+  },
+  {
+   "alpha_h": 81.2,
+   "alpha_w": 214.7,
+   "file": "m_032d.png",
+   "label": "glyph-032d",
+   "native_h": 83.85,
+   "native_w": 221.59,
+   "word": 813
+  },
+  {
+   "alpha_h": 65.9,
+   "alpha_w": 217.9,
+   "file": "m_032e.png",
+   "label": "glyph-032e",
+   "native_h": 68.06,
+   "native_w": 224.89,
+   "word": 814
+  },
+  {
+   "alpha_h": 56.8,
+   "alpha_w": 213.4,
+   "file": "m_032f.png",
+   "label": "glyph-032f",
+   "native_h": 58.6,
+   "native_w": 220.32,
+   "word": 815
+  },
+  {
+   "alpha_h": 55.8,
+   "alpha_w": 214.3,
+   "file": "m_0330.png",
+   "label": "glyph-0330",
+   "native_h": 57.56,
+   "native_w": 221.2,
+   "word": 816
+  },
+  {
+   "alpha_h": 94.7,
+   "alpha_w": 215.7,
+   "file": "m_0331.png",
+   "label": "glyph-0331",
+   "native_h": 97.71,
+   "native_w": 222.62,
+   "word": 817
+  },
+  {
+   "alpha_h": 90.3,
+   "alpha_w": 213.4,
+   "file": "m_0332.png",
+   "label": "glyph-0332",
+   "native_h": 93.25,
+   "native_w": 220.32,
+   "word": 818
+  },
+  {
+   "alpha_h": 48,
+   "alpha_w": 217.5,
+   "file": "m_0333.png",
+   "label": "glyph-0333",
+   "native_h": 49.56,
+   "native_w": 224.54,
+   "word": 819
+  },
+  {
+   "alpha_h": 90.7,
+   "alpha_w": 216.8,
+   "file": "m_0334.png",
+   "label": "glyph-0334",
+   "native_h": 93.64,
+   "native_w": 223.84,
+   "word": 820
+  },
+  {
+   "alpha_h": 134,
+   "alpha_w": 211,
+   "file": "m_0335.png",
+   "label": "glyph-0335",
+   "native_h": 138.34,
+   "native_w": 217.76,
+   "word": 821
+  },
+  {
+   "alpha_h": 98,
+   "alpha_w": 214.7,
+   "file": "m_0336.png",
+   "label": "glyph-0336",
+   "native_h": 101.2,
+   "native_w": 221.65,
+   "word": 822
+  },
+  {
+   "alpha_h": 146.1,
+   "alpha_w": 209.4,
+   "file": "m_0337.png",
+   "label": "glyph-0337",
+   "native_h": 150.78,
+   "native_w": 216.13,
+   "word": 823
+  },
+  {
+   "alpha_h": 209,
+   "alpha_w": 173.1,
+   "file": "m_0338.png",
+   "label": "glyph-0338",
+   "native_h": 215.7,
+   "native_w": 178.71,
+   "word": 824
+  },
+  {
+   "alpha_h": 167.5,
+   "alpha_w": 211,
+   "file": "m_0339.png",
+   "label": "glyph-0339",
+   "native_h": 172.85,
+   "native_w": 217.78,
+   "word": 825
+  },
+  {
+   "alpha_h": 107.9,
+   "alpha_w": 214.4,
+   "file": "m_033a.png",
+   "label": "glyph-033a",
+   "native_h": 111.35,
+   "native_w": 221.35,
+   "word": 826
+  },
+  {
+   "alpha_h": 208.9,
+   "alpha_w": 188.6,
+   "file": "m_033b.png",
+   "label": "glyph-033b",
+   "native_h": 215.62,
+   "native_w": 194.7,
+   "word": 827
+  },
+  {
+   "alpha_h": 214.9,
+   "alpha_w": 152.9,
+   "file": "m_033c.png",
+   "label": "glyph-033c",
+   "native_h": 221.82,
+   "native_w": 157.82,
+   "word": 828
+  },
+  {
+   "alpha_h": 208.2,
+   "alpha_w": 113.4,
+   "file": "m_033d.png",
+   "label": "glyph-033d",
+   "native_h": 214.87,
+   "native_w": 117.02,
+   "word": 829
+  },
+  {
+   "alpha_h": 207.1,
+   "alpha_w": 141,
+   "file": "m_033e.png",
+   "label": "glyph-033e",
+   "native_h": 213.81,
+   "native_w": 145.53,
+   "word": 830
+  },
+  {
+   "alpha_h": 74,
+   "alpha_w": 216.4,
+   "file": "m_033f.png",
+   "label": "glyph-033f",
+   "native_h": 76.42,
+   "native_w": 223.33,
+   "word": 831
+  },
+  {
+   "alpha_h": 133.3,
+   "alpha_w": 216.4,
+   "file": "m_0340.png",
+   "label": "glyph-0340",
+   "native_h": 137.57,
+   "native_w": 223.42,
+   "word": 832
+  },
+  {
+   "alpha_h": 106.4,
+   "alpha_w": 234.8,
+   "file": "m_0341.png",
+   "label": "glyph-0341",
+   "native_h": 109.8,
+   "native_w": 242.34,
+   "word": 833
+  },
+  {
+   "alpha_h": 177.9,
+   "alpha_w": 212.2,
+   "file": "m_0342.png",
+   "label": "glyph-0342",
+   "native_h": 183.68,
+   "native_w": 219.02,
+   "word": 834
+  },
+  {
+   "alpha_h": 198.4,
+   "alpha_w": 202.4,
+   "file": "m_0343.png",
+   "label": "glyph-0343",
+   "native_h": 204.83,
+   "native_w": 208.92,
+   "word": 835
+  },
+  {
+   "alpha_h": 214.6,
+   "alpha_w": 135.6,
+   "file": "m_0344.png",
+   "label": "glyph-0344",
+   "native_h": 221.48,
+   "native_w": 139.92,
+   "word": 836
+  },
+  {
+   "alpha_h": 215.7,
+   "alpha_w": 110.4,
+   "file": "m_0345.png",
+   "label": "glyph-0345",
+   "native_h": 222.61,
+   "native_w": 113.94,
+   "word": 837
+  },
+  {
+   "alpha_h": 210.3,
+   "alpha_w": 72.6,
+   "file": "m_0346.png",
+   "label": "glyph-0346",
+   "native_h": 217.11,
+   "native_w": 74.94,
+   "word": 838
+  },
+  {
+   "alpha_h": 206.2,
+   "alpha_w": 206.8,
+   "file": "m_0347.png",
+   "label": "glyph-0347",
+   "native_h": 212.88,
+   "native_w": 213.48,
+   "word": 839
+  },
+  {
+   "alpha_h": 107,
+   "alpha_w": 211.5,
+   "file": "m_0348.png",
+   "label": "glyph-0348",
+   "native_h": 110.43,
+   "native_w": 218.33,
+   "word": 840
+  },
+  {
+   "alpha_h": 208.9,
+   "alpha_w": 149,
+   "file": "m_0385.png",
+   "label": "glyph-0385",
+   "native_h": 215.6,
+   "native_w": 153.82,
+   "word": 901
+  },
+  {
+   "alpha_h": 208.7,
+   "alpha_w": 54.3,
+   "file": "m_0386.png",
+   "label": "glyph-0386",
+   "native_h": 215.39,
+   "native_w": 56.03,
+   "word": 902
+  },
+  {
+   "alpha_h": 198.3,
+   "alpha_w": 168.9,
+   "file": "m_0387.png",
+   "label": "glyph-0387",
+   "native_h": 204.71,
+   "native_w": 174.35,
+   "word": 903
+  },
+  {
+   "alpha_h": 214.2,
+   "alpha_w": 152.5,
+   "file": "m_0388.png",
+   "label": "glyph-0388",
+   "native_h": 221.11,
+   "native_w": 157.37,
+   "word": 904
+  },
+  {
+   "alpha_h": 113.1,
+   "alpha_w": 203.9,
+   "file": "m_0389.png",
+   "label": "glyph-0389",
+   "native_h": 116.78,
+   "native_w": 210.5,
+   "word": 905
+  },
+  {
+   "alpha_h": 203.6,
+   "alpha_w": 180.6,
+   "file": "m_038a.png",
+   "label": "glyph-038a",
+   "native_h": 210.17,
+   "native_w": 186.43,
+   "word": 906
+  },
+  {
+   "alpha_h": 49.3,
+   "alpha_w": 203.1,
+   "file": "m_038b.png",
+   "label": "glyph-038b",
+   "native_h": 50.87,
+   "native_w": 209.69,
+   "word": 907
+  },
+  {
+   "alpha_h": 209.3,
+   "alpha_w": 136,
+   "file": "m_038c.png",
+   "label": "glyph-038c",
+   "native_h": 216,
+   "native_w": 140.41,
+   "word": 908
+  },
+  {
+   "alpha_h": 209.6,
+   "alpha_w": 166.7,
+   "file": "m_038d.png",
+   "label": "glyph-038d",
+   "native_h": 216.37,
+   "native_w": 172.03,
+   "word": 909
+  },
+  {
+   "alpha_h": 206.3,
+   "alpha_w": 211.2,
+   "file": "m_038e.png",
+   "label": "glyph-038e",
+   "native_h": 213,
+   "native_w": 218.01,
+   "word": 910
+  },
+  {
+   "alpha_h": 210.2,
+   "alpha_w": 210.2,
+   "file": "m_038f.png",
+   "label": "glyph-038f",
+   "native_h": 216.99,
+   "native_w": 216.99,
+   "word": 911
+  },
+  {
+   "alpha_h": 199.2,
+   "alpha_w": 213.3,
+   "file": "m_0390.png",
+   "label": "glyph-0390",
+   "native_h": 205.65,
+   "native_w": 220.16,
+   "word": 912
+  },
+  {
+   "alpha_h": 207.9,
+   "alpha_w": 120.5,
+   "file": "m_0391.png",
+   "label": "glyph-0391",
+   "native_h": 214.65,
+   "native_w": 124.38,
+   "word": 913
+  },
+  {
+   "alpha_h": 210.4,
+   "alpha_w": 141.7,
+   "file": "m_0392.png",
+   "label": "glyph-0392",
+   "native_h": 217.17,
+   "native_w": 146.23,
+   "word": 914
+  },
+  {
+   "alpha_h": 182.5,
+   "alpha_w": 214.9,
+   "file": "m_0393.png",
+   "label": "glyph-0393",
+   "native_h": 188.37,
+   "native_w": 221.8,
+   "word": 915
+  },
+  {
+   "alpha_h": 214.7,
+   "alpha_w": 163.9,
+   "file": "m_0394.png",
+   "label": "glyph-0394",
+   "native_h": 221.58,
+   "native_w": 169.2,
+   "word": 916
+  },
+  {
+   "alpha_h": 209.3,
+   "alpha_w": 143.2,
+   "file": "m_0395.png",
+   "label": "glyph-0395",
+   "native_h": 216.09,
+   "native_w": 147.78,
+   "word": 917
+  },
+  {
+   "alpha_h": 210.2,
+   "alpha_w": 168.5,
+   "file": "m_0396.png",
+   "label": "glyph-0396",
+   "native_h": 216.97,
+   "native_w": 173.97,
+   "word": 918
+  },
+  {
+   "alpha_h": 209.3,
+   "alpha_w": 159.3,
+   "file": "m_0397.png",
+   "label": "glyph-0397",
+   "native_h": 216.01,
+   "native_w": 164.42,
+   "word": 919
+  },
+  {
+   "alpha_h": 207.5,
+   "alpha_w": 206.5,
+   "file": "m_0398.png",
+   "label": "glyph-0398",
+   "native_h": 214.2,
+   "native_w": 213.21,
+   "word": 920
+  },
+  {
+   "alpha_h": 210.9,
+   "alpha_w": 206.5,
+   "file": "m_0399.png",
+   "label": "glyph-0399",
+   "native_h": 217.73,
+   "native_w": 213.14,
+   "word": 921
+  },
+  {
+   "alpha_h": 209.7,
+   "alpha_w": 198.1,
+   "file": "m_039a.png",
+   "label": "glyph-039a",
+   "native_h": 216.47,
+   "native_w": 204.44,
+   "word": 922
+  },
+  {
+   "alpha_h": 198.9,
+   "alpha_w": 211.9,
+   "file": "m_039b.png",
+   "label": "glyph-039b",
+   "native_h": 205.35,
+   "native_w": 218.76,
+   "word": 923
+  },
+  {
+   "alpha_h": 38.2,
+   "alpha_w": 212.2,
+   "file": "m_039c.png",
+   "label": "glyph-039c",
+   "native_h": 39.46,
+   "native_w": 219.01,
+   "word": 924
+  },
+  {
+   "alpha_h": 50.1,
+   "alpha_w": 213.2,
+   "file": "m_039d.png",
+   "label": "glyph-039d",
+   "native_h": 51.71,
+   "native_w": 220.11,
+   "word": 925
+  },
+  {
+   "alpha_h": 84.8,
+   "alpha_w": 216.7,
+   "file": "m_039e.png",
+   "label": "glyph-039e",
+   "native_h": 87.5,
+   "native_w": 223.66,
+   "word": 926
+  },
+  {
+   "alpha_h": 40.9,
+   "alpha_w": 210.8,
+   "file": "m_039f.png",
+   "label": "glyph-039f",
+   "native_h": 42.23,
+   "native_w": 217.57,
+   "word": 927
+  },
+  {
+   "alpha_h": 116.1,
+   "alpha_w": 206.5,
+   "file": "m_03a0.png",
+   "label": "glyph-03a0",
+   "native_h": 119.88,
+   "native_w": 213.12,
+   "word": 928
+  },
+  {
+   "alpha_h": 111.4,
+   "alpha_w": 211.9,
+   "file": "m_03a1.png",
+   "label": "glyph-03a1",
+   "native_h": 115.02,
+   "native_w": 218.71,
+   "word": 929
+  },
+  {
+   "alpha_h": 58.8,
+   "alpha_w": 205.8,
+   "file": "m_03a2.png",
+   "label": "glyph-03a2",
+   "native_h": 60.72,
+   "native_w": 212.42,
+   "word": 930
+  },
+  {
+   "alpha_h": 209.3,
+   "alpha_w": 209.3,
+   "file": "m_03a3.png",
+   "label": "glyph-03a3",
+   "native_h": 216.05,
+   "native_w": 216.05,
+   "word": 931
+  },
+  {
+   "alpha_h": 211.1,
+   "alpha_w": 210.9,
+   "file": "m_03a4.png",
+   "label": "glyph-03a4",
+   "native_h": 217.88,
+   "native_w": 217.71,
+   "word": 932
+  },
+  {
+   "alpha_h": 208,
+   "alpha_w": 182.9,
+   "file": "m_03a5.png",
+   "label": "glyph-03a5",
+   "native_h": 214.75,
+   "native_w": 188.8,
+   "word": 933
+  },
+  {
+   "alpha_h": 205.5,
+   "alpha_w": 183.5,
+   "file": "m_03a6.png",
+   "label": "glyph-03a6",
+   "native_h": 212.1,
+   "native_w": 189.4,
+   "word": 934
+  },
+  {
+   "alpha_h": 212.2,
+   "alpha_w": 184.8,
+   "file": "m_03a7.png",
+   "label": "glyph-03a7",
+   "native_h": 219.1,
+   "native_w": 190.79,
+   "word": 935
+  },
+  {
+   "alpha_h": 209.6,
+   "alpha_w": 195.2,
+   "file": "m_03a8.png",
+   "label": "glyph-03a8",
+   "native_h": 216.36,
+   "native_w": 201.46,
+   "word": 936
+  },
+  {
+   "alpha_h": 54.9,
+   "alpha_w": 164.4,
+   "file": "m_03a9.png",
+   "label": "glyph-03a9",
+   "native_h": 56.66,
+   "native_w": 169.75,
+   "word": 937
+  },
+  {
+   "alpha_h": 57,
+   "alpha_w": 213,
+   "file": "m_03aa.png",
+   "label": "glyph-03aa",
+   "native_h": 58.81,
+   "native_w": 219.91,
+   "word": 938
+  },
+  {
+   "alpha_h": 66.7,
+   "alpha_w": 200.1,
+   "file": "m_03ab.png",
+   "label": "glyph-03ab",
+   "native_h": 68.8,
+   "native_w": 206.6,
+   "word": 939
+  },
+  {
+   "alpha_h": 211.2,
+   "alpha_w": 208.9,
+   "file": "m_03ac.png",
+   "label": "glyph-03ac",
+   "native_h": 218.02,
+   "native_w": 215.59,
+   "word": 940
+  },
+  {
+   "alpha_h": 94.4,
+   "alpha_w": 131.7,
+   "file": "m_04b1.png",
+   "label": "glyph-04b1",
+   "native_h": 97.43,
+   "native_w": 135.9,
+   "word": 1201
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 135.7,
+   "file": "m_04b2.png",
+   "label": "glyph-04b2",
+   "native_h": 146.02,
+   "native_w": 140.03,
+   "word": 1202
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 131.5,
+   "file": "m_04b3.png",
+   "label": "glyph-04b3",
+   "native_h": 96.9,
+   "native_w": 135.78,
+   "word": 1203
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 151.7,
+   "file": "m_04b4.png",
+   "label": "glyph-04b4",
+   "native_h": 146.08,
+   "native_w": 156.61,
+   "word": 1204
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 131.6,
+   "file": "m_04b6.png",
+   "label": "glyph-04b6",
+   "native_h": 146.08,
+   "native_w": 135.81,
+   "word": 1206
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 151.7,
+   "file": "m_04b7.png",
+   "label": "glyph-04b7",
+   "native_h": 146.05,
+   "native_w": 156.61,
+   "word": 1207
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 135.7,
+   "file": "m_04b8.png",
+   "label": "glyph-04b8",
+   "native_h": 146.02,
+   "native_w": 140.03,
+   "word": 1208
+  },
+  {
+   "alpha_h": 130.5,
+   "alpha_w": 84.1,
+   "file": "m_04b9.png",
+   "label": "glyph-04b9",
+   "native_h": 134.69,
+   "native_w": 86.86,
+   "word": 1209
+  },
+  {
+   "alpha_h": 178.1,
+   "alpha_w": 128.7,
+   "file": "m_04ba.png",
+   "label": "glyph-04ba",
+   "native_h": 183.87,
+   "native_w": 132.87,
+   "word": 1210
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 143.9,
+   "file": "m_04bb.png",
+   "label": "glyph-04bb",
+   "native_h": 146.1,
+   "native_w": 148.58,
+   "word": 1211
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 88,
+   "file": "m_04bc.png",
+   "label": "glyph-04bc",
+   "native_h": 146.08,
+   "native_w": 90.79,
+   "word": 1212
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 186.6,
+   "file": "m_04bd.png",
+   "label": "glyph-04bd",
+   "native_h": 96.9,
+   "native_w": 192.59,
+   "word": 1213
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 135.7,
+   "file": "m_04be.png",
+   "label": "glyph-04be",
+   "native_h": 96.9,
+   "native_w": 140.03,
+   "word": 1214
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 131.5,
+   "file": "m_04bf.png",
+   "label": "glyph-04bf",
+   "native_h": 96.9,
+   "native_w": 135.78,
+   "word": 1215
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 130.4,
+   "file": "m_04c2.png",
+   "label": "glyph-04c2",
+   "native_h": 96.9,
+   "native_w": 134.63,
+   "word": 1218
+  },
+  {
+   "alpha_h": 94.4,
+   "alpha_w": 131.5,
+   "file": "m_04c3.png",
+   "label": "glyph-04c3",
+   "native_h": 97.43,
+   "native_w": 135.78,
+   "word": 1219
+  },
+  {
+   "alpha_h": 122.7,
+   "alpha_w": 111.3,
+   "file": "m_04c4.png",
+   "label": "glyph-04c4",
+   "native_h": 126.67,
+   "native_w": 114.86,
+   "word": 1220
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 114,
+   "file": "m_04c6.png",
+   "label": "glyph-04c6",
+   "native_h": 96.93,
+   "native_w": 117.69,
+   "word": 1222
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 190.6,
+   "file": "m_04c7.png",
+   "label": "glyph-04c7",
+   "native_h": 96.93,
+   "native_w": 196.72,
+   "word": 1223
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 151.8,
+   "file": "m_04c8.png",
+   "label": "glyph-04c8",
+   "native_h": 96.93,
+   "native_w": 156.69,
+   "word": 1224
+  },
+  {
+   "alpha_h": 93.9,
+   "alpha_w": 132.3,
+   "file": "m_04ca.png",
+   "label": "glyph-04ca",
+   "native_h": 96.9,
+   "native_w": 136.55,
+   "word": 1226
+  },
+  {
+   "alpha_h": 123.2,
+   "alpha_w": 125.4,
+   "file": "m_04cb.png",
+   "label": "glyph-04cb",
+   "native_h": 127.13,
+   "native_w": 129.43,
+   "word": 1227
+  },
+  {
+   "alpha_h": 94.4,
+   "alpha_w": 150.9,
+   "file": "m_04cc.png",
+   "label": "glyph-04cc",
+   "native_h": 97.43,
+   "native_w": 155.75,
+   "word": 1228
+  },
+  {
+   "alpha_h": 94.2,
+   "alpha_w": 123.4,
+   "file": "m_04cd.png",
+   "label": "glyph-04cd",
+   "native_h": 97.21,
+   "native_w": 127.39,
+   "word": 1229
+  },
+  {
+   "alpha_h": 66.4,
+   "alpha_w": 69.9,
+   "file": "m_04ce.png",
+   "label": "glyph-04ce",
+   "native_h": 68.52,
+   "native_w": 72.2,
+   "word": 1230
+  },
+  {
+   "alpha_h": 94.4,
+   "alpha_w": 195.4,
+   "file": "m_04cf.png",
+   "label": "glyph-04cf",
+   "native_h": 97.43,
+   "native_w": 201.72,
+   "word": 1231
+  },
+  {
+   "alpha_h": 91.1,
+   "alpha_w": 98.7,
+   "file": "m_04d0.png",
+   "label": "glyph-04d0",
+   "native_h": 94.06,
+   "native_w": 101.92,
+   "word": 1232
+  },
+  {
+   "alpha_h": 169.4,
+   "alpha_w": 160.9,
+   "file": "m_04d1.png",
+   "label": "glyph-04d1",
+   "native_h": 174.82,
+   "native_w": 166.05,
+   "word": 1233
+  },
+  {
+   "alpha_h": 141.5,
+   "alpha_w": 192.2,
+   "file": "m_04d2.png",
+   "label": "glyph-04d2",
+   "native_h": 146.1,
+   "native_w": 198.36,
+   "word": 1234
+  },
+  {
+   "alpha_h": 142.3,
+   "alpha_w": 160.6,
+   "file": "m_04d3.png",
+   "label": "glyph-04d3",
+   "native_h": 146.89,
+   "native_w": 165.78,
+   "word": 1235
+  },
+  {
+   "alpha_h": 78.1,
+   "alpha_w": 91.1,
+   "file": "m_04d4.png",
+   "label": "glyph-04d4",
+   "native_h": 80.65,
+   "native_w": 94.06,
+   "word": 1236
+  },
+  {
+   "alpha_h": 169.4,
+   "alpha_w": 155.8,
+   "file": "m_04d5.png",
+   "label": "glyph-04d5",
+   "native_h": 174.86,
+   "native_w": 160.86,
+   "word": 1237
+  },
+  {
+   "alpha_h": 103.4,
+   "alpha_w": 71.4,
+   "file": "m_04d6.png",
+   "label": "glyph-04d6",
+   "native_h": 106.7,
+   "native_w": 73.68,
+   "word": 1238
+  },
+  {
+   "alpha_h": 78.8,
+   "alpha_w": 64.7,
+   "file": "m_04d7.png",
+   "label": "glyph-04d7",
+   "native_h": 81.36,
+   "native_w": 66.8,
+   "word": 1239
+  },
+  {
+   "alpha_h": 128,
+   "alpha_w": 111.9,
+   "file": "m_0835.png",
+   "label": "glyph-0835",
+   "native_h": 132.13,
+   "native_w": 115.52,
+   "word": 2101
+  },
+  {
+   "alpha_h": 67.6,
+   "alpha_w": 126.1,
+   "file": "m_0836.png",
+   "label": "glyph-0836",
+   "native_h": 69.73,
+   "native_w": 130.17,
+   "word": 2102
+  },
+  {
+   "alpha_h": 109.9,
+   "alpha_w": 123.9,
+   "file": "m_0838.png",
+   "label": "glyph-0838",
+   "native_h": 113.44,
+   "native_w": 127.85,
+   "word": 2104
+  },
+  {
+   "alpha_h": 90.6,
+   "alpha_w": 126.3,
+   "file": "m_0839.png",
+   "label": "glyph-0839",
+   "native_h": 93.54,
+   "native_w": 130.41,
+   "word": 2105
+  },
+  {
+   "alpha_h": 126.9,
+   "alpha_w": 126.9,
+   "file": "m_083a.png",
+   "label": "glyph-083a",
+   "native_h": 130.99,
+   "native_w": 130.99,
+   "word": 2106
+  },
+  {
+   "alpha_h": 45.5,
+   "alpha_w": 125.6,
+   "file": "m_083b.png",
+   "label": "glyph-083b",
+   "native_h": 46.93,
+   "native_w": 129.67,
+   "word": 2107
+  },
+  {
+   "alpha_h": 90.4,
+   "alpha_w": 125.8,
+   "file": "m_083d.png",
+   "label": "glyph-083d",
+   "native_h": 93.34,
+   "native_w": 129.87,
+   "word": 2109
+  },
+  {
+   "alpha_h": 41.2,
+   "alpha_w": 126.8,
+   "file": "m_083e.png",
+   "label": "glyph-083e",
+   "native_h": 42.48,
+   "native_w": 130.86,
+   "word": 2110
+  },
+  {
+   "alpha_h": 117.4,
+   "alpha_w": 43.8,
+   "file": "m_0841.png",
+   "label": "glyph-0841",
+   "native_h": 121.21,
+   "native_w": 45.24,
+   "word": 2113
+  },
+  {
+   "alpha_h": 127.2,
+   "alpha_w": 127.1,
+   "file": "m_0842.png",
+   "label": "glyph-0842",
+   "native_h": 131.25,
+   "native_w": 131.25,
+   "word": 2114
+  },
+  {
+   "alpha_h": 127.4,
+   "alpha_w": 127.5,
+   "file": "m_0843.png",
+   "label": "glyph-0843",
+   "native_h": 131.52,
+   "native_w": 131.61,
+   "word": 2115
+  },
+  {
+   "alpha_h": 126.5,
+   "alpha_w": 126.5,
+   "file": "m_0844.png",
+   "label": "glyph-0844",
+   "native_h": 130.61,
+   "native_w": 130.62,
+   "word": 2116
+  },
+  {
+   "alpha_h": 127,
+   "alpha_w": 43.8,
+   "file": "m_0846.png",
+   "label": "glyph-0846",
+   "native_h": 131.14,
+   "native_w": 45.19,
+   "word": 2118
+  },
+  {
+   "alpha_h": 41.3,
+   "alpha_w": 127.2,
+   "file": "m_0848.png",
+   "label": "glyph-0848",
+   "native_h": 42.64,
+   "native_w": 131.34,
+   "word": 2120
+  },
+  {
+   "alpha_h": 127,
+   "alpha_w": 95.6,
+   "file": "m_084a.png",
+   "label": "glyph-084a",
+   "native_h": 131.06,
+   "native_w": 98.72,
+   "word": 2122
+  },
+  {
+   "alpha_h": 67,
+   "alpha_w": 126.5,
+   "file": "m_084b.png",
+   "label": "glyph-084b",
+   "native_h": 69.17,
+   "native_w": 130.57,
+   "word": 2123
+  },
+  {
+   "alpha_h": 127,
+   "alpha_w": 127,
+   "file": "m_084c.png",
+   "label": "glyph-084c",
+   "native_h": 131.08,
+   "native_w": 131.08,
+   "word": 2124
+  },
+  {
+   "alpha_h": 127.6,
+   "alpha_w": 127.6,
+   "file": "m_084d.png",
+   "label": "glyph-084d",
+   "native_h": 131.71,
+   "native_w": 131.71,
+   "word": 2125
+  },
+  {
+   "alpha_h": 125.6,
+   "alpha_w": 94.9,
+   "file": "m_084f.png",
+   "label": "glyph-084f",
+   "native_h": 129.68,
+   "native_w": 97.99,
+   "word": 2127
+  },
+  {
+   "alpha_h": 119.3,
+   "alpha_w": 127,
+   "file": "m_0851.png",
+   "label": "glyph-0851",
+   "native_h": 123.11,
+   "native_w": 131.1,
+   "word": 2129
+  },
+  {
+   "alpha_h": 125,
+   "alpha_w": 126.3,
+   "file": "m_0852.png",
+   "label": "glyph-0852",
+   "native_h": 129.04,
+   "native_w": 130.39,
+   "word": 2130
+  },
+  {
+   "alpha_h": 66.4,
+   "alpha_w": 127.6,
+   "file": "m_0854.png",
+   "label": "glyph-0854",
+   "native_h": 68.53,
+   "native_w": 131.75,
+   "word": 2132
+  },
+  {
+   "alpha_h": 38.2,
+   "alpha_w": 127.5,
+   "file": "m_0855.png",
+   "label": "glyph-0855",
+   "native_h": 39.41,
+   "native_w": 131.59,
+   "word": 2133
+  },
+  {
+   "alpha_h": 126.9,
+   "alpha_w": 125.5,
+   "file": "m_0856.png",
+   "label": "glyph-0856",
+   "native_h": 130.97,
+   "native_w": 129.52,
+   "word": 2134
+  },
+  {
+   "alpha_h": 30.9,
+   "alpha_w": 120.9,
+   "file": "m_0858.png",
+   "label": "glyph-0858",
+   "native_h": 31.9,
+   "native_w": 124.77,
+   "word": 2136
+  },
+  {
+   "alpha_h": 38.4,
+   "alpha_w": 123.4,
+   "file": "m_0859.png",
+   "label": "glyph-0859",
+   "native_h": 39.63,
+   "native_w": 127.33,
+   "word": 2137
+  },
+  {
+   "alpha_h": 40.5,
+   "alpha_w": 121.9,
+   "file": "m_085a.png",
+   "label": "glyph-085a",
+   "native_h": 41.76,
+   "native_w": 125.88,
+   "word": 2138
+  },
+  {
+   "alpha_h": 116.6,
+   "alpha_w": 115.6,
+   "file": "m_085b.png",
+   "label": "glyph-085b",
+   "native_h": 120.31,
+   "native_w": 119.29,
+   "word": 2139
+  },
+  {
+   "alpha_h": 48.9,
+   "alpha_w": 118.4,
+   "file": "m_085c.png",
+   "label": "glyph-085c",
+   "native_h": 50.52,
+   "native_w": 122.26,
+   "word": 2140
+  },
+  {
+   "alpha_h": 95.2,
+   "alpha_w": 122.9,
+   "file": "m_089e.png",
+   "label": "glyph-089e",
+   "native_h": 98.25,
+   "native_w": 126.82,
+   "word": 2206
+  },
+  {
+   "alpha_h": 65.2,
+   "alpha_w": 124,
+   "file": "m_089f.png",
+   "label": "glyph-089f",
+   "native_h": 67.27,
+   "native_w": 127.98,
+   "word": 2207
+  },
+  {
+   "alpha_h": 126.3,
+   "alpha_w": 115.8,
+   "file": "m_08a0.png",
+   "label": "glyph-08a0",
+   "native_h": 130.36,
+   "native_w": 119.52,
+   "word": 2208
+  },
+  {
+   "alpha_h": 122.9,
+   "alpha_w": 122.9,
+   "file": "m_08a1.png",
+   "label": "glyph-08a1",
+   "native_h": 126.91,
+   "native_w": 126.91,
+   "word": 2209
+  },
+  {
+   "alpha_h": 122.9,
+   "alpha_w": 124.7,
+   "file": "m_08a8.png",
+   "label": "glyph-08a8",
+   "native_h": 126.9,
+   "native_w": 128.75,
+   "word": 2216
+  },
+  {
+   "alpha_h": 124.5,
+   "alpha_w": 85.3,
+   "file": "m_08a9.png",
+   "label": "glyph-08a9",
+   "native_h": 128.49,
+   "native_w": 88.02,
+   "word": 2217
+  },
+  {
+   "alpha_h": 112.6,
+   "alpha_w": 128.7,
+   "file": "m_08b0.png",
+   "label": "glyph-08b0",
+   "native_h": 116.27,
+   "native_w": 132.83,
+   "word": 2224
+  },
+  {
+   "alpha_h": 124.9,
+   "alpha_w": 90.4,
+   "file": "m_08b1.png",
+   "label": "glyph-08b1",
+   "native_h": 128.97,
+   "native_w": 93.27,
+   "word": 2225
+  },
+  {
+   "alpha_h": 88.3,
+   "alpha_w": 77.7,
+   "file": "m_08b6.png",
+   "label": "glyph-08b6",
+   "native_h": 91.16,
+   "native_w": 80.23,
+   "word": 2230
+  },
+  {
+   "alpha_h": 101.5,
+   "alpha_w": 127,
+   "file": "m_08b9.png",
+   "label": "glyph-08b9",
+   "native_h": 104.79,
+   "native_w": 131.12,
+   "word": 2233
+  },
+  {
+   "alpha_h": 42.5,
+   "alpha_w": 126.2,
+   "file": "m_08ba.png",
+   "label": "glyph-08ba",
+   "native_h": 43.87,
+   "native_w": 130.22,
+   "word": 2234
+  },
+  {
+   "alpha_h": 51.4,
+   "alpha_w": 123.3,
+   "file": "m_08bb.png",
+   "label": "glyph-08bb",
+   "native_h": 53.01,
+   "native_w": 127.32,
+   "word": 2235
+  },
+  {
+   "alpha_h": 31.3,
+   "alpha_w": 126.1,
+   "file": "m_08bc.png",
+   "label": "glyph-08bc",
+   "native_h": 32.31,
+   "native_w": 130.2,
+   "word": 2236
+  },
+  {
+   "alpha_h": 67.5,
+   "alpha_w": 125.8,
+   "file": "m_08bd.png",
+   "label": "glyph-08bd",
+   "native_h": 69.66,
+   "native_w": 129.82,
+   "word": 2237
+  },
+  {
+   "alpha_h": 44.3,
+   "alpha_w": 125.2,
+   "file": "m_08be.png",
+   "label": "glyph-08be",
+   "native_h": 45.76,
+   "native_w": 129.26,
+   "word": 2238
+  },
+  {
+   "alpha_h": 21.4,
+   "alpha_w": 124.9,
+   "file": "m_08bf.png",
+   "label": "glyph-08bf",
+   "native_h": 22.09,
+   "native_w": 128.89,
+   "word": 2239
+  },
+  {
+   "alpha_h": 63.3,
+   "alpha_w": 112.3,
+   "file": "m_08c0.png",
+   "label": "glyph-08c0",
+   "native_h": 65.37,
+   "native_w": 115.91,
+   "word": 2240
+  },
+  {
+   "alpha_h": 130.1,
+   "alpha_w": 130,
+   "file": "m_08fe.png",
+   "label": "glyph-08fe",
+   "native_h": 134.3,
+   "native_w": 134.24,
+   "word": 2302
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 129.7,
+   "file": "m_08ff.png",
+   "label": "glyph-08ff",
+   "native_h": 134.2,
+   "native_w": 133.91,
+   "word": 2303
+  },
+  {
+   "alpha_h": 129.4,
+   "alpha_w": 129.4,
+   "file": "m_0900.png",
+   "label": "glyph-0900",
+   "native_h": 133.57,
+   "native_w": 133.59,
+   "word": 2304
+  },
+  {
+   "alpha_h": 129.8,
+   "alpha_w": 129.6,
+   "file": "m_0901.png",
+   "label": "glyph-0901",
+   "native_h": 134.01,
+   "native_w": 133.8,
+   "word": 2305
+  },
+  {
+   "alpha_h": 129.8,
+   "alpha_w": 130.2,
+   "file": "m_0902.png",
+   "label": "glyph-0902",
+   "native_h": 134.02,
+   "native_w": 134.43,
+   "word": 2306
+  },
+  {
+   "alpha_h": 129,
+   "alpha_w": 125.6,
+   "file": "m_0903.png",
+   "label": "glyph-0903",
+   "native_h": 133.2,
+   "native_w": 129.6,
+   "word": 2307
+  },
+  {
+   "alpha_h": 129.5,
+   "alpha_w": 129.6,
+   "file": "m_0904.png",
+   "label": "glyph-0904",
+   "native_h": 133.72,
+   "native_w": 133.75,
+   "word": 2308
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130,
+   "file": "m_0905.png",
+   "label": "glyph-0905",
+   "native_h": 134.17,
+   "native_w": 134.24,
+   "word": 2309
+  },
+  {
+   "alpha_h": 129,
+   "alpha_w": 128.7,
+   "file": "m_0906.png",
+   "label": "glyph-0906",
+   "native_h": 133.18,
+   "native_w": 132.88,
+   "word": 2310
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130,
+   "file": "m_0907.png",
+   "label": "glyph-0907",
+   "native_h": 134.24,
+   "native_w": 134.21,
+   "word": 2311
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130,
+   "file": "m_0908.png",
+   "label": "glyph-0908",
+   "native_h": 134.18,
+   "native_w": 134.24,
+   "word": 2312
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 129.8,
+   "file": "m_0909.png",
+   "label": "glyph-0909",
+   "native_h": 134.21,
+   "native_w": 134,
+   "word": 2313
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130,
+   "file": "m_090a.png",
+   "label": "glyph-090a",
+   "native_h": 134.24,
+   "native_w": 134.24,
+   "word": 2314
+  },
+  {
+   "alpha_h": 129.7,
+   "alpha_w": 129.6,
+   "file": "m_090b.png",
+   "label": "glyph-090b",
+   "native_h": 133.91,
+   "native_w": 133.82,
+   "word": 2315
+  },
+  {
+   "alpha_h": 129.7,
+   "alpha_w": 130.2,
+   "file": "m_090c.png",
+   "label": "glyph-090c",
+   "native_h": 133.93,
+   "native_w": 134.4,
+   "word": 2316
+  },
+  {
+   "alpha_h": 129.6,
+   "alpha_w": 130.1,
+   "file": "m_090d.png",
+   "label": "glyph-090d",
+   "native_h": 133.83,
+   "native_w": 134.29,
+   "word": 2317
+  },
+  {
+   "alpha_h": 129.6,
+   "alpha_w": 129.7,
+   "file": "m_090e.png",
+   "label": "glyph-090e",
+   "native_h": 133.78,
+   "native_w": 133.85,
+   "word": 2318
+  },
+  {
+   "alpha_h": 128.1,
+   "alpha_w": 129.4,
+   "file": "m_090f.png",
+   "label": "glyph-090f",
+   "native_h": 132.2,
+   "native_w": 133.55,
+   "word": 2319
+  },
+  {
+   "alpha_h": 127.6,
+   "alpha_w": 122.7,
+   "file": "m_0910.png",
+   "label": "glyph-0910",
+   "native_h": 131.68,
+   "native_w": 126.63,
+   "word": 2320
+  },
+  {
+   "alpha_h": 130.2,
+   "alpha_w": 130.2,
+   "file": "m_0911.png",
+   "label": "glyph-0911",
+   "native_h": 134.45,
+   "native_w": 134.39,
+   "word": 2321
+  },
+  {
+   "alpha_h": 129.8,
+   "alpha_w": 130.1,
+   "file": "m_0912.png",
+   "label": "glyph-0912",
+   "native_h": 134.03,
+   "native_w": 134.32,
+   "word": 2322
+  },
+  {
+   "alpha_h": 129.6,
+   "alpha_w": 130,
+   "file": "m_0913.png",
+   "label": "glyph-0913",
+   "native_h": 133.75,
+   "native_w": 134.24,
+   "word": 2323
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130,
+   "file": "m_0914.png",
+   "label": "glyph-0914",
+   "native_h": 134.24,
+   "native_w": 134.24,
+   "word": 2324
+  },
+  {
+   "alpha_h": 129.5,
+   "alpha_w": 129.8,
+   "file": "m_0915.png",
+   "label": "glyph-0915",
+   "native_h": 133.7,
+   "native_w": 133.97,
+   "word": 2325
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130.1,
+   "file": "m_0916.png",
+   "label": "glyph-0916",
+   "native_h": 134.24,
+   "native_w": 134.34,
+   "word": 2326
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130,
+   "file": "m_0917.png",
+   "label": "glyph-0917",
+   "native_h": 134.24,
+   "native_w": 134.15,
+   "word": 2327
+  },
+  {
+   "alpha_h": 129.8,
+   "alpha_w": 129.5,
+   "file": "m_0918.png",
+   "label": "glyph-0918",
+   "native_h": 133.96,
+   "native_w": 133.65,
+   "word": 2328
+  },
+  {
+   "alpha_h": 129.5,
+   "alpha_w": 129.9,
+   "file": "m_0919.png",
+   "label": "glyph-0919",
+   "native_h": 133.66,
+   "native_w": 134.08,
+   "word": 2329
+  },
+  {
+   "alpha_h": 129.4,
+   "alpha_w": 129.3,
+   "file": "m_091a.png",
+   "label": "glyph-091a",
+   "native_h": 133.53,
+   "native_w": 133.49,
+   "word": 2330
+  },
+  {
+   "alpha_h": 130.1,
+   "alpha_w": 129.9,
+   "file": "m_091b.png",
+   "label": "glyph-091b",
+   "native_h": 134.25,
+   "native_w": 134.1,
+   "word": 2331
+  },
+  {
+   "alpha_h": 129.8,
+   "alpha_w": 130,
+   "file": "m_091c.png",
+   "label": "glyph-091c",
+   "native_h": 133.96,
+   "native_w": 134.16,
+   "word": 2332
+  },
+  {
+   "alpha_h": 129.4,
+   "alpha_w": 130.2,
+   "file": "m_091d.png",
+   "label": "glyph-091d",
+   "native_h": 133.53,
+   "native_w": 134.42,
+   "word": 2333
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 130.1,
+   "file": "m_091e.png",
+   "label": "glyph-091e",
+   "native_h": 134.24,
+   "native_w": 134.33,
+   "word": 2334
+  },
+  {
+   "alpha_h": 130.8,
+   "alpha_w": 130,
+   "file": "m_091f.png",
+   "label": "glyph-091f",
+   "native_h": 135.06,
+   "native_w": 134.24,
+   "word": 2335
+  },
+  {
+   "alpha_h": 130,
+   "alpha_w": 129.9,
+   "file": "m_0920.png",
+   "label": "glyph-0920",
+   "native_h": 134.2,
+   "native_w": 134.06,
+   "word": 2336
+  },
+  {
+   "alpha_h": 129.1,
+   "alpha_w": 129.4,
+   "file": "m_0921.png",
+   "label": "glyph-0921",
+   "native_h": 133.26,
+   "native_w": 133.61,
+   "word": 2337
+  },
+  {
+   "alpha_h": 129.7,
+   "alpha_w": 129.7,
+   "file": "m_0922.png",
+   "label": "glyph-0922",
+   "native_h": 133.91,
+   "native_w": 133.9,
+   "word": 2338
+  },
+  {
+   "alpha_h": 129.3,
+   "alpha_w": 129.9,
+   "file": "m_0923.png",
+   "label": "glyph-0923",
+   "native_h": 133.51,
+   "native_w": 134.14,
+   "word": 2339
+  },
+  {
+   "alpha_h": 128.8,
+   "alpha_w": 128.6,
+   "file": "m_0924.png",
+   "label": "glyph-0924",
+   "native_h": 132.92,
+   "native_w": 132.73,
+   "word": 2340
   }
  ]
 }

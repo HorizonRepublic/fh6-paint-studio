@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"image"
 
 	"gioui.org/io/pointer"
@@ -12,6 +11,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/library"
 )
 
@@ -24,14 +24,15 @@ type LibraryRow struct {
 	Export        widget.Clickable
 	Rename        widget.Clickable // enter inline-edit mode; doubles as "Save" while Editing
 	RenameCancel  widget.Clickable
-	NameEd        widget.Editor // inline name editor, shown in place of the name label while Editing
+	Edit          widget.Clickable // open this livery in the shape editor
+	NameEd        widget.Editor    // inline name editor, shown in place of the name label while Editing
 	Editing       bool
 	Delete        widget.Clickable
 	ConfirmDelete bool
 }
 
 func entryCountLabel(e library.Entry) string {
-	return fmt.Sprintf("%d shapes", e.Shapes)
+	return i18n.T("library.shapes_count", e.Shapes)
 }
 
 // SetLibrary replaces the library rows (already decoded by the caller).
@@ -91,7 +92,7 @@ func (s *AppState) injectGuide(gtx C) D {
 	}
 	head := func(gtx C) D {
 		return material.Clickable(gtx, &s.InjectGuideClick, func(gtx C) D {
-			return th.Lbl(gtx, 12, arrow+"  How injecting works", th.Accent)
+			return th.Lbl(gtx, 12, arrow+i18n.T("inject.guide_toggle"), th.Accent)
 		})
 	}
 	if !s.InjectGuideOpen {
@@ -111,10 +112,10 @@ func (s *AppState) injectGuide(gtx C) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(head),
 		layout.Rigid(GapV(4).Layout),
-		step("1", "In FH6, add a vinyl group with at least as many layers as the generation's shapes."),
-		step("2", "Set “FH6 template” (top-right) to that group's layer count."),
-		step("3", "Click Inject on the generation — the app needs admin + FH6 running."),
-		step("4", "In FH6, Save & reload the vinyl — the mesh only appears after a reload."),
+		step("1", i18n.T("inject.guide_step1")),
+		step("2", i18n.T("inject.guide_step2")),
+		step("3", i18n.T("inject.guide_step3")),
+		step("4", i18n.T("inject.guide_step4")),
 	)
 }
 
@@ -128,25 +129,25 @@ func (s *AppState) libraryHeader(gtx C) D {
 	}
 	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(func(gtx C) D {
-			return th.Title(gtx, fmt.Sprintf("Library — %d", len(s.LibRows)))
+			return th.Title(gtx, i18n.T("library.title", len(s.LibRows)))
 		}),
 		layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Max.X, 0)} }),
 		layout.Rigid(func(gtx C) D {
-			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return th.Dim(gtx, "FH6 template") })
+			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return th.Dim(gtx, i18n.T("inject.template_label")) })
 		}),
 		layout.Rigid(func(gtx C) D {
 			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D {
-				return s.InjectHint.Layout(gtx, th, "The number of LAYERS in the in-game vinyl group you're injecting into — it must match. If it's smaller than the generation's shapes, the extra shapes are silently dropped in-game. Make a group with enough layers in FH6 first, then put that count here.")
+				return s.InjectHint.Layout(gtx, th, i18n.T("hint.fh6_template"))
 			})
 		}),
-		num(&s.InjectLayers, "count", 72, s.InjectLayersErr),
+		num(&s.InjectLayers, i18n.T("inject.layers_hint"), 72, s.InjectLayersErr),
 		layout.Rigid(GapH(10).Layout),
 		layout.Rigid(func(gtx C) D {
-			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return th.Dim(gtx, "Scale") })
+			return layout.Inset{Right: 6}.Layout(gtx, func(gtx C) D { return th.Dim(gtx, i18n.T("inject.scale_label")) })
 		}),
-		num(&s.InjectScale, "1.0", 64, false),
+		num(&s.InjectScale, i18n.T("inject.scale_hint"), 64, false),
 		layout.Rigid(GapH(10).Layout),
-		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.OpenFolderBtn, "Open folder", true) }),
+		layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.OpenFolderBtn, i18n.T("library.open_folder"), true) }),
 	)
 }
 
@@ -156,7 +157,7 @@ func (s *AppState) libraryList(gtx C) D {
 	th := s.Th
 	if len(s.LibRows) == 0 {
 		return layout.Center.Layout(gtx, func(gtx C) D {
-			return th.Dim(gtx, "No generations yet — reconstruct an image in Studio.")
+			return th.Dim(gtx, i18n.T("library.empty"))
 		})
 	}
 	cols := libCols(gtx)
@@ -216,13 +217,13 @@ func (s *AppState) libraryCard(gtx C, r *LibraryRow) D {
 			layout.Rigid(func(gtx C) D {
 				if r.Editing {
 					gtx.Constraints.Min.X = gtx.Constraints.Max.X
-					return th.editorBox(gtx, &r.NameEd, "name")
+					return th.editorBox(gtx, &r.NameEd, i18n.T("library.name_hint"))
 				}
 				return th.Lbl(gtx, 15, r.Entry.Name, th.Text)
 			}),
 			layout.Rigid(GapV(3).Layout),
 			layout.Rigid(func(gtx C) D {
-				meta := fmt.Sprintf("%s · %s · %s", r.Entry.Preset, entryCountLabel(r.Entry),
+				meta := i18n.T("library.card_meta", r.Entry.Preset, entryCountLabel(r.Entry),
 					r.Entry.Created.Format("02.01 15:04"))
 				return th.Dim(gtx, meta)
 			}),
@@ -258,9 +259,9 @@ func (s *AppState) fitBadge(gtx C, r *LibraryRow) D {
 	if layers <= 0 || r.Entry.Shapes <= 0 {
 		return D{}
 	}
-	txt, col := "✓ fits", th.Good
+	txt, col := i18n.T("library.fit_ok"), th.Good
 	if layers < r.Entry.Shapes {
-		txt, col = fmt.Sprintf("−%d will drop", r.Entry.Shapes-layers), th.Warn
+		txt, col = i18n.T("library.fit_drop", r.Entry.Shapes-layers), th.Warn
 	}
 	return layout.Inset{Bottom: 6}.Layout(gtx, func(gtx C) D { return th.Lbl(gtx, 12, txt, col) })
 }
@@ -271,13 +272,13 @@ func (s *AppState) injectButton(gtx C, r *LibraryRow) D {
 	th := s.Th
 	switch {
 	case s.InjectingID != "" && s.InjectingID == r.Entry.ID:
-		return th.BusyPill(gtx, "Injecting…")
+		return th.BusyPill(gtx, i18n.T("library.injecting"))
 	case s.InjectResultID != "" && s.InjectResultID == r.Entry.ID && s.InjectOK:
-		return th.StatusPill(gtx, "✓ Injected", th.Good)
+		return th.StatusPill(gtx, i18n.T("library.injected"), th.Good)
 	case s.InjectResultID != "" && s.InjectResultID == r.Entry.ID:
-		return th.StatusPill(gtx, "✗ Failed", th.Bad)
+		return th.StatusPill(gtx, i18n.T("library.inject_failed"), th.Bad)
 	default:
-		return th.AccentButton(gtx, &r.Inject, "Inject into FH6") // the card's primary action
+		return th.AccentButton(gtx, &r.Inject, i18n.T("library.inject")) // the card's primary action
 	}
 }
 
@@ -289,12 +290,12 @@ func (s *AppState) cardActions(gtx C, r *LibraryRow) D {
 		return layout.Flex{}.Layout(gtx,
 			layout.Flexed(1, func(gtx C) D {
 				gtx.Constraints.Min.X = gtx.Constraints.Max.X
-				return th.AccentButton(gtx, &r.Rename, "Save")
+				return th.AccentButton(gtx, &r.Rename, i18n.T("library.save"))
 			}),
 			layout.Rigid(GapH(8).Layout),
 			layout.Flexed(1, func(gtx C) D {
 				gtx.Constraints.Min.X = gtx.Constraints.Max.X
-				return th.SecondaryButton(gtx, &r.RenameCancel, "Cancel", true)
+				return th.SecondaryButton(gtx, &r.RenameCancel, i18n.T("library.cancel"), true)
 			}),
 		)
 	}
@@ -307,9 +308,9 @@ func (s *AppState) cardActions(gtx C, r *LibraryRow) D {
 			return th.SecondaryButton(gtx, btn, label, true)
 		})
 	}
-	delLabel := "Delete"
+	delLabel := i18n.T("library.delete")
 	if r.ConfirmDelete {
-		delLabel = "Confirm?"
+		delLabel = i18n.T("library.confirm_delete")
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(func(gtx C) D { return s.fitBadge(gtx, r) }),
@@ -319,10 +320,15 @@ func (s *AppState) cardActions(gtx C, r *LibraryRow) D {
 		}),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return th.SecondaryButton(gtx, &r.Edit, i18n.T("library.edit"), true)
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
 			return layout.Flex{}.Layout(gtx,
-				secondary(&r.Export, "Export", false),
+				secondary(&r.Export, i18n.T("library.export"), false),
 				layout.Rigid(GapH(8).Layout),
-				secondary(&r.Rename, "Rename", false),
+				secondary(&r.Rename, i18n.T("library.rename"), false),
 				layout.Rigid(GapH(8).Layout),
 				secondary(&r.Delete, delLabel, r.ConfirmDelete),
 			)

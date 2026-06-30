@@ -116,6 +116,33 @@ func (t *Theme) SecondaryButton(gtx C, btn *widget.Clickable, label string, enab
 	return b.Layout(gtx)
 }
 
+// ArrowButton is an undo/redo button showing just a curved directional arrow that glows accent when its
+// stack has something to apply and goes grey when it is empty, so the available direction is obvious.
+func (t *Theme) ArrowButton(gtx C, btn *widget.Clickable, left bool, enabled bool) D {
+	fg, bg := t.Accent, t.SurfaceHi
+	switch {
+	case !enabled:
+		fg, bg = t.TextDim, t.Surface
+	case btn.Pressed():
+		bg = lerpColor(t.SurfaceHi, t.Accent, 0.40) // clear press feedback
+	case btn.Hovered():
+		bg = lerpColor(t.SurfaceHi, t.Accent, 0.18) // hover highlight
+	}
+	return btn.Layout(gtx, func(gtx C) D {
+		return layout.Stack{Alignment: layout.Center}.Layout(gtx,
+			layout.Expanded(func(gtx C) D {
+				fillRRect(gtx, bg, gtx.Constraints.Min, 8)
+				return D{Size: gtx.Constraints.Min}
+			}),
+			layout.Stacked(func(gtx C) D {
+				return layout.Inset{Top: 8, Bottom: 8, Left: 12, Right: 12}.Layout(gtx, func(gtx C) D {
+					return drawArrowIcon(gtx, left, fg)
+				})
+			}),
+		)
+	})
+}
+
 // StatusPill is a non-interactive compact pill (the SecondaryButton height) showing a coloured status
 // label — used in place of a row button for a transient inject result (tick: Injected / cross: Failed) so the
 // row keeps its layout while the result lingers.

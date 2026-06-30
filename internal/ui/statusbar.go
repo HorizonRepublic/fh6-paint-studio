@@ -1,9 +1,9 @@
 package ui
 
 import (
-	"fmt"
 	"image"
 
+	"fh6-paint-studio/internal/i18n"
 	"gioui.org/layout"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -31,7 +31,7 @@ func (s *AppState) adminButton(gtx C) D {
 							return th.Lbl(gtx, 13, "!", th.Bad)
 						}),
 						layout.Rigid(GapH(6).Layout),
-						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 13, "Run as admin", th.Text) }),
+						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 13, i18n.T("status.run_as_admin"), th.Text) }),
 					)
 				})
 			},
@@ -45,15 +45,15 @@ func (s *AppState) statusText() string {
 	}
 	switch s.Phase {
 	case PhaseRunning:
-		return "Generating…"
+		return i18n.T("status.generating")
 	case PhaseDone:
-		return fmt.Sprintf("Done — %s shapes in %s", group(s.Stats.Shapes), fmtDur(s.Stats.Elapsed))
+		return i18n.T("status.done", group(s.Stats.Shapes), fmtDur(s.Stats.Elapsed))
 	case PhaseError:
-		return "Error — see log"
+		return i18n.T("status.error")
 	default:
 		if s.Source == nil {
-			return "Ready — open an image to start"
+			return i18n.T("status.ready_open")
 		}
-		return "Ready"
+		return i18n.T("status.ready")
 	}
 }

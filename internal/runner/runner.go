@@ -157,15 +157,7 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 // RenderFH6 returns sRGB-display floats already, so convert straight (no EncodeForDisplay). ss=1: the
 // game rasterizes the geometry itself (hard edges), so a single sample is the honest representation.
 func renderInGame(shapes []model.Shape, transparentBG bool, w, h int) *image.NRGBA {
-	buf := imageio.RenderFH6(shapes, transparentBG, w, h, 1)
-	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for i := 0; i < w*h; i++ {
-		img.Pix[i*4+0] = u8(buf[i*4+0])
-		img.Pix[i*4+1] = u8(buf[i*4+1])
-		img.Pix[i*4+2] = u8(buf[i*4+2])
-		img.Pix[i*4+3] = u8(buf[i*4+3])
-	}
-	return img
+	return imageio.RenderFH6Image(shapes, transparentBG, w, h, 1)
 }
 
 // readCanvas copies the backend's current canvas into a fresh straight-alpha NRGBA image

@@ -12,6 +12,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/widget"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // previewArea draws the loaded source (or a reconstruction) fit-centered in the available space. In
@@ -21,6 +23,18 @@ func (s *AppState) previewArea(gtx C) D {
 	th := s.Th
 	sz := gtx.Constraints.Max
 	if s.Source == nil {
+		// A blank-canvas edit can produce a reconstruction with no loaded source — show it on the
+		// checker (no before/after wipe, since there is nothing to compare against).
+		if s.Preview != nil {
+			rect := fitRect(s.Preview.Bounds().Size(), sz)
+			drawCheckerboard(gtx, rect)
+			drawImageIn(gtx, s.PreviewOp, rect)
+			if s.PreviewZoom.Clicked(gtx) {
+				s.ShowLightbox(s.Preview)
+			}
+			s.drawZoomButton(gtx, rect)
+			return D{Size: sz}
+		}
 		layout.Center.Layout(gtx, s.emptyStateOpen)
 		return D{Size: sz}
 	}
@@ -54,6 +68,7 @@ func (s *AppState) previewArea(gtx C) D {
 		wx := rect.Min.X + int(float64(rect.Dx())*float64(clamp01(s.Wipe.Value)))
 		region := image.Rect(wx, rect.Min.Y, rect.Max.X, rect.Max.Y)
 		cl := clip.Rect(region).Push(gtx.Ops)
+		drawCheckerboard(gtx, rect) // neutral backing so a transparent reconstruction shows the checker, not the source beneath
 		drawImageIn(gtx, s.PreviewOp, rect)
 		cl.Pop()
 		if wx > rect.Min.X && wx < rect.Max.X {
@@ -74,6 +89,28 @@ func (s *AppState) previewArea(gtx C) D {
 	return D{Size: sz}
 }
 
+// drawCheckerboard fills rect with the standard transparency checker, so transparent areas of the
+// reconstruction read as empty instead of revealing the source image underneath (which made logo / text
+// boundaries hard to see). It backs the reconstruction side of the wipe; the source side is untouched.
+func drawCheckerboard(gtx C, rect image.Rectangle) {
+	dark := color.NRGBA{R: 0x23, G: 0x26, B: 0x2e, A: 0xff}
+	light := color.NRGBA{R: 0x33, G: 0x37, B: 0x42, A: 0xff}
+	paint.FillShape(gtx.Ops, dark, clip.Rect(rect).Op())
+	cs := gtx.Dp(11)
+	if cs < 1 {
+		cs = 1
+	}
+	for y := rect.Min.Y; y < rect.Max.Y; y += cs {
+		for x := rect.Min.X; x < rect.Max.X; x += cs {
+			if ((x-rect.Min.X)/cs+(y-rect.Min.Y)/cs)%2 == 0 {
+				continue
+			}
+			r := image.Rect(x, y, min(x+cs, rect.Max.X), min(y+cs, rect.Max.Y))
+			paint.FillShape(gtx.Ops, light, clip.Rect(r).Op())
+		}
+	}
+}
+
 // drawZoomButton renders the corner "Zoom" pill, right-aligned in the reconstruction's top-right. It is
 // recorded then replayed under an offset so it can be right-aligned by its measured width.
 func (s *AppState) drawZoomButton(gtx C, rect image.Rectangle) {
@@ -90,7 +127,7 @@ func (s *AppState) drawZoomButton(gtx C, rect image.Rectangle) {
 			func(gtx C) D {
 				return layout.Inset{Top: 6, Bottom: 6, Left: 11, Right: 11}.Layout(gtx, func(gtx C) D {
 					pointer.CursorPointer.Add(gtx.Ops)
-					return th.Lbl(gtx, 13, "Zoom", th.Text)
+					return th.Lbl(gtx, 13, i18n.T("preview.zoom"), th.Text)
 				})
 			},
 		)
@@ -278,15 +315,15 @@ func (s *AppState) emptyStateOpen(gtx C) D {
 					return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 34, "+", th.Accent) }),
 						layout.Rigid(GapV(8).Layout),
-						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, "Open an image", th.Text) }),
+						layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 16, i18n.T("preview.open_image"), th.Text) }),
 						layout.Rigid(GapV(4).Layout),
-						layout.Rigid(func(gtx C) D { return th.Dim(gtx, "turn any photo or drawing into FH6 vinyl shapes") }),
+						layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("hint.open_subtitle")) }),
 						layout.Rigid(GapV(18).Layout),
-						layout.Rigid(s.miniStep("1", "Open your image")),
+						layout.Rigid(s.miniStep("1", i18n.T("preview.step_open"))),
 						layout.Rigid(GapV(8).Layout),
-						layout.Rigid(s.miniStep("2", "Pick a style on the left")),
+						layout.Rigid(s.miniStep("2", i18n.T("preview.step_style"))),
 						layout.Rigid(GapV(8).Layout),
-						layout.Rigid(s.miniStep("3", "Hit Generate")),
+						layout.Rigid(s.miniStep("3", i18n.T("preview.step_generate"))),
 					)
 				})
 			}),
@@ -328,30 +365,30 @@ func (s *AppState) cropBar(gtx C) D {
 	return layout.Inset{Top: 10}.Layout(gtx, func(gtx C) D {
 		if s.CropMode {
 			return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(func(gtx C) D { return th.PrimaryButton(gtx, &s.CropApplyBtn, "Apply crop", true) }),
+				layout.Rigid(func(gtx C) D { return th.PrimaryButton(gtx, &s.CropApplyBtn, i18n.T("preview.apply_crop"), true) }),
 				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropCancelBtn, "Cancel", true) }),
+				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropCancelBtn, i18n.T("common.cancel"), true) }),
 				layout.Rigid(GapH(12).Layout),
 				layout.Flexed(1, func(gtx C) D {
-					return th.Dim(gtx, "drag to select · handles to resize · inside to move")
+					return th.Dim(gtx, i18n.T("hint.crop_editing"))
 				}),
 			)
 		}
 		children := []layout.FlexChild{
-			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropBtn, "Crop region", true) }),
+			layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.CropBtn, i18n.T("preview.crop_region"), true) }),
 		}
 		if s.Cropped {
 			children = append(children,
 				layout.Rigid(GapH(8).Layout),
-				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.ResetBtn, "Reset to original", true) }))
+				layout.Rigid(func(gtx C) D { return th.SecondaryButton(gtx, &s.ResetBtn, i18n.T("preview.reset_original"), true) }))
 		}
 		children = append(children,
 			layout.Rigid(GapH(12).Layout),
 			layout.Flexed(1, func(gtx C) D {
 				if s.Cropped {
-					return th.Dim(gtx, "working on a crop — Generate rebuilds just this at the full budget")
+					return th.Dim(gtx, i18n.T("hint.crop_active"))
 				}
-				return th.Dim(gtx, "crop a detail (a face, a logo) to spend the whole budget on it")
+				return th.Dim(gtx, i18n.T("hint.crop_detail"))
 			}))
 		return layout.Flex{Alignment: layout.Middle}.Layout(gtx, children...)
 	})

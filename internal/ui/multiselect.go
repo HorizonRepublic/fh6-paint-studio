@@ -8,6 +8,8 @@ import (
 	"gioui.org/op"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+
+	"fh6-paint-studio/internal/i18n"
 )
 
 // MultiSelect is a combobox that floats a checklist popup: zero or more options can be ticked, and the
@@ -48,6 +50,39 @@ func (m *MultiSelect) Value() []string {
 // ValueCSV joins the ticked options with commas.
 func (m *MultiSelect) ValueCSV() string { return strings.Join(m.Value(), ",") }
 
+// IsOn reports whether the option (case-insensitive) is currently ticked.
+func (m *MultiSelect) IsOn(name string) bool {
+	for i, o := range m.options {
+		if strings.EqualFold(o, name) {
+			return m.checked[i]
+		}
+	}
+	return false
+}
+
+// SetOn ticks/unticks a single option by name, keeping the popup checkbox in agreement so the expert
+// checklist and the per-kind weight fields stay consistent with this (the icon-row) view.
+func (m *MultiSelect) SetOn(name string, v bool) {
+	for i, o := range m.options {
+		if strings.EqualFold(o, name) {
+			m.checked[i] = v
+			m.boxes[i].Value = v
+			return
+		}
+	}
+}
+
+// OnCount returns how many options are ticked.
+func (m *MultiSelect) OnCount() int {
+	n := 0
+	for _, c := range m.checked {
+		if c {
+			n++
+		}
+	}
+	return n
+}
+
 // SetCSV ticks exactly the options named in csv (case-insensitive); unknown names are ignored.
 func (m *MultiSelect) SetCSV(csv string) {
 	want := map[string]bool{}
@@ -65,9 +100,9 @@ func (m *MultiSelect) summary() string {
 	v := m.Value()
 	switch {
 	case len(v) == 0:
-		return "none"
+		return i18n.T("multiselect.none")
 	case len(v) == len(m.options):
-		return "all"
+		return i18n.T("multiselect.all")
 	default:
 		return strings.Join(v, ", ")
 	}

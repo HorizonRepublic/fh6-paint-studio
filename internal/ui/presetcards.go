@@ -9,6 +9,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/preset"
 )
 
@@ -17,20 +18,20 @@ import (
 // subtitle keeps the engine word discoverable next to a short "what it's for".
 type presetCard struct {
 	mode     string // the engine mode this card selects
-	title    string // plain-language intent name
-	subtitle string // "<engine-word> · short what-for"
+	title    string // i18n key for the plain-language intent name
+	subtitle string // i18n key for the "<engine-word> · short what-for" line
 	ink      bool   // hybrid family (reveals the Artist Lines<->Fill knob)
 }
 
 // builtinCards is the curated palette. Order clusters the drawing styles first (the common case), then
 // graphics, photo, and the niche soft-glow engine last. The two ‹ink› cards are the hybrids.
 var builtinCards = []presetCard{
-	{"anime", "Drawing / Anime", "anime · drawings, cel art", false},
-	{"anime-ink", "Anime + Ink", "anime-ink · colour + outline", true},
-	{"lineart", "Line art", "lineart · manga, sketch", true},
-	{"flat", "Logo / Flat", "flat · logos, posters", false},
-	{"photo", "Photo", "photo · photographs", false},
-	{"gaussian", "Soft glow", "gaussian · soft gradients", false},
+	{"anime", "mode.anime_title", "mode.anime_subtitle", false},
+	{"anime-ink", "mode.anime_ink_title", "mode.anime_ink_subtitle", true},
+	{"lineart", "mode.lineart_title", "mode.lineart_subtitle", true},
+	{"flat", "mode.flat_title", "mode.flat_subtitle", false},
+	{"photo", "mode.photo_title", "mode.photo_subtitle", false},
+	{"gaussian", "mode.gaussian_title", "mode.gaussian_subtitle", false},
 }
 
 // presetCardsSection renders step 1: the built-in preset cards, then a "Saved presets" group if the user
@@ -49,7 +50,7 @@ func (s *AppState) presetCardsSection(gtx C) D {
 				if s.BuiltinCards[i].Clicked(gtx) {
 					s.SelectPreset(c.mode)
 				}
-				return s.presetCardView(gtx, &s.BuiltinCards[i], c.title, c.subtitle, c.ink, cur == c.mode)
+				return s.presetCardView(gtx, &s.BuiltinCards[i], i18n.T(c.title), i18n.T(c.subtitle), c.ink, cur == c.mode)
 			}),
 			layout.Rigid(GapV(6).Layout),
 		)
@@ -57,7 +58,7 @@ func (s *AppState) presetCardsSection(gtx C) D {
 	if len(s.Presets) > 0 {
 		children = append(children,
 			layout.Rigid(GapV(4).Layout),
-			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, "SAVED PRESETS", th.TextDim) }),
+			layout.Rigid(func(gtx C) D { return th.Lbl(gtx, 11, i18n.T("mode.saved_presets"), th.TextDim) }),
 			layout.Rigid(GapV(6).Layout),
 		)
 		for i := range s.Presets {
@@ -70,7 +71,7 @@ func (s *AppState) presetCardsSection(gtx C) D {
 					if s.PresetCards[i].Clicked(gtx) {
 						s.SelectPreset(p.Name)
 					}
-					return s.presetCardView(gtx, &s.PresetCards[i], p.Name, "saved preset", preset.IsHybridMode(p.Choices.Mode), cur == p.Name)
+					return s.presetCardView(gtx, &s.PresetCards[i], p.Name, i18n.T("mode.saved_preset"), preset.IsHybridMode(p.Choices.Mode), cur == p.Name)
 				}),
 				layout.Rigid(GapV(6).Layout),
 			)
@@ -151,7 +152,7 @@ func (s *AppState) inkBadge(gtx C) D {
 		func(gtx C) D { fillRRect(gtx, th.Accent, gtx.Constraints.Min, 6); return D{Size: gtx.Constraints.Min} },
 		func(gtx C) D {
 			return layout.Inset{Top: 2, Bottom: 2, Left: 6, Right: 6}.Layout(gtx, func(gtx C) D {
-				return th.Lbl(gtx, 11, "ink", th.OnAccent)
+				return th.Lbl(gtx, 11, i18n.T("mode.ink_badge"), th.OnAccent)
 			})
 		},
 	)

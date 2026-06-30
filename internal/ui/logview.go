@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"fh6-paint-studio/internal/i18n"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
@@ -70,7 +71,7 @@ func (t *Theme) LogView(gtx C, list *widget.List, entries []LogEntry) D {
 	list.ScrollToEnd = true
 	if len(entries) == 0 {
 		gtx.Constraints.Min = gtx.Constraints.Max
-		return layout.Center.Layout(gtx, func(gtx C) D { return t.Dim(gtx, "activity will appear here…") })
+		return layout.Center.Layout(gtx, func(gtx C) D { return t.Dim(gtx, i18n.T("status.activity_empty")) })
 	}
 	return material.List(t.M, list).Layout(gtx, len(entries), func(gtx C, i int) D {
 		return t.logRow(gtx, entries[i])

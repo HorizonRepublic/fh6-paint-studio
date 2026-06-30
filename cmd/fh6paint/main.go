@@ -58,6 +58,9 @@ func main() {
 	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (Р Р†РІвЂљВ¬РІР‚в„ўscore/area) is below this Р Р†Р вЂљРІР‚Сњ a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small Р Р†Р вЂљРІР‚Сњ try ~1e-4..1e-3.")
 	zswap := flag.Int("zswap", 0, "z-order local swap EXPERIMENT (0=off): after polish, try swapping up to N z-adjacent overlapping shape pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render -- keep N modest (~200). Aimed at opaque/flat content where stack order owns contested pixels.")
 	persistErr := flag.Float64("persist-err", 0, "persistent-error sampling EXPERIMENT (0=off): upweight sampling cells whose error stagnates across shape placements by (1+gain*stagnation, stagnation capped at 16) -- small stubborn details (a saturated iris) stop losing the importance lottery to big soft regions. Sampling-only; the accept gate and metrics stay on the raw error. Try 0.1-0.5.")
+	salQuota := flag.Float64("saliency-quota", 0, "saliency QUOTA (0=off): reserve this fraction of the shape budget for the most detailed target cells -- the final quota-fraction of the run samples ONLY inside the top-detail region (eyes/faces/linework), so the reserved shapes cannot be outbid by big soft areas. Try 0.1-0.2 on anime/photo at mid budgets.")
+	glyphPre := flag.Bool("glyph-prepass", false, "glyph PRE-PASS: before the greedy, claim flat-colour regions of the target that match a dictionary silhouette (strict IoU-verified) as single shape words -- one word instead of many primitives. Flat/logo content; needs a mask-capable backend.")
+	glyphDict := flag.Bool("glyph-dict", false, "glyph-dictionary EXPERIMENT: offer the mask bank's shape words as greedy candidates -- each word moment-fitted onto a residual blob, competing by exact score against the primitive winner. Needs a mask-capable backend (CPU, or CUDA with the atlas DLL); silently off otherwise.")
 	compact := flag.Bool("compact", true, "bias the per-shape pick toward compact shapes (cleaner coarse stage)")
 	mode := flag.String("mode", "anime", "content PRESET (3 manual): anime | photo | flat. Legacy names (logo/line/illustration/cutout/auto) collapse to one of the 3 via preset.PresetMode. anime/photo = semi-transparent + triangle-rich + STE; flat = opaque + rect/triangle by palette + boundary + backfit. Transparency is auto-detected (forces opaque). Explicit flags override.")
 	weightV2 := flag.Bool("weight-v2", false, "force the richer dilated ink-aware saliency map (WeightMapV2) on/off; default is auto (on for flat/logo/line/cutout, off for photo/anime). V2 protects 1-2px black contours from being smeared by flat-fill shapes.")
@@ -523,6 +526,9 @@ func main() {
 		StandoutTol:         *standout,
 		ZSwapTrials:         *zswap,
 		PersistGain:         *persistErr,
+		GlyphDict:           *glyphDict,
+		GlyphPrepass:        *glyphPre,
+		SaliencyQuota:       *salQuota,
 		// Compact-shape bias is SSE-neutral on opaque content but mildly HURTS cutouts (it
 		// early-stops short of the budget Р Р†Р вЂљРІР‚Сњ forcing small shapes fights the large flat fills
 		// a cutout's object needs). So apply it only to opaque images.
