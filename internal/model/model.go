@@ -59,10 +59,11 @@ type Candidate struct {
 
 // Shape is the serialized output element (importer-compatible).
 type Shape struct {
-	Type  int       `json:"type"`
-	Data  []float64 `json:"data"`
-	Color []int     `json:"color"`
-	Score float64   `json:"score"` // optional per-shape bookkeeping; importer ignores it
+	Type   int       `json:"type"`
+	Data   []float64 `json:"data"`
+	Color  []int     `json:"color"`
+	Score  float64   `json:"score"`            // optional per-shape bookkeeping; importer ignores it
+	Locked bool      `json:"locked,omitempty"` // editor-only: protected from selection-drag / nudge / delete
 }
 
 // Geometry is the top-level output document.

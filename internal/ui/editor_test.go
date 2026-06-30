@@ -536,6 +536,35 @@ func TestRealDragPushesOneUndo(t *testing.T) {
 	}
 }
 
+func TestLockedShapeProtected(t *testing.T) {
+	s := multiDoc() // background + ellipses at (20,20) and (40,40)
+	s.EditShapes[1].Locked = true
+	if hit := s.hitTest(20, 20); hit == 1 {
+		t.Fatalf("hitTest grabbed a locked shape (%d)", hit)
+	}
+	s.selectSingle(1)
+	if !s.selLocked() {
+		t.Fatalf("selLocked should be true for a locked primary")
+	}
+	x0 := s.EditShapes[1].Data[0]
+	s.nudge(1, 0, key.ModShift)
+	if s.EditShapes[1].Data[0] != x0 {
+		t.Fatalf("locked shape moved on nudge: %v != %v", s.EditShapes[1].Data[0], x0)
+	}
+	before := len(s.EditShapes)
+	s.deleteSel()
+	if len(s.EditShapes) != before {
+		t.Fatalf("locked shape was deleted")
+	}
+}
+
+func TestLockedSurvivesClone(t *testing.T) {
+	in := []model.Shape{{Type: model.TypeRotatedEllipse, Data: []float64{1, 2, 3, 4, 0}, Color: []int{1, 2, 3, 4}, Locked: true}}
+	if out := cloneShapes(in); !out[0].Locked {
+		t.Fatalf("Locked flag lost on clone (undo would drop it)")
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()

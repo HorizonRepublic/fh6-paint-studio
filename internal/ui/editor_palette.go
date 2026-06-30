@@ -139,11 +139,15 @@ func (s *AppState) layerList(gtx C) D {
 	}
 	for len(s.editLayerBtns) < len(s.EditShapes) {
 		s.editLayerBtns = append(s.editLayerBtns, widget.Clickable{})
+		s.editLockBtns = append(s.editLockBtns, widget.Clickable{})
 		s.layerDrags = append(s.layerDrags, gesture.Drag{})
 	}
 	return material.List(th.M, &s.editLayerList).Layout(gtx, n, func(gtx C, i int) D {
 		idx := len(s.EditShapes) - 1 - i // top row = front-most shape
-		if s.editLayerBtns[idx].Clicked(gtx) {
+		if s.editLockBtns[idx].Clicked(gtx) {
+			s.EditShapes[idx].Locked = !s.EditShapes[idx].Locked
+			s.markEditDirty()
+		} else if s.editLayerBtns[idx].Clicked(gtx) {
 			s.selectSingle(idx)
 		}
 		s.updateLayerDrag(gtx, idx)
@@ -190,10 +194,26 @@ func (s *AppState) layerRow(gtx C, idx int) D {
 							}
 							return th.Lbl(gtx, 12, "#"+strconv.Itoa(idx), col)
 						}),
+						layout.Rigid(GapH(6).Layout),
+						layout.Rigid(func(gtx C) D { return s.layerLockBtn(gtx, idx) }),
 					)
 				})
 			},
 		)
+	})
+}
+
+// layerLockBtn is the per-row padlock toggle: amber + closed when locked, faint + open when not.
+func (s *AppState) layerLockBtn(gtx C, idx int) D {
+	th := s.Th
+	locked := s.EditShapes[idx].Locked
+	col := th.TextDim
+	if locked {
+		col = th.Warn
+	}
+	return s.editLockBtns[idx].Layout(gtx, func(gtx C) D {
+		pointer.CursorPointer.Add(gtx.Ops)
+		return layout.UniformInset(2).Layout(gtx, func(gtx C) D { return drawLockIcon(gtx, locked, col) })
 	})
 }
 

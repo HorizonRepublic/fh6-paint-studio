@@ -742,7 +742,12 @@ func (s *AppState) mirrorSelection(vertical bool) {
 
 // deleteSel removes the selected shape (never the background) and clears the selection.
 func (s *AppState) deleteSel() {
-	idx := s.selIndices()
+	var idx []int
+	for _, i := range s.selIndices() {
+		if !s.EditShapes[i].Locked { // locked shapes are protected from deletion
+			idx = append(idx, i)
+		}
+	}
 	if len(idx) == 0 {
 		return
 	}

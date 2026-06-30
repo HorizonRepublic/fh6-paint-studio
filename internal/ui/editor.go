@@ -70,6 +70,9 @@ func (s *AppState) hitTest(imgX, imgY float64) int {
 	x, y := int(imgX), int(imgY)
 	for i := len(s.EditShapes) - 1; i >= 1; i-- {
 		sh := s.EditShapes[i]
+		if sh.Locked { // locked shapes are transparent to canvas clicks; pick them from the layer panel
+			continue
+		}
 		k := model.KindFromType(sh.Type)
 		if raster.Inside(k, model.ParamsFromShape(sh), x, y) {
 			return i
@@ -615,6 +618,15 @@ func (s *AppState) drawDragSprite(gtx C, rect image.Rectangle) {
 // selValid reports whether a selectable shape (not the background) is currently selected.
 func (s *AppState) selValid() bool { return s.EditSel >= 1 && s.EditSel < len(s.EditShapes) }
 
+// isLocked reports whether shape i is locked (protected from edits).
+func (s *AppState) isLocked(i int) bool {
+	return i >= 1 && i < len(s.EditShapes) && s.EditShapes[i].Locked
+}
+
+// selLocked reports whether the primary selected shape is locked — locked selections show a grey,
+// handle-less frame and refuse drag/scale/rotate.
+func (s *AppState) selLocked() bool { return s.selValid() && s.EditShapes[s.EditSel].Locked }
+
 // deselectAll clears the primary selection, any multi-selection, and an in-flight marquee.
 func (s *AppState) deselectAll() {
 	s.EditSel = -1
@@ -1149,7 +1161,13 @@ func (s *AppState) handleEditKeys(gtx C) {
 
 // nudge moves the selected shape by the arrow keys: 1px, or 10px with Shift held.
 func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
-	if s.selCount() == 0 {
+	var idx []int
+	for _, i := range s.selIndices() {
+		if !s.EditShapes[i].Locked {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) == 0 {
 		return
 	}
 	step := 1.0
@@ -1157,7 +1175,7 @@ func (s *AppState) nudge(dx, dy float64, mods key.Modifiers) {
 		step = 10
 	}
 	s.pushUndo(cloneShapes(s.EditShapes))
-	for _, i := range s.selIndices() {
+	for _, i := range idx {
 		moveShapeData(&s.EditShapes[i], dx*step, dy*step)
 	}
 	s.markEditDirty()
@@ -1169,11 +1187,18 @@ func (s *AppState) drawSelection(gtx C, rect image.Rectangle) {
 	th := s.Th
 	pts := s.selHandlePts(rect)
 	// Oriented frame: the four corner handles (NW,NE,SE,SW) joined in order — turns with the shape.
+	frame := th.Accent
+	if s.selLocked() {
+		frame = th.TextDim // locked: a grey, handle-less box
+	}
 	corners := [4]image.Point{pts[0], pts[2], pts[4], pts[6]}
 	for i := 0; i < 4; i++ {
 		a, b := corners[i], corners[(i+1)%4]
 		drawLine(gtx, a, b, color.NRGBA{A: 160}, 3)
-		drawLine(gtx, a, b, th.Accent, 1.5)
+		drawLine(gtx, a, b, frame, 1.5)
+	}
+	if s.selLocked() {
+		return
 	}
 	knob := s.selRotateKnob(rect)
 	drawLine(gtx, pts[1], knob, th.Accent, 1.5) // stem from the top-edge midpoint
@@ -1190,13 +1215,21 @@ func (s *AppState) drawSelection(gtx C, rect image.Rectangle) {
 func (s *AppState) drawMultiSelection(gtx C, rect image.Rectangle) {
 	th := s.Th
 	// Thin static per-shape frames + a bolder group frame carrying scale handles and a rotate knob; the
-	// pulse is on the shapes' silhouettes (overlayOp), so nothing here flashes.
+	// pulse is on the shapes' silhouettes (overlayOp), so nothing here flashes. A locked primary greys it
+	// out and drops the handles.
+	frame := th.Accent
+	if s.selLocked() {
+		frame = th.TextDim
+	}
 	for _, i := range s.selIndices() {
-		drawRectBorderW(gtx, s.shapeScreenRect(i, rect), th.Accent, 1)
+		drawRectBorderW(gtx, s.shapeScreenRect(i, rect), frame, 1)
 	}
 	g := s.groupScreenRect(rect)
 	drawRectBorderW(gtx, g, color.NRGBA{A: 160}, 2)
-	drawRectBorderW(gtx, g, th.Accent, 1)
+	drawRectBorderW(gtx, g, frame, 1)
+	if s.selLocked() {
+		return
+	}
 	knob := rotateHandlePt(g)
 	drawLine(gtx, image.Pt((g.Min.X+g.Max.X)/2, g.Min.Y), knob, th.Accent, 1.5)
 	drawKnob(gtx, knob, th.Accent, th.Bg)
@@ -1299,7 +1332,7 @@ func drawKnob(gtx C, p image.Point, fill, border color.NRGBA) {
 // selection + move, and starts the matching drag.
 func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle, additive bool) {
 	// Scale/rotate handles act only on a single primary selection (group transform = move-only).
-	if s.selValid() && s.selCount() == 1 && !additive {
+	if s.selValid() && s.selCount() == 1 && !additive && !s.selLocked() {
 		if within(pos, s.selRotateKnob(rect), editHandleHitR) {
 			s.startTransform(dragRotate, 0, fp)
 			return
@@ -1312,7 +1345,7 @@ func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle, additive
 		}
 	}
 	// Group scale/rotate handles act on the group's axis-aligned box.
-	if s.selCount() > 1 && !additive {
+	if s.selCount() > 1 && !additive && !s.selLocked() {
 		g := s.groupScreenRect(rect)
 		if within(pos, rotateHandlePt(g), editHandleHitR) {
 			s.startTransform(dragRotate, 0, fp)
@@ -1328,7 +1361,7 @@ func (s *AppState) pressEditor(pos, fp f32.Point, rect image.Rectangle, additive
 	// A press inside ANY selected shape's box moves the whole selection — so sparse shapes (a barcode,
 	// a dotted decal) can be grabbed by their box, not only their solid pixels, and a multi-selection
 	// drags as one.
-	if !additive && s.selCount() >= 1 {
+	if !additive && s.selCount() >= 1 && !s.selLocked() {
 		inside := s.pressInsideSelection(pos, rect)
 		if !inside && s.selCount() > 1 { // also grab the drawn group-centre move anchor
 			g := s.groupScreenRect(rect)

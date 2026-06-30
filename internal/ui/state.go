@@ -394,11 +394,12 @@ type AppState struct {
 	editRedo                          [][]model.Shape
 	editLayerList                     widget.List
 	editLayerBtns                     []widget.Clickable
-	layerDrags                        []gesture.Drag // per-row drag-to-reorder grips
-	layerDragFrom                     int            // shape index being dragged (-1 = none)
-	layerDragAccum                    float64        // accumulated drag px toward the next row swap
-	layerDragLastY                    float32        // last drag pointer Y
-	layerDragMoved                    bool           // a swap happened this drag (one undo per drag)
+	editLockBtns                      []widget.Clickable // per-row lock toggle
+	layerDrags                        []gesture.Drag     // per-row drag-to-reorder grips
+	layerDragFrom                     int                // shape index being dragged (-1 = none)
+	layerDragAccum                    float64            // accumulated drag px toward the next row swap
+	layerDragLastY                    float32            // last drag pointer Y
+	layerDragMoved                    bool               // a swap happened this drag (one undo per drag)
 
 	// editor bank palette (curves/decorative/glyphs), always shown in the left column.
 	bankList        widget.List

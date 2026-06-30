@@ -3,6 +3,7 @@ package ui
 import (
 	"image"
 	"image/color"
+	"math"
 
 	"gioui.org/f32"
 	"gioui.org/layout"
@@ -135,8 +136,6 @@ func drawShapeIcon(gtx C, kind string, col color.NRGBA, filled bool) D {
 	return D{Size: image.Pt(s, s)}
 }
 
-// drawArrowIcon draws a curved undo/redo arrow — a loop over the top whose head swoops down one side, in
-// an 18dp box. left=true is undo (head curls down the left), left=false is redo (mirrored to the right).
 // drawArrowIcon draws a filled curved undo/redo arrow (the Material "undo" glyph) in an 18dp box.
 // left=true is undo; left=false mirrors it horizontally into redo.
 func drawArrowIcon(gtx C, left bool, col color.NRGBA) D {
@@ -162,5 +161,34 @@ func drawArrowIcon(gtx C, left bool, col color.NRGBA) D {
 	p.CubeTo(tf(21.08, 11.03), tf(17.15, 8), tf(12.5, 8))
 	p.Close()
 	paint.FillShape(gtx.Ops, col, clip.Outline{Path: p.End()}.Op())
+	return D{Size: image.Pt(box, box)}
+}
+
+// drawLockIcon draws a small padlock: a filled body with a stroked shackle. When locked the shackle is a
+// closed arch on the body; when unlocked it is lifted and open on the right.
+func drawLockIcon(gtx C, locked bool, col color.NRGBA) D {
+	box := gtx.Dp(15)
+	s := float32(box)
+	w := float32(gtx.Dp(1.5))
+	body := clip.UniformRRect(image.Rect(int(0.2*s), int(0.46*s), int(0.8*s), int(0.92*s)), gtx.Dp(2))
+	paint.FillShape(gtx.Ops, col, body.Op(gtx.Ops))
+	cx, cy, r := 0.5*s, 0.46*s, 0.2*s
+	startA, endA, lift := 180.0, 360.0, float32(0)
+	if !locked {
+		endA, lift = 320.0, 0.10*s // open hasp on the right, raised
+	}
+	const steps = 20
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	for i := 0; i <= steps; i++ {
+		a := (startA + (endA-startA)*float64(i)/float64(steps)) * math.Pi / 180
+		pt := f32.Pt(cx+r*float32(math.Cos(a)), cy-lift+r*float32(math.Sin(a)))
+		if i == 0 {
+			p.MoveTo(pt)
+		} else {
+			p.LineTo(pt)
+		}
+	}
+	paint.FillShape(gtx.Ops, col, clip.Stroke{Path: p.End(), Width: w}.Op())
 	return D{Size: image.Pt(box, box)}
 }
