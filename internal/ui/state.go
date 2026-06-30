@@ -368,7 +368,8 @@ type AppState struct {
 	editZoomIn, editZoomOut, editZoomFit widget.Clickable
 
 	// editor inspector: numeric controls for the selected shape (two-way synced) + colour picker.
-	inspFor                             int // shape index the fields currently reflect (-1 = none)
+	inspFor                             int         // shape index the fields currently reflect (-1 = none)
+	inspShape                           model.Shape // snapshot of that shape — if it changes by another path (undo/nudge), refresh the fields
 	inspX, inspY, inspW, inspH, inspRot widget.Editor
 	editForward, editBack               widget.Clickable
 	editDup, editDelete                 widget.Clickable

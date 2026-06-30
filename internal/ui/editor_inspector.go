@@ -434,7 +434,31 @@ func (s *AppState) syncInspector() {
 		s.inspFor = s.EditSel
 		return
 	}
+	// If the shape changed by some other path (undo/redo, nudge, align, Ctrl+wheel scale…), the fields are
+	// stale — refresh them instead of applying them back over the change (which made undo look dead).
+	if !shapeEq(s.EditShapes[s.EditSel], s.inspShape) {
+		s.populateInspector()
+		return
+	}
 	s.readInspector()
+}
+
+// shapeEq reports whether two shapes are identical in type, geometry, colour and lock state.
+func shapeEq(a, b model.Shape) bool {
+	if a.Type != b.Type || a.Locked != b.Locked || len(a.Data) != len(b.Data) || len(a.Color) != len(b.Color) {
+		return false
+	}
+	for i := range a.Data {
+		if a.Data[i] != b.Data[i] {
+			return false
+		}
+	}
+	for i := range a.Color {
+		if a.Color[i] != b.Color[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // populateInspector writes the selected shape's values into the editor fields.
@@ -448,6 +472,7 @@ func (s *AppState) populateInspector() {
 	s.inspH.SetText(formatFloat(round1(hy * 2)))
 	s.inspRot.SetText(formatFloat(round1(shapeTheta(sh))))
 	s.populateColorSliders()
+	s.inspShape = cloneShapes(s.EditShapes[s.EditSel : s.EditSel+1])[0]
 	if s.editDrag.kind == dragNone { // settle the undo baseline for live field/colour edits on selection change
 		s.editPre = cloneShapes(s.EditShapes)
 		s.editSession = false
@@ -519,6 +544,7 @@ func (s *AppState) readInspector() {
 		s.beginEditUndo()
 		s.markEditDirty()
 	}
+	s.inspShape = cloneShapes(s.EditShapes[s.EditSel : s.EditSel+1])[0]
 }
 
 // applyColorSliders writes the R/G/B/A sliders into the shape colour, returning whether anything changed.

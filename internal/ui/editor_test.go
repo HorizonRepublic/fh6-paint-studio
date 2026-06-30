@@ -657,6 +657,39 @@ func TestScaleSelectionSkipsLocked(t *testing.T) {
 	}
 }
 
+func TestUndoOfFieldEditSticksNotRevertedByInspector(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	s.syncInspector() // populate (inspFor=1, baseline captured)
+	s.inspX.SetText("50")
+	s.syncInspector() // readInspector applies → x=50
+	if s.EditShapes[1].Data[0] != 50 {
+		t.Fatalf("field edit not applied: x=%v", s.EditShapes[1].Data[0])
+	}
+	s.undo()          // x back to 20
+	s.syncInspector() // must REPOPULATE (shape changed), not re-apply the stale field
+	if s.EditShapes[1].Data[0] != 20 {
+		t.Fatalf("undo reverted by inspector: x=%v, want 20", s.EditShapes[1].Data[0])
+	}
+	s.syncInspector() // and it stays put
+	if s.EditShapes[1].Data[0] != 20 {
+		t.Fatalf("x drifted after undo: %v", s.EditShapes[1].Data[0])
+	}
+}
+
+func TestDeleteSelRemovesSingleSelection(t *testing.T) {
+	s := multiDoc()
+	s.selectSingle(1)
+	before := len(s.EditShapes)
+	s.deleteSel()
+	if before-len(s.EditShapes) != 1 {
+		t.Fatalf("delete removed %d shapes, want 1", before-len(s.EditShapes))
+	}
+	if s.selValid() {
+		t.Fatalf("selection should be cleared after delete")
+	}
+}
+
 func TestGroupDeleteRemovesAllSelected(t *testing.T) {
 	s := multiDoc()
 	s.selectAll()
