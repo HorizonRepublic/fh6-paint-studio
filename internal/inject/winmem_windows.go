@@ -75,14 +75,47 @@ func findProcess(names []string) (uint32, string, error) {
 	return 0, "", fmt.Errorf("game process not found (looked for %s) — start FH6 first", strings.Join(names, ", "))
 }
 
+// enableDebugPrivilege turns on SeDebugPrivilege for our own token. Without it, even an elevated process
+// is refused OpenProcess on most foreign processes; with it (and elevation) the game opens. Returns nil
+// only when the privilege was actually granted, which requires the app to be running elevated.
+func enableDebugPrivilege() error {
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &tok); err != nil {
+		return err
+	}
+	defer tok.Close()
+	var luid windows.LUID
+	name, err := windows.UTF16PtrFromString("SeDebugPrivilege")
+	if err != nil {
+		return err
+	}
+	if err := windows.LookupPrivilegeValue(nil, name, &luid); err != nil {
+		return err
+	}
+	tp := windows.Tokenprivileges{PrivilegeCount: 1}
+	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
+	// AdjustTokenPrivileges succeeds even when the privilege is not held; ERROR_NOT_ALL_ASSIGNED is then
+	// surfaced as the returned error, which is exactly the "not elevated" case we want to detect.
+	return windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil)
+}
+
+func processElevated() bool {
+	return windows.GetCurrentProcessToken().IsElevated()
+}
+
 func openProc(pid uint32, write bool) (*proc, error) {
+	debugOK := enableDebugPrivilege() == nil
 	access := uint32(windows.PROCESS_QUERY_INFORMATION | windows.PROCESS_VM_READ)
 	if write {
 		access |= windows.PROCESS_VM_OPERATION | windows.PROCESS_VM_WRITE
 	}
 	h, err := windows.OpenProcess(access, false, pid)
 	if err != nil {
-		return nil, fmt.Errorf("OpenProcess(pid %d): %w (try running as administrator)", pid, err)
+		hint := "run the app as administrator (right-click the exe → Run as administrator)"
+		if processElevated() && debugOK {
+			hint = "the app is elevated with SeDebugPrivilege but the game still refused — it is likely the Microsoft Store / Game Pass build, which runs sandboxed; the Steam build injects normally"
+		}
+		return nil, fmt.Errorf("OpenProcess(pid %d): %w — %s", pid, err, hint)
 	}
 	return &proc{h: h, pid: pid}, nil
 }
