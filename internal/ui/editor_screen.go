@@ -6,6 +6,7 @@ import (
 	"math"
 	"strconv"
 
+	"gioui.org/io/event"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
@@ -42,24 +43,33 @@ func (s *AppState) editorScreen(gtx C) D {
 			layout.Rigid(fixed(300, s.editorRightColumn)),
 		)
 	})
-	// Drag-and-drop layer on top of everything (pass-through, so it never steals clicks).
-	s.dragOverlay(gtx, sz)
 	if s.showShortcuts {
 		s.shortcutsOverlay(gtx, sz)
-	}
-	if s.shortcutsScrim.Clicked(gtx) {
-		s.showShortcuts = false
+	} else {
+		// Drag-and-drop layer on top of everything (pass-through, so it never steals clicks).
+		s.dragOverlay(gtx, sz)
 	}
 	return dims
 }
 
 // shortcutsOverlay dims the editor and centres the keyboard/mouse legend; a click anywhere dismisses it.
+// shortcutsOverlay dims the editor and centres the keyboard/mouse legend; a press anywhere dismisses it.
 func (s *AppState) shortcutsOverlay(gtx C, sz image.Point) {
-	s.shortcutsScrim.Layout(gtx, func(gtx C) D {
-		paint.FillShape(gtx.Ops, color.NRGBA{A: 175}, clip.Rect{Max: sz}.Op())
-		pointer.CursorPointer.Add(gtx.Ops)
-		return layout.Center.Layout(gtx, s.shortcutsCard)
-	})
+	paint.FillShape(gtx.Ops, color.NRGBA{A: 185}, clip.Rect{Max: sz}.Op())
+	area := clip.Rect{Max: sz}.Push(gtx.Ops)
+	event.Op(gtx.Ops, &s.shortcutsTag)
+	pointer.CursorPointer.Add(gtx.Ops)
+	area.Pop()
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &s.shortcutsTag, Kinds: pointer.Press})
+		if !ok {
+			break
+		}
+		if _, ok := ev.(pointer.Event); ok {
+			s.showShortcuts = false
+		}
+	}
+	layout.Center.Layout(gtx, s.shortcutsCard)
 }
 
 // shortcutsCard is the legend panel: a fixed-width card of combo → action rows.

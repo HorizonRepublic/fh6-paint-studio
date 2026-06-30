@@ -418,11 +418,9 @@ type AppState struct {
 	dblAt  time.Time // timestamp of that click
 
 	// editor destructive-action confirmation (red two-step buttons)
-	deleteArmed   bool
-	deleteArmedAt time.Time
-	clearArmed    bool
-	clearArmedAt  time.Time
-	EditNewBtn    widget.Clickable // reset the editor to a blank canvas (armed confirm)
+	clearArmed   bool
+	clearArmedAt time.Time
+	EditNewBtn   widget.Clickable // reset the editor to a blank canvas (armed confirm)
 
 	// editor HSV colour wheel (continuous picker for any RGBA)
 	pickH, pickS, pickV float64      // authoritative HSV of the current colour (hue+sat = disc, value = slider)
@@ -460,9 +458,9 @@ type AppState struct {
 	MirrorAllBtn widget.Clickable
 
 	// editor shortcuts legend (a "?" toolbar toggle opens a dismiss-on-click overlay)
-	showShortcuts  bool
-	ShortcutsBtn   widget.Clickable
-	shortcutsScrim widget.Clickable
+	showShortcuts bool
+	ShortcutsBtn  widget.Clickable
+	shortcutsTag  int // pointer tag for the dismiss scrim
 
 	// editor drag-and-drop: drag a shape from the bank/primitive palette onto the canvas. A full-window
 	// pass-through pointer layer tracks the cursor in window coords; the window→canvas offset is observed

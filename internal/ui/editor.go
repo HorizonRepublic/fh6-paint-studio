@@ -462,7 +462,6 @@ func (s *AppState) EnterEditor(shapes []model.Shape, w, h int) {
 	s.editSelExtra = nil
 	s.editDragSkip = nil
 	s.editMarqueeOn = false
-	s.deleteArmed = false
 	s.clearArmed = false
 	s.colorWheelBuilt = false
 	s.dblTag, s.dblIdx = 0, -1
@@ -651,18 +650,17 @@ func (s *AppState) deselectAll() {
 	s.EditSel = -1
 	s.editSelExtra = nil
 	s.editMarqueeOn = false
-	s.deleteArmed = false
 }
 
 // selectSingle makes i the sole selection (i<1 or out of range deselects).
 func (s *AppState) selectSingle(i int) {
 	s.editSelExtra = nil
-	s.deleteArmed = false
 	if i >= 1 && i < len(s.EditShapes) {
 		s.EditSel = i
 	} else {
 		s.EditSel = -1
 	}
+	s.editWantFocus = true // selecting a shape returns key focus to the canvas so Delete / Ctrl+Z act on it
 }
 
 // isSelected reports whether shape i is part of the current selection (primary or an extra).
@@ -699,7 +697,6 @@ func (s *AppState) toggleSel(i int) {
 	if i < 1 || i >= len(s.EditShapes) {
 		return
 	}
-	s.deleteArmed = false
 	if i == s.EditSel { // drop the primary, promoting any one extra to primary
 		s.EditSel = -1
 		for k := range s.editSelExtra {

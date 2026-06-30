@@ -149,7 +149,6 @@ func (s *AppState) layerList(gtx C) D {
 			s.markEditDirty()
 		} else if s.editLayerBtns[idx].Clicked(gtx) {
 			s.selectSingle(idx)
-			s.editWantFocus = true // so Delete / Ctrl+Z act on the canvas after selecting from the panel
 		}
 		s.updateLayerDrag(gtx, idx)
 		return layout.Inset{Bottom: 4}.Layout(gtx, func(gtx C) D { return s.layerRow(gtx, idx) })

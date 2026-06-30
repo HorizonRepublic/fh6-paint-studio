@@ -5,7 +5,6 @@ import (
 	"image/color"
 	"math"
 	"strconv"
-	"time"
 
 	"gioui.org/f32"
 	"gioui.org/io/pointer"
@@ -410,9 +409,6 @@ func (s *AppState) inspActions(gtx C) D {
 func (s *AppState) deleteButton(gtx C) D {
 	th := s.Th
 	gtx.Constraints.Min.X = gtx.Constraints.Max.X
-	if s.deleteArmed && gtx.Now.Before(s.deleteArmedAt.Add(3*time.Second)) {
-		return th.DangerButton(gtx, &s.editDelete, i18n.T("editor.confirm_del"))
-	}
 	return th.DangerButton(gtx, &s.editDelete, i18n.T("editor.delete"))
 }
 
@@ -598,13 +594,7 @@ func (s *AppState) handleEditActions(gtx C) {
 		s.duplicateSel()
 	}
 	if s.editDelete.Clicked(gtx) {
-		if s.deleteArmed && gtx.Now.Before(s.deleteArmedAt.Add(3*time.Second)) {
-			s.deleteArmed = false
-			s.deleteSel()
-		} else {
-			s.deleteArmed = true
-			s.deleteArmedAt = gtx.Now
-		}
+		s.deleteSel()
 	}
 	if s.editMirror.Clicked(gtx) {
 		s.mirrorSelection(false)
