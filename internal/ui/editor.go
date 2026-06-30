@@ -1130,6 +1130,7 @@ func (s *AppState) addCanvasInput(gtx C, vp, rect image.Rectangle) {
 func (s *AppState) handleEditKeys(gtx C) {
 	for {
 		ev, ok := gtx.Event(
+			key.FocusFilter{Target: &s.editKeyTag}, // makes editKeyTag a real focus target so FocusCmd sticks
 			key.Filter{Focus: &s.editKeyTag, Name: "Z", Required: key.ModShortcut},
 			key.Filter{Focus: &s.editKeyTag, Name: "Z", Required: key.ModShortcut | key.ModShift},
 			key.Filter{Focus: &s.editKeyTag, Name: "D", Required: key.ModShortcut},
