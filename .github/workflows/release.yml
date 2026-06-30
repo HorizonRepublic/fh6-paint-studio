@@ -33,6 +33,9 @@ jobs:
     uses: ./.github/workflows/release-build.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
+    # Reusable workflows don't inherit caller secrets automatically (unlike GITHUB_TOKEN), so the
+    # Nexus publish step inside release-build.yml needs NEXUS_API_KEY forwarded explicitly.
+    secrets: inherit
     permissions:
       contents: write
       id-token: write # forwarded so release-build.yml can sign the provenance attestation
