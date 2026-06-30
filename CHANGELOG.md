@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.4.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.3.0...v1.4.0) (2026-06-30)
+
+
+### Features
+
+* **editor:** coalesced visual undo/redo and a shortcuts legend ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **editor:** drag shapes from the bank onto the canvas ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **editor:** in-app vinyl shape editor with palette, layers and inspector ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **editor:** multi-select with group move, rotate and scale ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **editor:** per-layer lock, HSV colour wheel and recent colours ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **editor:** smart snapping, symmetry stamping, array and radial duplicate ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **engine:** glyph pre-pass, saliency quota and high-resolution fits ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **i18n:** twelve-language UI with OS-locale detection and CJK fonts ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **maskbank:** vector-exact dictionary masks ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+
+
+### Performance
+
+* **editor:** refresh only the dragged region for smooth dragging ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/image to v0.43.0 ([#33](https://github.com/HorizonRepublic/fh6-paint-studio/issues/33)) ([a92f8b7](https://github.com/HorizonRepublic/fh6-paint-studio/commit/a92f8b7ec711640ab63e2d50c5a98afce65a3874))
+* **editor:** keyboard shortcuts, one-click delete and undo reliability ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+* **inject:** enable SeDebugPrivilege for elevated injection ([46abca0](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46abca0bab4c196e63f88fdb5d7f3c5196b63676))
+
 ## [1.3.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.2.0...v1.3.0) (2026-06-10)
 
 
