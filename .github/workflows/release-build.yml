@@ -55,7 +55,7 @@ jobs:
       # CUDA 12.8 is required for the sm_120 (Blackwell) SASS. shim.cu only needs the core runtime
       # headers (cuda_runtime.h / cuda_fp16.h), so nvcc + cudart is enough — no CUB/cccl.
       - name: Install CUDA 12.8 toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: "12.8.1"
           sub-packages: '["nvcc", "cudart"]'
