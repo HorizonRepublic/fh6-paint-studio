@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Manter formas dentro da imagem",
   "advanced.mono": "Cor única (logo / decalque)",
   "advanced.economy": "Modo econômico (mais lento, melhor com orçamentos baixos)",
+  "advanced.best_of": "Melhor de N execuções",
 
   "shapes.used": "Formas usadas",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · fotografias",
   "mode.gaussian_title": "Brilho suave",
   "mode.gaussian_subtitle": "gaussian · gradientes suaves",
+  "mode.pixel_title": "Pixel art",
+  "mode.pixel_subtitle": "pixel · cópia exata do sprite",
   "mode.saved_presets": "PREDEFINIÇÕES SALVAS",
   "mode.saved_preset": "predefinição salva",
   "mode.ink_badge": "tinta",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "LIGADO por padrão. Gera contra um entorno transparente para que a penalidade de extravasamento force cada forma a permanecer DENTRO da imagem, sem círculos ou retângulos estourando além da borda (o pior artefato dentro do jogo). A reconstrução é remapeada para o tamanho original depois, então a prévia fica limpa. Desligue apenas para o comportamento legado.",
   "hint.mono": "Para um logo de marca ou decalque PLANO de cor única. Força cada forma a UMA cor sólida (detectada automaticamente do logo) em um recorte limpo, então não há formas cinzas de borda suavizada nem caixa de fundo — apenas a silhueta nítida de cor única. Combina com um orçamento de formas baixo. Deixe DESLIGADO para imagens normais multicoloridas.",
   "hint.economy": "DESLIGADO por padrão. Com contagens baixas de formas (≲1500), isto coadapta as formas — continua reajustando TODAS elas em conjunto conforme constrói, para um resultado mais limpo com menos formas. O porém: é MUITO mais lento (refina o conjunto inteiro repetidamente), então ligue apenas quando quiser qualidade máxima com orçamento apertado e não se importar com a espera. Sem efeito em Logo/Plano ou acima de ~1500 formas.",
+  "hint.best_of": "1 por padrão (execução única). N>1 roda TODA a geração N vezes com sementes aleatórias diferentes e mantém o melhor resultado — a variação entre execuções é de ~6%, então isso extrai qualidade extra ao custo de N× o tempo. As execuções são independentes (sem mistura); a barra de progresso reinicia a cada tentativa. 2–3 é o ponto ideal.",
   "hint.gaussian": "O modo de brilho suave treina os splats de brilho em conjunto — nenhuma opção gulosa se aplica. Detalhe = número de brilhos; mais brilhos + o treinamento automático dão um resultado mais próximo (mas sempre suave). Melhor para imagens SUAVES / com gradiente / pictóricas — não consegue renderizar detalhes finos e nítidos, então use Desenho/Foto/Logo para conteúdo nítido ou cel. Mais lento que os outros (ele treina; a barra mostra o progresso do treinamento).",
+  "hint.pixel": "O modo pixel art reproduz a arte EXATAMENTE — detecta a grade de pixels e reconstrói cada região de cor com retângulos sólidos, pixel-perfect. As configurações do motor não se aplicam: a própria arte define o número de formas (um sprite 32×32 costuma dar 100–300 formas). Se a arte precisar de mais de 3000 retângulos, a geração para informando a quantidade necessária — recorte um único sprite ou simplifique a paleta. Funciona melhor com PNGs limpos (sem suavização/JPEG).",
   "hint.polish": "Refina todas as formas juntas após a construção gulosa. Ligado = mais suave, melhor ajuste de cor; desligado = mais rápido, porém mais cru e facetado.\n\nAfeta: tempo e qualidade.",
   "hint.polish_iters": "Quantos passos de refinamento. Mais = ajuste mais próximo e gradientes mais suaves, porém mais lento; a parada antecipada corta o final. Em branco = a contagem ajustada da predefinição. Para arte plana, a contagem ajustada depende da paleta.\n\nAfeta: tempo e qualidade.",
   "hint.edge_softness": "Suavidade das bordas refinadas. Menor = bordas mais nítidas e duras; maior = transições mais macias e suaves.\n\nAfeta: qualidade.",

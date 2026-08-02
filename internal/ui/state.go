@@ -150,11 +150,12 @@ type AppState struct {
 	PresetCards  []widget.Clickable
 	Alpha        widget.Bool
 	Backfit      widget.Bool
-	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
-	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
-	SourceRes    widget.Bool // fit the ENGINE at the image's original resolution instead of the working cap — maximum detail on large sources, much slower (display stays at the working size)
-	Mono         widget.Bool // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
-	Economy      widget.Bool // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
+	Boundary     widget.Bool   // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
+	KeepInside   widget.Bool   // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	SourceRes    widget.Bool   // fit the ENGINE at the image's original resolution instead of the working cap — maximum detail on large sources, much slower (display stays at the working size)
+	Mono         widget.Bool   // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
+	Economy      widget.Bool   // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
+	BestOfEd     widget.Editor // best-of-N seeds: rerun the WHOLE pipeline N times, keep the best (blank/1 = single run; seed spread ~6%)
 	Seed         widget.Editor
 
 	AlphaHint      Hint
@@ -164,6 +165,7 @@ type AppState struct {
 	SourceResHint  Hint
 	MonoHint       Hint
 	EconomyHint    Hint
+	BestOfHint     Hint
 	BudgetHint     Hint
 	ModeHint       Hint
 	InkHint        Hint
@@ -493,7 +495,7 @@ func NewAppState(th *Theme) *AppState {
 		// niche "gaussian" mode (soft-glow reconstruction for SMOOTH / gradient / painterly content —
 		// 8x better than greedy on a gradient, loses on fine detail; no greedy, trains on the GPU).
 		// Default = anime, the best general-purpose preset.
-		Mode: NewDropdown([]string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}, 0),
+		Mode: NewDropdown([]string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian", "pixel"}, 0),
 	}
 	s.Budget.Value = shapesToFrac(1000)
 	s.BudgetEd.SingleLine = true
@@ -523,6 +525,7 @@ func NewAppState(th *Theme) *AppState {
 	s.MaxNIEd.SingleLine = true
 	s.GridEd.SingleLine = true
 	s.OverdrawEd.SingleLine = true
+	s.BestOfEd.SingleLine = true
 	s.QualityDD = NewDropdown([]string{"fast", "balanced", "max", "quality", "ultra"}, 3)
 	{
 		av := i18n.Available()
@@ -788,6 +791,14 @@ func (s *AppState) Choices() preset.Choices {
 		c.MonoColor = "auto"
 	}
 	c.Economy = s.Economy.Value // opt-in low-budget co-adaptation (slow); curated toggle, applied in both modes
+	// Best-of-N seeds (Advanced, curated like Mono/Economy — keeps applying when collapsed): rerun
+	// the whole pipeline N times, keep the best final error. Clamped so a typo can't queue 40 runs.
+	if v := editorPosInt(&s.BestOfEd); v > 1 {
+		if v > 9 {
+			v = 9
+		}
+		c.BestOf = v
+	}
 	// Used-shapes picker (top of Advanced): a curated control like Mono/Economy — a restricted set keeps
 	// applying even when Advanced is collapsed again. All-on stays "" so the mode keeps its default mix.
 	if s.KindsSel.OnCount() < len(preset.KindNames) {
@@ -897,7 +908,7 @@ func (s *AppState) applySelectedMode() {
 
 func IsBuiltinMode(m string) bool {
 	switch m {
-	case "anime", "photo", "flat", "lineart", "anime-ink", "gaussian":
+	case "anime", "photo", "flat", "lineart", "anime-ink", "gaussian", "pixel":
 		return true
 	}
 	return false
@@ -915,7 +926,7 @@ func (s *AppState) SelectPreset(value string) {
 func (s *AppState) SetPresets(ps []userpreset.Preset) {
 	s.Presets = ps
 	s.PresetCards = make([]widget.Clickable, len(ps))
-	builtin := []string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian"}
+	builtin := []string{"anime", "photo", "flat", "lineart", "anime-ink", "gaussian", "pixel"}
 	opts := append([]string{}, builtin...)
 	for i := range ps {
 		opts = append(opts, ps[i].Name)
@@ -1081,6 +1092,7 @@ func (s *AppState) applyKnobs(c preset.Choices) {
 	setEditorInt(&s.SampleEd, c.SampleBudget)
 	setEditorInt(&s.MaxNIEd, c.MaxNoImprove)
 	setEditorInt(&s.GridEd, c.Grid)
+	setEditorInt(&s.BestOfEd, c.BestOf)
 	if c.Overdraw > 1 {
 		s.OverdrawEd.SetText(formatFloat(c.Overdraw))
 	} else {

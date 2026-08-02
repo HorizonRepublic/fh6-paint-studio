@@ -40,12 +40,14 @@ func TestHiResPrep(t *testing.T) {
 	st := &ui.AppState{ImgPath: big}
 	full := image.Rect(0, 0, 1400, 2400)
 
+	// Native-resolution default (2026-07-20): anime/flat fit at min(native, srcResCap). This 2400px
+	// source is below the cap, so it fits at NATIVE 2400 (not truncated).
 	hi := hiResPrep(st, "flat", full, 642, 1100)
 	if hi == nil {
 		t.Fatal("flat + big source: want a hi-res prep, got nil")
 	}
-	if hi.H != genMaxRes {
-		t.Errorf("hi-res prep %dx%d, want long side %d", hi.W, hi.H, genMaxRes)
+	if hi.W != 1400 || hi.H != 2400 {
+		t.Errorf("hi-res prep %dx%d, want native 1400x2400", hi.W, hi.H)
 	}
 
 	if got := hiResPrep(st, "photo", full, 642, 1100); got != nil {

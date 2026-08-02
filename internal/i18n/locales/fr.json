@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Garder les formes dans l'image",
   "advanced.mono": "Couleur unique (logo / sticker)",
   "advanced.economy": "Mode économie (plus lent, meilleur à petit budget)",
+  "advanced.best_of": "Meilleur de N essais",
 
   "shapes.used": "Formes utilisées",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · photographies",
   "mode.gaussian_title": "Halo doux",
   "mode.gaussian_subtitle": "gaussian · dégradés doux",
+  "mode.pixel_title": "Pixel art",
+  "mode.pixel_subtitle": "pixel · copie exacte du sprite",
   "mode.saved_presets": "PRÉRÉGLAGES ENREGISTRÉS",
   "mode.saved_preset": "préréglage enregistré",
   "mode.ink_badge": "encre",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "ON par défaut. Génère sur un fond transparent, de sorte que la pénalité de débordement force chaque forme à rester À L'INTÉRIEUR de l'image, sans cercles ni rectangles débordant au-delà du bord (le pire artefact en jeu). La reconstruction est ensuite remise à la taille d'origine, donc l'aperçu est net. Désactivez uniquement pour l'ancien comportement.",
   "hint.mono": "Pour un logo de marque ou un sticker PLAT en couleur unique. Force chaque forme à UNE seule couleur pleine (détectée automatiquement à partir du logo) sur un détourage net, donc pas de formes grises aux bords lissés ni de boîte de fond — juste la silhouette nette en couleur unique. À associer à un petit budget de formes. Laissez OFF pour les images multicolores normales.",
   "hint.economy": "OFF par défaut. À faible nombre de formes (≲1500), ce mode co-adapte les formes — il les réajuste TOUTES ensemble au fur et à mesure de la construction, pour un résultat plus net avec moins de formes. Le hic : c'est BEAUCOUP plus lent (il repeaufine tout l'ensemble de façon répétée), alors activez-le seulement quand vous voulez une qualité maximale à budget serré et que l'attente ne vous dérange pas. Aucun effet sur Logo/Aplat ni au-dessus de ~1500 formes.",
+  "hint.best_of": "1 par défaut (un seul essai). N>1 relance TOUTE la génération N fois avec des graines aléatoires différentes et garde le meilleur résultat — la variance entre essais est d'environ 6 %, on gagne donc en qualité au prix de N× le temps. Les essais sont indépendants (pas de mélange) ; la barre de progression redémarre à chaque tentative. 2–3 est le bon compromis.",
   "hint.gaussian": "Le mode halo doux entraîne les taches de halo conjointement — aucune option gloutonne ne s'applique. Détail = nombre de halos ; plus de halos + l'entraînement automatique donnent un résultat plus fidèle (mais toujours lisse). Idéal pour les images LISSES / en dégradé / picturales — il ne peut pas rendre les détails fins et nets, donc utilisez Dessin/Photo/Logo pour un contenu net ou cel. Plus lent que les autres (il s'entraîne ; la barre montre la progression de l'entraînement).",
+  "hint.pixel": "Le mode pixel art reproduit l'image EXACTEMENT — il détecte la grille de pixels et reconstruit chaque zone de couleur en rectangles pleins, au pixel près. Les réglages du moteur ne s'appliquent pas : l'image définit elle-même le nombre de formes (un sprite 32×32 fait typiquement 100–300 formes). S'il faut plus de 3000 rectangles, la génération s'arrête en indiquant le nombre requis — recadrez sur un seul sprite ou simplifiez la palette. Fonctionne mieux avec des PNG propres (sans lissage/JPEG).",
   "hint.polish": "Affine toutes les formes ensemble après la construction gloutonne. Activé = plus lisse, meilleur ajustement des couleurs ; désactivé = plus rapide mais plus brut et plus facetté.\n\nInfluence : temps et qualité.",
   "hint.polish_iters": "Le nombre d'étapes de peaufinage. Plus = ajustement plus fidèle et dégradés plus lisses mais plus lent ; l'arrêt anticipé coupe la fin. Vide = le nombre réglé par le préréglage. Pour l'art plat, ce nombre dépend de la palette.\n\nInfluence : temps et qualité.",
   "hint.edge_softness": "La douceur des bords peaufinés. Plus bas = bords plus nets et plus durs ; plus haut = fondus plus doux et plus lisses.\n\nInfluence : qualité.",

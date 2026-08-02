@@ -10,6 +10,7 @@ import (
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/pixel"
 	"fh6-paint-studio/internal/preset"
 )
 
@@ -43,6 +44,22 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		target := r.Target
 		if target == nil {
 			target = prep.Pixels
+		}
+
+		// PIXEL-ART mode: exact reproduction, no engine and no backend (see internal/pixel). The
+		// count is defined by the art; a budget overflow surfaces as a friendly Failed message.
+		if r.PixelArt {
+			pres, perr := pixel.Generate(target, w, h, preset.MaxShapes)
+			if perr != nil {
+				onEvent(Failed{Err: perr})
+				return
+			}
+			onEvent(Log{Line: fmt.Sprintf("pixel: grid %dx%d (step %d), %d colors -> %d rects",
+				pres.GridW, pres.GridH, pres.GridStep, pres.Colors, pres.RectCount)})
+			res := engine.Result{Shapes: pres.Shapes}
+			onEvent(Progress{Shapes: pres.RectCount, Total: pres.RectCount, Elapsed: 0})
+			onEvent(Done{Result: res, Canvas: renderInGame(res.Shapes, true, w, h), Backend: "Pixel"})
+			return
 		}
 
 		be, name, err := newBackend(target, r.Weight, w, h, r.Grid)
@@ -137,6 +154,8 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			}
 			onEvent(Log{Line: fmt.Sprintf("Gaussian mode: training %d glow splats over %d iters (smooth/gradient content)…", opt.StopAt, gTotal)})
 			res = engine.GenerateGaussian(be, opt)
+		} else if r.BestOf > 1 {
+			res = engine.RunBest(be, opt, r.BestOf)
 		} else {
 			res = engine.Run(be, opt)
 		}

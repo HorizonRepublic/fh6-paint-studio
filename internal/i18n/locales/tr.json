@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Şekilleri görsel içinde tut",
   "advanced.mono": "Tek renk (logo / çıkartma)",
   "advanced.economy": "Ekonomi modu (daha yavaş, düşük bütçelerde daha iyi)",
+  "advanced.best_of": "N çalıştırmanın en iyisi",
 
   "shapes.used": "Kullanılan şekiller",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · fotoğraflar",
   "mode.gaussian_title": "Yumuşak parıltı",
   "mode.gaussian_subtitle": "gaussian · yumuşak geçişler",
+  "mode.pixel_title": "Piksel sanatı",
+  "mode.pixel_subtitle": "pixel · birebir sprite kopyası",
   "mode.saved_presets": "KAYITLI AYARLAR",
   "mode.saved_preset": "kayıtlı ayar",
   "mode.ink_badge": "mürekkep",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "Varsayılan olarak AÇIK. Saydam bir çevreye karşı oluşturur, böylece taşma cezası her şeklin görselin İÇİNDE kalmasını zorlar; hiçbir daire ya da dikdörtgen kenardan dışarı taşmaz (oyun içindeki en kötü kusur). Yeniden oluşturma daha sonra orijinal boyuta geri eşlenir, böylece önizleme temiz olur. Yalnızca eski davranış için kapat.",
   "hint.mono": "DÜZ tek renkli bir marka logosu ya da çıkartma için. Her şekli, temiz bir kesitin üzerinde TEK düz renge (logodan otomatik algılanır) zorlar, böylece gri kenar yumuşatmalı şekiller ve arka plan kutusu olmaz — yalnızca net tek renkli siluet. Düşük şekil bütçesiyle iyi gider. Normal çok renkli görseller için KAPALI bırak.",
   "hint.economy": "Varsayılan olarak KAPALI. Düşük şekil sayılarında (≲1500) bu şekilleri birlikte uyarlar — kurarken hepsini birlikte yeniden uydurmaya devam eder, böylece daha az şekille daha temiz bir sonuç verir. Dezavantajı: ÇOK daha yavaştır (tüm seti tekrar tekrar yeniden cilalar), bu yüzden yalnızca kısıtlı bir bütçede maksimum kalite istediğinde ve beklemeyi sorun etmediğinde aç. Logo/Düz modunda veya ~1500 şeklin üzerinde etkisi yoktur.",
+  "hint.best_of": "Varsayılan 1 (tek çalıştırma). N>1, TÜM üretimi farklı rastgele tohumlarla N kez çalıştırır ve en iyi sonucu tutar — çalıştırmalar arası fark ~%6'dır, yani N× süre karşılığında ekstra kalite kazanılır. Çalıştırmalar bağımsızdır (karıştırma yok); ilerleme çubuğu her denemede baştan başlar. 2–3 ideal noktadır.",
   "hint.gaussian": "Yumuşak parıltı modu parıltı lekelerini birlikte eğitir — açgözlü seçenekler geçerli değildir. Ayrıntı = parıltı sayısı; daha fazla parıltı + otomatik eğitim daha yakın (ama her zaman pürüzsüz) bir sonuç verir. PÜRÜZSÜZ / geçişli / resimsel görseller için en iyisi — net ince ayrıntı işleyemez, bu yüzden keskin veya cel içerik için Çizim/Fotoğraf/Logo kullan. Diğerlerinden daha yavaştır (eğitim yapar; çubuk eğitim ilerlemesini gösterir).",
+  "hint.pixel": "Piksel sanatı modu görseli BİREBİR yeniden üretir — piksel ızgarasını algılar ve her renk bölgesini dolu dikdörtgenlerle piksel piksel yeniden kurar. Motor ayarları geçerli değildir: şekil sayısını görselin kendisi belirler (32×32 bir sprite genellikle 100–300 şekildir). Görsel 3000'den fazla dikdörtgen gerektirirse üretim gereken sayıyı bildirerek durur — tek bir sprite'a kırpın veya paleti sadeleştirin. En iyi temiz PNG dışa aktarımlarıyla çalışır (yumuşatma/JPEG olmadan).",
   "hint.polish": "Açgözlü kurulumdan sonra tüm şekilleri birlikte iyileştirir. Açık = daha pürüzsüz, daha iyi renk uyumu; kapalı = daha hızlı ama daha ham ve daha köşeli.\n\nEtkiler: süre ve kalite.",
   "hint.polish_iters": "Kaç cilalama iyileştirme adımı. Daha fazla = daha yakın uyum ve daha pürüzsüz geçişler ama daha yavaş; erken durdurma kuyruğu kırpar. Boş = ayarın ince ayarlı sayısı. Düz sanat için ince ayarlı sayı palete bağlıdır.\n\nEtkiler: süre ve kalite.",
   "hint.edge_softness": "Cilalanmış kenarların yumuşaklığı. Düşük = daha net, daha sert kenarlar; yüksek = daha yumuşak, daha pürüzsüz harmanlamalar.\n\nEtkiler: kalite.",

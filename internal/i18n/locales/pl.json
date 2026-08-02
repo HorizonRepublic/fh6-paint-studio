@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Trzymaj kształty wewnątrz obrazu",
   "advanced.mono": "Jeden kolor (logo / naklejka)",
   "advanced.economy": "Tryb oszczędny (wolniejszy, lepszy przy małych budżetach)",
+  "advanced.best_of": "Najlepszy z N przebiegów",
 
   "shapes.used": "Użyte kształty",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · fotografie",
   "mode.gaussian_title": "Miękka poświata",
   "mode.gaussian_subtitle": "gaussian · miękkie gradienty",
+  "mode.pixel_title": "Pixel art",
+  "mode.pixel_subtitle": "pixel · dokładna kopia sprite'a",
   "mode.saved_presets": "ZAPISANE USTAWIENIA",
   "mode.saved_preset": "zapisane ustawienie",
   "mode.ink_badge": "tusz",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "Domyślnie WŁ. Generuje na przezroczystym otoczeniu, więc kara za wyjście poza obraz zmusza każdy kształt, by pozostał WEWNĄTRZ obrazu, bez kół czy prostokątów wylewających się poza krawędź (najgorszy artefakt w grze). Rekonstrukcja jest następnie odwzorowywana z powrotem na oryginalny rozmiar, więc podgląd jest czysty. Wyłącz tylko dla starego zachowania.",
   "hint.mono": "Dla PŁASKIEGO jednokolorowego logo marki lub naklejki. Wymusza jeden jednolity kolor (wykryty automatycznie z logo) na czystym wycinku, więc nie ma szarych kształtów wygładzonych krawędzi ani ramki tła — tylko ostra jednokolorowa sylwetka. Pasuje do małego budżetu kształtów. Pozostaw WYŁ. dla zwykłych wielokolorowych obrazów.",
   "hint.economy": "Domyślnie WYŁ. Przy małej liczbie kształtów (≲1500) ten tryb współdopasowuje kształty — wciąż dopasowuje WSZYSTKIE razem podczas budowania, dla czystszego wyniku z mniejszą liczbą kształtów. Haczyk: jest DUŻO wolniejszy (wielokrotnie ponownie wygładza cały zestaw), więc włącz go tylko, gdy chcesz maksymalnej jakości przy ciasnym budżecie i nie przeszkadza ci czekanie. Bez wpływu na Logo/Płaski lub powyżej ~1500 kształtów.",
+  "hint.best_of": "Domyślnie 1 (pojedynczy przebieg). N>1 uruchamia CAŁĄ generację N razy z różnymi ziarnami losowości i zachowuje najlepszy wynik — rozrzut między przebiegami to ~6%, więc wyciska dodatkową jakość kosztem N× czasu. Przebiegi są niezależne (bez mieszania); pasek postępu zaczyna od nowa przy każdej próbie. 2–3 to złoty środek.",
   "hint.gaussian": "Tryb miękkiej poświaty trenuje plamy poświaty wspólnie — opcje zachłanne nie obowiązują. Szczegółowość = liczba poświat; więcej poświat + automatyczne trenowanie daje bliższy (ale zawsze gładki) wynik. Najlepszy dla GŁADKICH / gradientowych / malarskich obrazów — nie potrafi renderować ostrych drobnych detali, więc dla ostrej lub cel treści użyj Rysunek/Zdjęcie/Logo. Wolniejszy od pozostałych (trenuje; pasek pokazuje postęp trenowania).",
+  "hint.pixel": "Tryb pixel art odtwarza grafikę DOKŁADNIE — wykrywa siatkę pikseli i odbudowuje każdy obszar koloru z pełnych prostokątów, co do piksela. Ustawienia silnika nie działają: liczbę kształtów określa sama grafika (sprite 32×32 to zwykle 100–300 kształtów). Jeśli grafika wymaga ponad 3000 prostokątów, generowanie zatrzyma się z podaną liczbą — przytnij do jednego sprite'a lub uprość paletę. Najlepiej działa z czystymi PNG (bez wygładzania/JPEG).",
   "hint.polish": "Dopasowuje wszystkie kształty razem po budowie zachłannej. Wł. = gładziej, lepsze dopasowanie koloru; wył. = szybciej, ale surowiej i bardziej fasetkowo.\n\nWpływa na: czas i jakość.",
   "hint.polish_iters": "Ile kroków dopracowania wygładzania. Więcej = bliższe dopasowanie i gładsze gradienty, ale wolniej; wczesne zatrzymanie przycina ogon. Puste = dostrojona liczba z ustawienia. Dla płaskiej grafiki dostrojona liczba zależy od palety.\n\nWpływa na: czas i jakość.",
   "hint.edge_softness": "Miękkość wygładzonych krawędzi. Niżej = ostrzejsze, twardsze krawędzie; wyżej = miększe, gładsze przejścia.\n\nWpływa na: jakość.",

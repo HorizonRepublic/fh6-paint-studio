@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Mantieni le forme dentro l'immagine",
   "advanced.mono": "Colore singolo (logo / decalcomania)",
   "advanced.economy": "Modalità economia (più lenta, migliore con budget bassi)",
+  "advanced.best_of": "Migliore di N esecuzioni",
 
   "shapes.used": "Forme usate",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · fotografie",
   "mode.gaussian_title": "Bagliore morbido",
   "mode.gaussian_subtitle": "gaussian · gradienti morbidi",
+  "mode.pixel_title": "Pixel art",
+  "mode.pixel_subtitle": "pixel · copia esatta dello sprite",
   "mode.saved_presets": "PRESET SALVATI",
   "mode.saved_preset": "preset salvato",
   "mode.ink_badge": "inchiostro",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "ON per impostazione predefinita. Genera su uno sfondo trasparente così la penalità di fuoriuscita costringe ogni forma a restare DENTRO l'immagine, senza cerchi o rettangoli che debordano oltre il bordo (il peggior artefatto in gioco). La ricostruzione viene poi rimappata alla dimensione originale, così l'anteprima è pulita. Disattiva solo per il comportamento legacy.",
   "hint.mono": "Per un logo o una decalcomania di marca PIATTI a colore singolo. Costringe ogni forma a UN solo colore pieno (rilevato automaticamente dal logo) su un ritaglio pulito, così non ci sono forme grigie dai bordi sfumati né riquadro di sfondo — solo la silhouette nitida a colore singolo. Si abbina a un budget di forme basso. Lascia OFF per le normali immagini multicolore.",
   "hint.economy": "OFF per impostazione predefinita. Con conteggi di forme bassi (≲1500) questa modalità co-adatta le forme — continua a riadattarle TUTTE insieme mentre costruisce, per un risultato più pulito con meno forme. Il rovescio della medaglia: è MOLTO più lenta (rifinisce ripetutamente l'intero set), quindi attivala solo quando vuoi la massima qualità con un budget ristretto e non ti dispiace l'attesa. Nessun effetto su Logo/Piatto o oltre le ~1500 forme.",
+  "hint.best_of": "1 di default (una sola esecuzione). N>1 riesegue TUTTA la generazione N volte con seed casuali diversi e tiene il risultato migliore — la varianza tra esecuzioni è ~6%, quindi si ottiene qualità extra al costo di N× il tempo. Le esecuzioni sono indipendenti (nessuna fusione); la barra di avanzamento riparte a ogni tentativo. 2–3 è il punto ideale.",
   "hint.gaussian": "La modalità bagliore morbido addestra congiuntamente gli splat di bagliore — le opzioni greedy non si applicano. Dettaglio = numero di bagliori; più bagliori + l'addestramento automatico danno un risultato più fedele (ma sempre morbido). Ideale per immagini MORBIDE / sfumate / pittoriche — non può rendere dettagli fini e nitidi, quindi usa Disegno/Foto/Logo per contenuti netti o cel. Più lenta delle altre (addestra; la barra mostra l'avanzamento dell'addestramento).",
+  "hint.pixel": "La modalità pixel art riproduce l'arte ESATTAMENTE — rileva la griglia dei pixel e ricostruisce ogni regione di colore con rettangoli pieni, pixel-perfect. Le impostazioni del motore non si applicano: è l'arte stessa a definire il numero di forme (uno sprite 32×32 è tipicamente 100–300 forme). Se servono più di 3000 rettangoli, la generazione si ferma indicando il numero necessario — ritaglia un singolo sprite o semplifica la palette. Funziona meglio con PNG puliti (senza smoothing/JPEG).",
   "hint.polish": "Rifinisce tutte le forme insieme dopo la costruzione greedy. On = più morbido, miglior resa del colore; off = più veloce ma più grezzo e sfaccettato.\n\nInfluisce su: tempo e qualità.",
   "hint.polish_iters": "Quanti passi di rifinitura. Più = adattamento più fedele e gradienti più morbidi ma più lento; lo stop anticipato taglia la coda. Vuoto = il conteggio ottimizzato del preset. Per l'arte piatta il conteggio ottimizzato dipende dalla palette.\n\nInfluisce su: tempo e qualità.",
   "hint.edge_softness": "Morbidezza dei bordi rifiniti. Più basso = bordi più nitidi e netti; più alto = transizioni più morbide e fluide.\n\nInfluisce su: qualità.",
