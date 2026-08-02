@@ -3,21 +3,18 @@
 package main
 
 import (
+	"fmt"
+
 	"fh6-paint-studio/internal/backend"
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/backend/vulkan"
 )
 
 // newBackend builds the cross-vendor Vulkan GPU backend (fh6vk.dll). Built with -tags vulkan.
-// Falls back to the CPU reference if the device cannot be initialized.
+// No CPU fallback — a failed init is a real driver/DLL error, not something to paper over.
 func newBackend(pixels, weight []float32, w, h, gridSize int) (backend.Backend, string, error) {
 	be, err := vulkan.New(pixels, weight, w, h, gridSize)
 	if err != nil {
-		c := cpu.New(pixels, w, h, gridSize)
-		if weight != nil {
-			c.SetWeight(weight)
-		}
-		return c, "cpu (vulkan init failed: " + err.Error() + ")", nil
+		return nil, "", fmt.Errorf("vulkan init failed (driver/fh6vk.dll): %w", err)
 	}
 	return be, "vulkan", nil
 }

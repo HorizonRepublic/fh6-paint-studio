@@ -3,18 +3,17 @@
 package runner
 
 import (
+	"errors"
+
 	"fh6-paint-studio/internal/backend"
-	"fh6-paint-studio/internal/backend/cpu"
 )
 
-// newBackend (CPU build) constructs the pure-Go reference backend.
-func newBackend(pixels, weight []float32, w, h, grid int) (backend.Backend, string, error) {
-	be := cpu.New(pixels, w, h, grid)
-	if weight != nil {
-		be.SetWeight(weight)
-	}
-	return be, "CPU", nil
+// newBackend (untagged build) has no engine: the pure-Go CPU backend was dropped (owner decision
+// 2026-07-19 — CUDA is the golden reference, Vulkan the cross-vendor port; the userbase runs FH6,
+// so a GPU is a given). Build with -tags cuda, vulkan, or allgpu.
+func newBackend(_, _ []float32, _, _, _ int) (backend.Backend, string, error) {
+	return nil, "", errors.New("this build has no GPU backend — rebuild with -tags cuda, vulkan, or allgpu")
 }
 
-// AvailableBackends reports the backends offered by this (CPU-only) build.
-func AvailableBackends() []string { return []string{"CPU"} }
+// AvailableBackends reports the backends offered by this (engine-less) build.
+func AvailableBackends() []string { return nil }
