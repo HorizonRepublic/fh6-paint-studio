@@ -1,0 +1,22 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eagle_hpfin.comp — high-pass finish (engine highpass tail; the gauss result sits in t1).
+// pc.mode: 0: hx=vx-t1  1: hy=vy-t1  2: t2=sx-t1  3: t2=sy-t1 (the backward u).
+layout(local_size_x = 256) in;
+layout(std430, binding = 5) readonly buffer VX { double vx[]; };
+layout(std430, binding = 6) readonly buffer VY { double vy[]; };
+layout(std430, binding = 9)           buffer HX { double hx[]; };
+layout(std430, binding = 10)          buffer HY { double hy[]; };
+layout(std430, binding = 12) readonly buffer T1 { double t1[]; };
+layout(std430, binding = 13)          buffer T2 { double t2[]; };
+layout(std430, binding = 14) readonly buffer SX { double sx[]; };
+layout(std430, binding = 15) readonly buffer SY { double sy[]; };
+layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.w * pc.h) return;
+    if (pc.mode == 0) hx[i] = vx[i] - t1[i];
+    else if (pc.mode == 1) hy[i] = vy[i] - t1[i];
+    else if (pc.mode == 2) t2[i] = sx[i] - t1[i];
+    else t2[i] = sy[i] - t1[i];
+}

@@ -1,0 +1,32 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eagle_var.comp — zero-padded fixed-1/9 3x3 patch variance + mean of BOTH Scharr planes
+// (engine eagleState.patchVar; same dy->dx accumulation order).
+layout(local_size_x = 256) in;
+layout(std430, binding = 3) readonly buffer GX { double gx[]; };
+layout(std430, binding = 4) readonly buffer GY { double gy[]; };
+layout(std430, binding = 5)          buffer VX { double vx[]; };
+layout(std430, binding = 6)          buffer VY { double vy[]; };
+layout(std430, binding = 7)          buffer MX { double mx[]; };
+layout(std430, binding = 8)          buffer MY { double my[]; };
+layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.w * pc.h) return;
+    int x = i % pc.w, y = i / pc.w;
+    double sx1 = 0.0LF, sx2 = 0.0LF, sy1 = 0.0LF, sy2 = 0.0LF;
+    for (int dy = -1; dy <= 1; dy++) {
+        int yy = y + dy;
+        if (yy < 0 || yy >= pc.h) continue;
+        for (int dx = -1; dx <= 1; dx++) {
+            int xx = x + dx;
+            if (xx < 0 || xx >= pc.w) continue;
+            double a = gx[yy * pc.w + xx];
+            double b = gy[yy * pc.w + xx];
+            sx1 += a; sx2 += a * a; sy1 += b; sy2 += b * b;
+        }
+    }
+    double mmx = sx1 / 9.0LF, mmy = sy1 / 9.0LF;
+    mx[i] = mmx; vx[i] = sx2 / 9.0LF - mmx * mmx;
+    my[i] = mmy; vy[i] = sy2 / 9.0LF - mmy * mmy;
+}

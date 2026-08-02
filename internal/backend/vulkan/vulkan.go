@@ -67,7 +67,7 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
-	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
+	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
 
@@ -128,6 +128,12 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
 	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")     // optional: SSIM additive polish term
+	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")   // optional: EAGLE additive polish term
+	g.procKindGate, _ = dll.FindProc("fp_set_kind_gate")      // optional: region-kinds per-pixel gate
+	g.procGlowSwap, _ = dll.FindProc("fp_set_glow_swap")      // optional: deep-smooth glow swap
+	g.procRampGlow, _ = dll.FindProc("fp_set_ramp_glow")      // optional: ramp-aware hotter glow swap
+	g.procAlphaGrid, _ = dll.FindProc("fp_set_alpha_grid")    // optional: analytic-alpha grid in the eval epilogue
+	g.procTermW, _ = dll.FindProc("fp_set_term_weight")       // optional: region-weighted FE/EAGLE map
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -319,6 +325,98 @@ func (g *Vulkan) PolishSetSSIM(lambda float64) bool {
 	}
 	g.procPolSSIM.Call(uintptr(unsafe.Pointer(&lambda)))
 	return true
+}
+
+// PolishSetEagle sets the EAGLE additive polish loss λ on the device — same contract as
+// PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
+func (g *Vulkan) PolishSetEagle(lambda float64) bool {
+	if g.procPolEagle == nil {
+		return false
+	}
+	g.procPolEagle.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetTermWeight uploads (nil clears) the per-pixel FE/EAGLE term-weight map - the
+// region-weighted perceptual lambda (1-HardEdgeMap). Call AFTER PolishSetup, like the lambda setters.
+func (g *Vulkan) PolishSetTermWeight(tw []float32) bool {
+	if g.procTermW == nil {
+		return false
+	}
+	if tw == nil {
+		g.procTermW.Call(0)
+		return true
+	}
+	g.procTermW.Call(uintptr(unsafe.Pointer(&tw[0])))
+	return true
+}
+
+// SetKindGate uploads the per-pixel region-kinds gate for the on-device generators, or clears it
+// with nil. false = the export is missing (older DLL) — the engine disables the gate for the run.
+func (g *Vulkan) SetKindGate(hard []float32) bool {
+	if g.procKindGate == nil {
+		return false
+	}
+	if hard == nil {
+		g.procKindGate.Call(0)
+		return true
+	}
+	if len(hard) != g.w*g.h {
+		return false
+	}
+	g.procKindGate.Call(fptr(hard))
+	runtime.KeepAlive(hard)
+	return true
+}
+
+// SetGlowSwap sets the deep-smooth glow-swap pair on the device generators (tau=prob=0 disables).
+// Companion of SetKindGate; only meaningful while a gate map is live.
+func (g *Vulkan) SetGlowSwap(tau, prob float32) bool {
+	if g.procGlowSwap == nil {
+		return false
+	}
+	tp := [2]float32{tau, prob}
+	g.procGlowSwap.Call(fptr(tp[:]))
+	runtime.KeepAlive(tp[:])
+	return true
+}
+
+// SetRampGlow uploads the per-pixel smooth-gradient map (metric.RampMap) and the hot-glow triple
+// {thresh, tau, prob}: where ramp[i] > thresh the deep-smooth glow swap runs at the hotter (tau, prob).
+// nil clears it (the glow swap falls back to the global pair everywhere). Rides SetKindGate +
+// SetGlowSwap; false = the DLL lacks the export (older build) — the engine keeps the plain glow swap.
+func (g *Vulkan) SetRampGlow(ramp []float32, thresh, tau, prob float32) bool {
+	if g.procRampGlow == nil {
+		return false
+	}
+	if ramp == nil {
+		g.procRampGlow.Call(0, 0)
+		return true
+	}
+	if len(ramp) != g.w*g.h {
+		return false
+	}
+	p := [3]float32{thresh, tau, prob}
+	g.procRampGlow.Call(fptr(ramp), fptr(p[:]))
+	runtime.KeepAlive(ramp)
+	runtime.KeepAlive(p[:])
+	return true
+}
+
+// SetAlphaGrid installs (nil clears) the analytic-alpha grid in the eval epilogue: every grid
+// alpha is re-solved for its optimal color and the ΔSSE-min (alpha, color) pair wins.
+// Mirrors the CPU reference's SetAlphaGrid; errors when the loaded DLL predates the export.
+func (g *Vulkan) SetAlphaGrid(vals []float32) error {
+	if g.procAlphaGrid == nil {
+		return fmt.Errorf("vulkan: DLL lacks fp_set_alpha_grid")
+	}
+	if len(vals) == 0 {
+		g.procAlphaGrid.Call(0, 0)
+		return nil
+	}
+	g.procAlphaGrid.Call(fptr(vals), uintptr(len(vals)))
+	runtime.KeepAlive(vals)
+	return nil
 }
 
 func (g *Vulkan) PolishSync() {

@@ -61,10 +61,16 @@ type CUDA struct {
 	procSearchMom  *windows.Proc // optional: fp_search_moment (on-device moment-seeded search)
 	procSetOrient  *windows.Proc // optional: fp_set_orient
 	procSetBound   *windows.Proc // optional: fp_set_boundary_dist (boundary-aware radius)
+	procKindGate   *windows.Proc // optional: fp_set_kind_gate (region-kinds per-pixel gate)
+	procGlowSwap   *windows.Proc // optional: fp_set_glow_swap (deep-smooth glow swap in the device generators)
+	procRampGlow   *windows.Proc // optional: fp_set_ramp_glow (ramp-aware hotter glow swap in gradient zones)
+	procAlphaGrid  *windows.Proc // optional: fp_set_alpha_grid (analytic-alpha grid in the hard-path eval epilogue)
 	procPolSTE     *windows.Proc // optional: fp_set_polish_ste (straight-through coverage)
 	procPolOKLab   *windows.Proc // optional: fp_set_polish_oklab (perceptual OKLab polish loss)
 	procPolFE      *windows.Proc // optional: fp_set_polish_false_edge (false-edge additive polish loss term)
 	procPolSSIM    *windows.Proc // optional: fp_set_polish_ssim (SSIM additive polish loss term)
+	procPolEagle   *windows.Proc // optional: fp_set_polish_eagle (EAGLE additive polish loss term)
+	procTermW      *windows.Proc // optional: fp_set_term_weight (region-weighted FE/EAGLE per-pixel map)
 	procPolSync    *windows.Proc // optional: fp_polish_sync (cudaDeviceSynchronize, for phase profiling)
 	procPolHard    *windows.Proc // optional: fp_polish_hard_loss (GPU best-hard render; nil -> CPU fallback)
 	procSetMasks   *windows.Proc // optional: fp_set_masks (dictionary-mask atlas; nil on older DLLs)
@@ -138,6 +144,18 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	if p, perr := dll.FindProc("fp_set_boundary_dist"); perr == nil {
 		g.procSetBound = p
 	}
+	if p, perr := dll.FindProc("fp_set_kind_gate"); perr == nil {
+		g.procKindGate = p
+	}
+	if p, perr := dll.FindProc("fp_set_alpha_grid"); perr == nil {
+		g.procAlphaGrid = p
+	}
+	if p, perr := dll.FindProc("fp_set_glow_swap"); perr == nil {
+		g.procGlowSwap = p
+	}
+	if p, perr := dll.FindProc("fp_set_ramp_glow"); perr == nil {
+		g.procRampGlow = p
+	}
 	// Joint-polish device primitives (optional; nil on older DLLs -> engine uses CPU polish).
 	g.procPolSetup, _ = dll.FindProc("fp_polish_setup")
 	g.procPolUpload, _ = dll.FindProc("fp_polish_upload")
@@ -153,6 +171,8 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge")
 	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")
+	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")
+	g.procTermW, _ = dll.FindProc("fp_set_term_weight")
 	g.procWarpEval, _ = dll.FindProc("fp_set_warp_eval")
 	g.procGradients, _ = dll.FindProc("fp_set_gradients")
 	g.procCoarse, _ = dll.FindProc("fp_set_coarse")
@@ -358,6 +378,75 @@ func (g *CUDA) SetBoundaryDist(dist []float32) {
 	}
 }
 
+// SetKindGate uploads the per-pixel region-kinds gate (metric.HardEdgeMap) for the on-device
+// candidate generators, or clears it with nil. Returns false when the DLL lacks the export —
+// the engine then disables the region gate rather than falling back to slow host generation.
+func (g *CUDA) SetKindGate(hard []float32) bool {
+	if g.procKindGate == nil {
+		return false
+	}
+	if hard == nil {
+		g.procKindGate.Call(0)
+		return true
+	}
+	if len(hard) != g.w*g.h {
+		return false
+	}
+	g.procKindGate.Call(fptr(hard))
+	runtime.KeepAlive(hard)
+	return true
+}
+
+// SetGlowSwap sets the deep-smooth glow-swap pair on the device generators (tau=prob=0 disables).
+// Companion of SetKindGate; only meaningful while a gate map is live.
+func (g *CUDA) SetGlowSwap(tau, prob float32) bool {
+	if g.procGlowSwap == nil {
+		return false
+	}
+	tp := [2]float32{tau, prob}
+	g.procGlowSwap.Call(fptr(tp[:]))
+	runtime.KeepAlive(tp[:])
+	return true
+}
+
+// SetRampGlow uploads the per-pixel smooth-gradient map (metric.RampMap) and the hot-glow triple
+// {thresh, tau, prob}: where ramp[i] > thresh the deep-smooth glow swap runs at the hotter (tau, prob).
+// nil clears it (the glow swap falls back to the global pair everywhere). Rides SetKindGate +
+// SetGlowSwap; false = the DLL lacks the export (older build) — the engine keeps the plain glow swap.
+func (g *CUDA) SetRampGlow(ramp []float32, thresh, tau, prob float32) bool {
+	if g.procRampGlow == nil {
+		return false
+	}
+	if ramp == nil {
+		g.procRampGlow.Call(0, 0)
+		return true
+	}
+	if len(ramp) != g.w*g.h {
+		return false
+	}
+	p := [3]float32{thresh, tau, prob}
+	g.procRampGlow.Call(fptr(ramp), fptr(p[:]))
+	runtime.KeepAlive(ramp)
+	runtime.KeepAlive(p[:])
+	return true
+}
+
+// SetAlphaGrid installs (nil clears) the analytic-alpha grid in the device eval epilogue: every
+// grid alpha is re-solved for its optimal color and the ΔSSE-min (alpha, color) pair wins.
+// Mirrors the CPU reference's SetAlphaGrid; errors when the loaded DLL predates the export.
+func (g *CUDA) SetAlphaGrid(vals []float32) error {
+	if g.procAlphaGrid == nil {
+		return fmt.Errorf("cuda: DLL lacks fp_set_alpha_grid")
+	}
+	if len(vals) == 0 {
+		g.procAlphaGrid.Call(0, 0)
+		return nil
+	}
+	g.procAlphaGrid.Call(fptr(vals), uintptr(len(vals)))
+	runtime.KeepAlive(vals)
+	return nil
+}
+
 // SearchRandom runs the random-candidate phase for one shape entirely on-device
 // (generate -> score -> argmin) and returns the single best candidate (geometry +
 // backend-computed optimal color) with its RAW score. ok=false means the DLL lacks
@@ -550,6 +639,30 @@ func (g *CUDA) PolishSetSSIM(lambda float64) bool {
 		return false
 	}
 	g.procPolSSIM.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetEagle sets the EAGLE additive polish loss λ on the device — same contract as
+// PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
+func (g *CUDA) PolishSetEagle(lambda float64) bool {
+	if g.procPolEagle == nil {
+		return false
+	}
+	g.procPolEagle.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetTermWeight uploads (nil clears) the per-pixel FE/EAGLE term-weight map — the
+// region-weighted perceptual λ (1−HardEdgeMap). Call AFTER PolishSetup, like the λ setters.
+func (g *CUDA) PolishSetTermWeight(tw []float32) bool {
+	if g.procTermW == nil {
+		return false
+	}
+	if tw == nil {
+		g.procTermW.Call(0)
+		return true
+	}
+	g.procTermW.Call(uintptr(unsafe.Pointer(&tw[0])))
 	return true
 }
 

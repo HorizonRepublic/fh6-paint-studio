@@ -10,7 +10,8 @@ layout(std430, binding = 1) readonly buffer Tb { float tl[]; };
 layout(std430, binding = 2) readonly buffer Rb { float rl[]; };
 layout(std430, binding = 3)          buffer Db { double dir[]; };
 layout(std430, binding = 5)          buffer Pb { double feparts[]; };
-layout(push_constant) uniform PC { int w, h; float feLambda; } pc;
+layout(std430, binding = 6) readonly buffer TW { float tw[]; };
+layout(push_constant) uniform PC { int w, h; float feLambda; int hasTW; } pc;
 
 shared double sh[256];
 
@@ -42,9 +43,11 @@ void main() {
             double gr = sqrt(gx * gx + gy * gy);
             double d = gr - sqrt(tx * tx + ty * ty);
             if (d > 0.0LF && gr >= 1e-12LF) {
-                s += d;
-                cx = gx / gr;
-                cy = gy / gr;
+                // region term weight: dir carries wi so the adjoint gather scales for free
+                double wi = pc.hasTW != 0 ? double(tw[i]) : 1.0LF;
+                s += wi * d;
+                cx = wi * gx / gr;
+                cy = wi * gy / gr;
             }
         }
         dir[i * 2] = cx;

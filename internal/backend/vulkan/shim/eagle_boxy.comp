@@ -1,0 +1,16 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eagle_boxy.comp — zero-padded /3 3-tap vertical box t2 -> t1 (engine box3 y-pass).
+layout(local_size_x = 256) in;
+layout(std430, binding = 12)          buffer T1 { double t1[]; };
+layout(std430, binding = 13) readonly buffer T2 { double t2[]; };
+layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.w * pc.h) return;
+    int y = i / pc.w;
+    double s = t2[i];
+    if (y > 0) s += t2[i - pc.w];
+    if (y < pc.h - 1) s += t2[i + pc.w];
+    t1[i] = s / 3.0LF;
+}

@@ -1,0 +1,16 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eagle_um.comp — u*m into the consumed variance plane (u sits in t2 after the backward hpfin).
+// pc.mode: 0 -> vx = t2*mx, 1 -> vy = t2*my.
+layout(local_size_x = 256) in;
+layout(std430, binding = 5)           buffer VX { double vx[]; };
+layout(std430, binding = 6)           buffer VY { double vy[]; };
+layout(std430, binding = 7)  readonly buffer MX { double mx[]; };
+layout(std430, binding = 8)  readonly buffer MY { double my[]; };
+layout(std430, binding = 13) readonly buffer T2 { double t2[]; };
+layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.w * pc.h) return;
+    if (pc.mode == 0) vx[i] = t2[i] * mx[i]; else vy[i] = t2[i] * my[i];
+}

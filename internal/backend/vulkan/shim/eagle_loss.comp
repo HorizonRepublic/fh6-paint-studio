@@ -1,0 +1,28 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eagle_loss.comp — sum |hx-tHx|+|hy-tHy| into workgroup partials (NO atomics; the host adds
+// lambda*sum in fixed order — engine eagleState.forward loss).
+layout(local_size_x = 256) in;
+layout(std430, binding = 1) readonly buffer THX { double tHx[]; };
+layout(std430, binding = 9) readonly buffer HX { double hx[]; };
+layout(std430, binding = 10) readonly buffer HY { double hy[]; };
+layout(std430, binding = 11) readonly buffer THY { double tHy[]; };
+layout(std430, binding = 17)          buffer Pb { double parts[]; };
+layout(std430, binding = 18) readonly buffer TW { float tw[]; };
+layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; int hasTW; } pc;
+shared double sh[256];
+void main() {
+    int N = pc.w * pc.h;
+    double s = 0.0LF;
+    for (int i = int(gl_GlobalInvocationID.x); i < N; i += int(gl_NumWorkGroups.x) * 256) {
+        double wi = pc.hasTW != 0 ? double(tw[i]) : 1.0LF;
+        s += wi * (abs(hx[i] - tHx[i]) + abs(hy[i] - tHy[i]));
+    }
+    sh[gl_LocalInvocationID.x] = s;
+    barrier();
+    for (uint st = 128; st > 0; st >>= 1) {
+        if (gl_LocalInvocationID.x < st) sh[gl_LocalInvocationID.x] += sh[gl_LocalInvocationID.x + st];
+        barrier();
+    }
+    if (gl_LocalInvocationID.x == 0) parts[gl_WorkGroupID.x] = sh[0];
+}

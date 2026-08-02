@@ -14,7 +14,12 @@ layout(std430, binding = 2) readonly  buffer Canvas { float canvasb[]; };
 layout(std430, binding = 3) readonly  buffer Weight { float weightb[]; };
 layout(std430, binding = 4) writeonly buffer Out    { float outb[]; };
 
-layout(push_constant) uniform PC { int n; int W; int H; int sampleBudget; } pc;
+// agN/ag0..ag5 = analytic-alpha grid (fp_set_alpha_grid): the epilogue re-solves the optimal
+// colour per grid alpha and keeps the ΔSSE-min (alpha, colour) pair. agN=0 = off (pass-through).
+layout(push_constant) uniform PC {
+    int n; int W; int H; int sampleBudget;
+    int agN; float ag0; float ag1; float ag2; float ag3; float ag4; float ag5;
+} pc;
 
 const int   NACC     = 19;
 const float DEG2RAD  = 0.017453292519943295;
@@ -149,23 +154,41 @@ void main() {
     double sCR = double(sh[7]), sCG = double(sh[8]), sCB = double(sh[9]), sCA = double(sh[10]);
     double sCR2 = double(sh[11]), sCG2 = double(sh[12]), sCB2 = double(sh[13]), sCA2 = double(sh[14]);
     double sTCR = double(sh[15]), sTCG = double(sh[16]), sTCB = double(sh[17]), sTCA = double(sh[18]);
-    double invW = 1.0LF / W_, invA = 1.0LF - a;
-    double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / a);
-    double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / a);
-    double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / a);
-    double a2 = a * a, twoA = 2.0LF * a;
-    double dR = a2 * (W_ * oR * oR - 2.0LF * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
-    double dG = a2 * (W_ * oG * oG - 2.0LF * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
-    double dB = a2 * (W_ * oB * oB - 2.0LF * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
-    double dA = a2 * (W_ - 2.0LF * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
-    double totalDelta = dR + dG + dB + dA;
-    if (nt > 0.0LF) {
-        double spillFrac = nt / (nn + nt);
-        totalDelta += a2 * nt * (1.0LF + 2.0LF * spillFrac) * (oR * oR + oG * oG + oB * oB + 1.0LF);
+    double invW = 1.0LF / W_;
+    // Mirrors shim.cu hardEpilogue: k=-1 scores the candidate's own alpha (grid off keeps exactly
+    // that, alpha passed through raw); grid alphas then compete and the ΔSSE-min pair wins.
+    float agv[6] = float[6](pc.ag0, pc.ag1, pc.ag2, pc.ag3, pc.ag4, pc.ag5);
+    double bR = 0.0LF, bG = 0.0LF, bB = 0.0LF, bD = 0.0LF;
+    float bA = Ain;
+    for (int k = -1; k < pc.agN; k++) {
+        double aa = a;
+        if (k >= 0) {
+            aa = double(agv[k]);
+            if (aa < 1e-3LF) aa = 1e-3LF;
+            if (aa > 1.0LF) aa = 1.0LF;
+        }
+        double invA = 1.0LF - aa;
+        double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / aa);
+        double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / aa);
+        double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / aa);
+        double a2 = aa * aa, twoA = 2.0LF * aa;
+        double dR = a2 * (W_ * oR * oR - 2.0LF * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
+        double dG = a2 * (W_ * oG * oG - 2.0LF * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
+        double dB = a2 * (W_ * oB * oB - 2.0LF * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
+        double dA = a2 * (W_ - 2.0LF * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
+        double totalDelta = dR + dG + dB + dA;
+        if (nt > 0.0LF) {
+            double spillFrac = nt / (nn + nt);
+            totalDelta += a2 * nt * (1.0LF + 2.0LF * spillFrac) * (oR * oR + oG * oG + oB * oB + 1.0LF);
+        }
+        if (k < 0 || totalDelta < bD) {
+            bR = oR; bG = oG; bB = oB; bD = totalDelta;
+            bA = (k < 0) ? Ain : float(aa);
+        }
     }
-    outb[ob + 0u] = float(totalDelta * double(step * step));
-    outb[ob + 1u] = float(oR);
-    outb[ob + 2u] = float(oG);
-    outb[ob + 3u] = float(oB);
-    outb[ob + 4u] = Ain;
+    outb[ob + 0u] = float(bD * double(step * step));
+    outb[ob + 1u] = float(bR);
+    outb[ob + 2u] = float(bG);
+    outb[ob + 3u] = float(bB);
+    outb[ob + 4u] = bA;
 }

@@ -39,6 +39,16 @@
 #include "ssim_map.spv.h"        // ssim_map_spv
 #include "ssim_gh.spv.h"         // ssim_gh_spv
 #include "ssim_adj.spv.h"        // ssim_adj_spv
+#include "eagle_scharr.spv.h"    // eagle_scharr_spv
+#include "eagle_var.spv.h"       // eagle_var_spv
+#include "eagle_boxx.spv.h"      // eagle_boxx_spv
+#include "eagle_boxy.spv.h"      // eagle_boxy_spv
+#include "eagle_hpfin.spv.h"     // eagle_hpfin_spv
+#include "eagle_loss.spv.h"      // eagle_loss_spv
+#include "eagle_sign.spv.h"      // eagle_sign_spv
+#include "eagle_um.spv.h"        // eagle_um_spv
+#include "eagle_varadj.spv.h"    // eagle_varadj_spv
+#include "eagle_scharradj.spv.h" // eagle_scharradj_spv
 
 #ifdef _WIN32
 #define API extern "C" __declspec(dllexport)
@@ -79,13 +89,13 @@ int g_w = 0, g_h = 0, g_maxCands = 0, g_grid = 0;
 int g_sampleBudget = 4000;
 int g_lastError = 0;
 
-struct EvalPC  { int32_t n, W, H, sampleBudget; };
+struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; }; // agN/ag = analytic-alpha grid (fp_set_alpha_grid), agN=0 off
 struct ApplyPC { int32_t kind; float p0, p1, p2, p3, p4, p5; float cr, cg, cb, ca; int32_t W, H; };
 struct GridPC  { int32_t W, H, gw, gh; };
 
 // ---- on-device random search (fp_search_random) ----
-struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound;
-                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad; };
+struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow;
+                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb; };
 struct PrepPC { int32_t n, compact, shapeCount, W, H; };
 struct ArgPC  { int32_t n; };
 
@@ -93,13 +103,17 @@ VkDescriptorSetLayout g_genDSL = VK_NULL_HANDLE, g_prepDSL = VK_NULL_HANDLE, g_a
 VkPipelineLayout      g_genPL = VK_NULL_HANDLE, g_prepPL = VK_NULL_HANDLE, g_argPL = VK_NULL_HANDLE;
 VkPipeline            g_genPipe = VK_NULL_HANDLE, g_prepPipe = VK_NULL_HANDLE, g_argPipe = VK_NULL_HANDLE;
 VkDescriptorSet       g_genSet = VK_NULL_HANDLE, g_sevalSet = VK_NULL_HANDLE, g_prepSet = VK_NULL_HANDLE, g_argSet = VK_NULL_HANDLE;
-Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound;
-int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0;
+Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound, g_kgate, g_rampglow;
+int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0, g_hasGate = 0, g_hasRampGlow = 0;
+float g_glowTau = 0.f, g_glowProb = 0.f; // deep-smooth glow swap (fp_set_glow_swap)
+float g_rampGlowThresh = 0.f, g_rampGlowTau = 0.f, g_rampGlowProb = 0.f; // hotter glow swap in gradient zones (fp_set_ramp_glow)
+int   g_alphaGridN = 0;                  // analytic-alpha grid size (fp_set_alpha_grid), 0 = off
+float g_alphaGrid[6] = {};               // grid values (eval epilogue picks the ΔSSE-min alpha)
 bool g_searchSetsDirty = true;
 
 // ---- on-device moment-seeded search (fp_search_moment) ----
 struct MomSeedPC { uint32_t seedLo, seedHi; int32_t K, gw, gh, W, H, hasBound; float maxR, boundPad, boundMix; };
-struct GenMomPC  { uint32_t seedLo, seedHi; int32_t n, perSeed, K, nKinds, allowAlpha, W, H; float alphaMin, canvasPad; };
+struct GenMomPC  { uint32_t seedLo, seedHi; int32_t n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb; };
 VkDescriptorSetLayout g_msDSL = VK_NULL_HANDLE, g_gmDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_msPL = VK_NULL_HANDLE, g_gmPL = VK_NULL_HANDLE;
 VkPipeline            g_msPipe = VK_NULL_HANDLE, g_gmPipe = VK_NULL_HANDLE;
@@ -108,7 +122,7 @@ Buf g_seeds;
 int g_momentCap = 0;
 
 // ---- joint-polish state (built lazily by fp_polish_setup, freed by fp_polish_free) ----
-struct PolishPC { int32_t shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int32_t oklab; float feLambda; float ssimLambda; };
+struct PolishPC { int32_t shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int32_t oklab; float feLambda; float ssimLambda; float eagleLambda; };
 const int PLOSS_GROUPS = 64; // loss reduction workgroups (host sums the partials)
 
 VkDescriptorSetLayout g_pDSL = VK_NULL_HANDLE;
@@ -123,7 +137,7 @@ VkDeviceSize g_belowCap = 0;
 // ---- false-edge additive polish term (mirrors engine/falseedge.go + shim.cu): its own small
 // DSL (0=src4 1=targetLuma 2=reconLuma 3=dir 4=adj 5=partials) with two sets — setT computes the
 // fixed target-luma plane once at set-lambda, setR runs per evaluation on the current render. ----
-struct FePC { int32_t w, h; float feLambda; };
+struct FePC { int32_t w, h; float feLambda; int32_t hasTW; };
 double g_pfelambda = 0.0;
 Buf g_feTL, g_feRL, g_feDir, g_feAdj, g_feParts;
 VkDescriptorSetLayout g_feDSL = VK_NULL_HANDLE;
@@ -140,7 +154,25 @@ const int FE_GROUPS = 64;
 // the fe_luma shader rebuilt against this layout (bindings 0/2 line up; PC is prefix-compatible). ----
 struct SsimPC { int32_t w, h, mw, mh, writeG; float lambda; };
 double g_psslambda = 0.0;
+// EAGLE additive polish term (engine eagleterm.go / shim.cu eg*): 18-binding DSL shared by 10
+// small pipelines; partials host-visible (lambda*sum added host-side like FE/SSIM).
+struct EagPC { int32_t w, h, dir, mode; float lambda; int32_t hasTW; };
+double g_peglambda = 0.0;
 Buf g_ssTL, g_ssRL, g_ssH, g_ssMY, g_ssG, g_ssHG, g_ssAdj, g_ssParts;
+Buf g_egTL, g_egRL, g_egTHx, g_egTHy, g_egGx, g_egGy, g_egVx, g_egVy, g_egMx, g_egMy;
+Buf g_egHx, g_egHy, g_egT1, g_egT2, g_egSx, g_egSy, g_egAdj, g_egParts;
+Buf g_termW;            // per-pixel FE/EAGLE term weight (fp_set_term_weight); read when hasTW
+int g_hasTermW = 0;
+bool ensureTermW();
+VkDescriptorSetLayout g_egDSL = VK_NULL_HANDLE;
+VkPipelineLayout g_egPL = VK_NULL_HANDLE;
+VkDescriptorPool g_egPool = VK_NULL_HANDLE;
+VkDescriptorSet g_egSetR = VK_NULL_HANDLE, g_egSetT = VK_NULL_HANDLE;
+VkPipeline g_egLumaP = VK_NULL_HANDLE, g_egScharrP = VK_NULL_HANDLE, g_egVarP = VK_NULL_HANDLE,
+           g_egBoxXP = VK_NULL_HANDLE, g_egBoxYP = VK_NULL_HANDLE, g_egHpP = VK_NULL_HANDLE,
+           g_egLossP = VK_NULL_HANDLE, g_egSignP = VK_NULL_HANDLE, g_egUmP = VK_NULL_HANDLE,
+           g_egVarAdjP = VK_NULL_HANDLE, g_egScharrAdjP = VK_NULL_HANDLE;
+const int EG_GROUPS = 64;
 VkDescriptorSetLayout g_ssDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_ssPL  = VK_NULL_HANDLE;
 VkPipeline g_ssLumaP = VK_NULL_HANDLE, g_ssHP = VK_NULL_HANDLE, g_ssMyP = VK_NULL_HANDLE,
@@ -258,6 +290,19 @@ void polishTeardown() {
     if (g_ssPL)    { vkDestroyPipelineLayout(g_device, g_ssPL, nullptr); g_ssPL = VK_NULL_HANDLE; }
     if (g_ssDSL)   { vkDestroyDescriptorSetLayout(g_device, g_ssDSL, nullptr); g_ssDSL = VK_NULL_HANDLE; }
     g_psslambda = 0.0;
+    destroyBuf(g_egTL); destroyBuf(g_egRL); destroyBuf(g_egTHx); destroyBuf(g_egTHy);
+    destroyBuf(g_egGx); destroyBuf(g_egGy); destroyBuf(g_egVx); destroyBuf(g_egVy);
+    destroyBuf(g_egMx); destroyBuf(g_egMy); destroyBuf(g_egHx); destroyBuf(g_egHy);
+    destroyBuf(g_egT1); destroyBuf(g_egT2); destroyBuf(g_egSx); destroyBuf(g_egSy);
+    destroyBuf(g_egAdj); destroyBuf(g_egParts);
+    destroyBuf(g_termW); g_hasTermW = 0;
+    VkPipeline* egp[11] = { &g_egLumaP, &g_egScharrP, &g_egVarP, &g_egBoxXP, &g_egBoxYP, &g_egHpP,
+                            &g_egLossP, &g_egSignP, &g_egUmP, &g_egVarAdjP, &g_egScharrAdjP };
+    for (int i = 0; i < 11; i++) if (*egp[i]) { vkDestroyPipeline(g_device, *egp[i], nullptr); *egp[i] = VK_NULL_HANDLE; }
+    if (g_egPool) { vkDestroyDescriptorPool(g_device, g_egPool, nullptr); g_egPool = VK_NULL_HANDLE; g_egSetR = g_egSetT = VK_NULL_HANDLE; }
+    if (g_egPL)   { vkDestroyPipelineLayout(g_device, g_egPL, nullptr); g_egPL = VK_NULL_HANDLE; }
+    if (g_egDSL)  { vkDestroyDescriptorSetLayout(g_device, g_egDSL, nullptr); g_egDSL = VK_NULL_HANDLE; }
+    g_peglambda = 0.0;
     g_pn = 0; g_belowCap = 0;
 }
 
@@ -271,7 +316,7 @@ void teardown() {
     if (g_gridPL)    { vkDestroyPipelineLayout(g_device, g_gridPL, nullptr); g_gridPL = VK_NULL_HANDLE; }
     if (g_gridDSL)   { vkDestroyDescriptorSetLayout(g_device, g_gridDSL, nullptr); g_gridDSL = VK_NULL_HANDLE; }
     destroyBuf(g_scand); destroyBuf(g_sout); destroyBuf(g_adj); destroyBuf(g_best);
-    destroyBuf(g_kindsB); destroyBuf(g_kindcdf); destroyBuf(g_gridcdf); destroyBuf(g_orient); destroyBuf(g_bound);
+    destroyBuf(g_kindsB); destroyBuf(g_kindcdf); destroyBuf(g_gridcdf); destroyBuf(g_orient); destroyBuf(g_bound); destroyBuf(g_kgate); destroyBuf(g_rampglow);
     if (g_genPipe)  { vkDestroyPipeline(g_device, g_genPipe, nullptr);  g_genPipe = VK_NULL_HANDLE; }
     if (g_prepPipe) { vkDestroyPipeline(g_device, g_prepPipe, nullptr); g_prepPipe = VK_NULL_HANDLE; }
     if (g_argPipe)  { vkDestroyPipeline(g_device, g_argPipe, nullptr);  g_argPipe = VK_NULL_HANDLE; }
@@ -288,7 +333,7 @@ void teardown() {
     if (g_gmPL) { vkDestroyPipelineLayout(g_device, g_gmPL, nullptr); g_gmPL = VK_NULL_HANDLE; }
     if (g_msDSL) { vkDestroyDescriptorSetLayout(g_device, g_msDSL, nullptr); g_msDSL = VK_NULL_HANDLE; }
     if (g_gmDSL) { vkDestroyDescriptorSetLayout(g_device, g_gmDSL, nullptr); g_gmDSL = VK_NULL_HANDLE; }
-    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_searchSetsDirty = true; g_momentCap = 0;
+    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_glowTau = 0.f; g_glowProb = 0.f; g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; g_alphaGridN = 0; g_searchSetsDirty = true; g_momentCap = 0;
     if (g_evalPL)    { vkDestroyPipelineLayout(g_device, g_evalPL, nullptr);  g_evalPL = VK_NULL_HANDLE; }
     if (g_applyPL)   { vkDestroyPipelineLayout(g_device, g_applyPL, nullptr); g_applyPL = VK_NULL_HANDLE; }
     if (g_descPool)  { vkDestroyDescriptorPool(g_device, g_descPool, nullptr); g_descPool = VK_NULL_HANDLE; g_evalSet = g_applySet = VK_NULL_HANDLE; }
@@ -391,16 +436,16 @@ bool buildContext() {
     if (!makeDSL(4, g_gridDSL)) { g_lastError = 1009; return false; }
     if (!makePL(g_gridDSL, sizeof(GridPC), g_gridPL)) { g_lastError = 1010; return false; }
     if (!makePipe(g_gridPL, grid_spv, sizeof(grid_spv), g_gridPipe)) { g_lastError = 1011; return false; }
-    // on-device search: gen (6 bindings), prepadj (3), argmin (4); eval is reused for scoring.
-    if (!makeDSL(6, g_genDSL) || !makeDSL(3, g_prepDSL) || !makeDSL(4, g_argDSL)) { g_lastError = 1009; return false; }
+    // on-device search: gen (8 bindings: +rampGlow), prepadj (3), argmin (4); eval is reused for scoring.
+    if (!makeDSL(8, g_genDSL) || !makeDSL(3, g_prepDSL) || !makeDSL(4, g_argDSL)) { g_lastError = 1009; return false; }
     if (!makePL(g_genDSL, sizeof(GenPC), g_genPL) || !makePL(g_prepDSL, sizeof(PrepPC), g_prepPL) || !makePL(g_argDSL, sizeof(ArgPC), g_argPL)) { g_lastError = 1010; return false; }
     if (!makePipe(g_genPL, gen_spv, sizeof(gen_spv), g_genPipe) || !makePipe(g_prepPL, prepadj_spv, sizeof(prepadj_spv), g_prepPipe) || !makePipe(g_argPL, argmin_spv, sizeof(argmin_spv), g_argPipe)) { g_lastError = 1011; return false; }
-    // moment search: momentseed (3 bindings), genmoment (4); eval/prepadj/argmin reused.
-    if (!makeDSL(3, g_msDSL) || !makeDSL(4, g_gmDSL)) { g_lastError = 1009; return false; }
+    // moment search: momentseed (3 bindings), genmoment (6 bindings: +rampGlow); eval/prepadj/argmin reused.
+    if (!makeDSL(3, g_msDSL) || !makeDSL(6, g_gmDSL)) { g_lastError = 1009; return false; }
     if (!makePL(g_msDSL, sizeof(MomSeedPC), g_msPL) || !makePL(g_gmDSL, sizeof(GenMomPC), g_gmPL)) { g_lastError = 1010; return false; }
     if (!makePipe(g_msPL, momentseed_spv, sizeof(momentseed_spv), g_msPipe) || !makePipe(g_gmPL, genmoment_spv, sizeof(genmoment_spv), g_gmPipe)) { g_lastError = 1011; return false; }
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 35}; // +3 momentseed +4 genmoment
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 45}; // eval5+apply1+grid4+gen8+seval5+prep3+arg4+ms3+gm6=39, margin to 45
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 9; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_descPool) != VK_SUCCESS) { g_lastError = 1012; return false; }
@@ -508,13 +553,13 @@ bool makePolishPipe(const unsigned int* spv, size_t bytes, VkPipeline& pipe) {
 // for the dcinit + loss pipelines (full-image, shared-DSL). The forward/hard/backward passes
 // are tiled and own their layouts (buildTiledForward / buildBackwardTiled).
 bool buildPolishPipelines() {
-    VkDescriptorSetLayoutBinding bs[12];
-    for (uint32_t i = 0; i < 12; i++) {
+    VkDescriptorSetLayoutBinding bs[13];
+    for (uint32_t i = 0; i < 13; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 12; dci.pBindings = bs;
+    dci.bindingCount = 13; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_pDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PolishPC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -522,7 +567,7 @@ bool buildPolishPipelines() {
     if (vkCreatePipelineLayout(g_device, &plci, nullptr, &g_pPL) != VK_SUCCESS) return false;
     if (!makePolishPipe(p_dcinit_spv, sizeof(p_dcinit_spv), g_pDcinit)) return false;
     if (!makePolishPipe(p_loss_spv, sizeof(p_loss_spv), g_pLoss)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_pPool) != VK_SUCCESS) return false;
@@ -532,32 +577,32 @@ bool buildPolishPipelines() {
 }
 
 void writePolishDescriptors() {
-    VkBuffer bufs[12] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_prender.buf, g_pbelow.buf,
+    VkBuffer bufs[13] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_prender.buf, g_pbelow.buf,
                           g_pdC.buf, g_ppgrad.buf, g_ppartials.buf, g_target.buf, g_weight.buf,
-                          g_feAdj.buf, g_ssAdj.buf };
-    VkDeviceSize sizes[12] = { g_pP.size, g_pcol.size, g_pkinds.size, g_prender.size, g_pbelow.size,
+                          g_feAdj.buf, g_ssAdj.buf, g_egAdj.buf };
+    VkDeviceSize sizes[13] = { g_pP.size, g_pcol.size, g_pkinds.size, g_prender.size, g_pbelow.size,
                                g_pdC.size, g_ppgrad.size, g_ppartials.size, g_target.size, g_weight.size,
-                               g_feAdj.size, g_ssAdj.size };
-    VkWriteDescriptorSet w[12]; VkDescriptorBufferInfo bi[12];
-    for (uint32_t i = 0; i < 12; i++) {
+                               g_feAdj.size, g_ssAdj.size, g_egAdj.size };
+    VkWriteDescriptorSet w[13]; VkDescriptorBufferInfo bi[13];
+    for (uint32_t i = 0; i < 13; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_pSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 12, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 13, w, 0, nullptr);
 }
 
 // buildFE: the false-edge DSL/pipelines/sets (see the FE globals comment). Built lazily on the
 // first non-zero set-lambda, after fp_polish_setup (g_prender must exist for the descriptor write).
 bool buildFE() {
-    VkDescriptorSetLayoutBinding bs[6];
-    for (uint32_t i = 0; i < 6; i++) {
+    VkDescriptorSetLayoutBinding bs[7];
+    for (uint32_t i = 0; i < 7; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 6; dci.pBindings = bs;
+    dci.bindingCount = 7; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_feDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(FePC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -577,7 +622,7 @@ bool buildFE() {
     if (!mk(fe_luma_spv, sizeof(fe_luma_spv), g_feLumaP)) return false;
     if (!mk(fe_dir_spv, sizeof(fe_dir_spv), g_feDirP)) return false;
     if (!mk(fe_adj_spv, sizeof(fe_adj_spv), g_feAdjP)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 2; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_fePool) != VK_SUCCESS) return false;
@@ -592,35 +637,35 @@ bool buildFE() {
 
 void writeFEDescriptors() {
     auto wr = [](VkDescriptorSet set, VkBuffer src, VkDeviceSize srcSz) {
-        VkBuffer bufs[6] = { src, g_feTL.buf, g_feRL.buf, g_feDir.buf, g_feAdj.buf, g_feParts.buf };
-        VkDeviceSize sizes[6] = { srcSz, g_feTL.size, g_feRL.size, g_feDir.size, g_feAdj.size, g_feParts.size };
-        VkWriteDescriptorSet w[6]; VkDescriptorBufferInfo bi[6];
-        for (uint32_t i = 0; i < 6; i++) {
+        VkBuffer bufs[7] = { src, g_feTL.buf, g_feRL.buf, g_feDir.buf, g_feAdj.buf, g_feParts.buf, g_termW.buf };
+        VkDeviceSize sizes[7] = { srcSz, g_feTL.size, g_feRL.size, g_feDir.size, g_feAdj.size, g_feParts.size, g_termW.size };
+        VkWriteDescriptorSet w[7]; VkDescriptorBufferInfo bi[7];
+        for (uint32_t i = 0; i < 7; i++) {
             bi[i] = {bufs[i], 0, sizes[i]};
             w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             w[i].dstSet = set; w[i].dstBinding = i; w[i].descriptorCount = 1;
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
         }
-        vkUpdateDescriptorSets(g_device, 6, w, 0, nullptr);
+        vkUpdateDescriptorSets(g_device, 7, w, 0, nullptr);
     };
     wr(g_feSetR, g_prender.buf, g_prender.size);
     // setT routes the TARGET through the luma pipe to fill g_feTL once; binding 2 (the luma
     // output) points at g_feTL here instead of the recon scratch.
-    VkBuffer bufs[6] = { g_target.buf, g_feTL.buf, g_feTL.buf, g_feDir.buf, g_feAdj.buf, g_feParts.buf };
-    VkDeviceSize sizes[6] = { g_target.size, g_feTL.size, g_feTL.size, g_feDir.size, g_feAdj.size, g_feParts.size };
-    VkWriteDescriptorSet w[6]; VkDescriptorBufferInfo bi[6];
-    for (uint32_t i = 0; i < 6; i++) {
+    VkBuffer bufs[7] = { g_target.buf, g_feTL.buf, g_feTL.buf, g_feDir.buf, g_feAdj.buf, g_feParts.buf, g_termW.buf };
+    VkDeviceSize sizes[7] = { g_target.size, g_feTL.size, g_feTL.size, g_feDir.size, g_feAdj.size, g_feParts.size, g_termW.size };
+    VkWriteDescriptorSet w[7]; VkDescriptorBufferInfo bi[7];
+    for (uint32_t i = 0; i < 7; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_feSetT; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 6, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 7, w, 0, nullptr);
 }
 
 // cmdFEPasses records luma(render)+dir(+adj when forBackward) into the OPEN command buffer.
 void cmdFEPasses(bool forBackward) {
-    FePC fpc{ g_w, g_h, (float)g_pfelambda };
+    FePC fpc{ g_w, g_h, (float)g_pfelambda, g_hasTermW };
     uint32_t pixGroups = (uint32_t)(((size_t)g_w * g_h + 255) / 256);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_feLumaP);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_fePL, 0, 1, &g_feSetR, 0, nullptr);
@@ -732,6 +777,168 @@ void cmdSSIMPasses(bool forBackward) {
         vkCmdDispatch(g_cmd, pixGroups, 1, 1);
         cmdBarrierRW();
     }
+}
+
+
+// buildEagle: the EAGLE DSL/pipelines/sets (see the EAGLE globals comment). Built lazily on the
+// first non-zero set-lambda, after fp_polish_setup.
+bool buildEagle() {
+    VkDescriptorSetLayoutBinding bs[19];
+    for (uint32_t i = 0; i < 19; i++) {
+        bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dci.bindingCount = 19; dci.pBindings = bs;
+    if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_egDSL) != VK_SUCCESS) return false;
+    VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(EagPC)};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1; plci.pSetLayouts = &g_egDSL; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pr;
+    if (vkCreatePipelineLayout(g_device, &plci, nullptr, &g_egPL) != VK_SUCCESS) return false;
+    auto mk = [](const unsigned int* spv, size_t bytes, VkPipeline& pipe) -> bool {
+        VkShaderModule sm = loadShader(spv, bytes);
+        if (!sm) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = sm; ci.stage.pName = "main";
+        ci.layout = g_egPL;
+        VkResult r = vkCreateComputePipelines(g_device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe);
+        vkDestroyShaderModule(g_device, sm, nullptr);
+        return r == VK_SUCCESS;
+    };
+    if (!mk(fe_luma_spv, sizeof(fe_luma_spv), g_egLumaP)) return false; // bindings 0/2 line up
+    if (!mk(eagle_scharr_spv, sizeof(eagle_scharr_spv), g_egScharrP)) return false;
+    if (!mk(eagle_var_spv, sizeof(eagle_var_spv), g_egVarP)) return false;
+    if (!mk(eagle_boxx_spv, sizeof(eagle_boxx_spv), g_egBoxXP)) return false;
+    if (!mk(eagle_boxy_spv, sizeof(eagle_boxy_spv), g_egBoxYP)) return false;
+    if (!mk(eagle_hpfin_spv, sizeof(eagle_hpfin_spv), g_egHpP)) return false;
+    if (!mk(eagle_loss_spv, sizeof(eagle_loss_spv), g_egLossP)) return false;
+    if (!mk(eagle_sign_spv, sizeof(eagle_sign_spv), g_egSignP)) return false;
+    if (!mk(eagle_um_spv, sizeof(eagle_um_spv), g_egUmP)) return false;
+    if (!mk(eagle_varadj_spv, sizeof(eagle_varadj_spv), g_egVarAdjP)) return false;
+    if (!mk(eagle_scharradj_spv, sizeof(eagle_scharradj_spv), g_egScharrAdjP)) return false;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpci.maxSets = 2; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_egPool) != VK_SUCCESS) return false;
+    VkDescriptorSetLayout layouts[2] = { g_egDSL, g_egDSL };
+    VkDescriptorSetAllocateInfo a{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    a.descriptorPool = g_egPool; a.descriptorSetCount = 2; a.pSetLayouts = layouts;
+    VkDescriptorSet sets[2];
+    if (vkAllocateDescriptorSets(g_device, &a, sets) != VK_SUCCESS) return false;
+    g_egSetR = sets[0]; g_egSetT = sets[1];
+    return true;
+}
+
+void writeEagleDescriptors() {
+    // setR: recon maps land in hx/hy; setT: the SAME shaders write the fixed target maps
+    // (bindings 9/10 point at tHx/tHy there -- the FE/SSIM setT trick).
+    auto wr = [](VkDescriptorSet set, VkBuffer src_, VkDeviceSize srcSz, VkBuffer luma, VkDeviceSize lumaSz,
+                 VkBuffer hx, VkDeviceSize hxSz, VkBuffer hy, VkDeviceSize hySz) {
+        VkBuffer bufs[19] = { src_, g_egTHx.buf, luma, g_egGx.buf, g_egGy.buf, g_egVx.buf, g_egVy.buf,
+                              g_egMx.buf, g_egMy.buf, hx, hy, g_egTHy.buf, g_egT1.buf, g_egT2.buf,
+                              g_egSx.buf, g_egSy.buf, g_egAdj.buf, g_egParts.buf, g_termW.buf };
+        VkDeviceSize sizes[19] = { srcSz, g_egTHx.size, lumaSz, g_egGx.size, g_egGy.size, g_egVx.size,
+                                   g_egVy.size, g_egMx.size, g_egMy.size, hxSz, hySz, g_egTHy.size,
+                                   g_egT1.size, g_egT2.size, g_egSx.size, g_egSy.size, g_egAdj.size, g_egParts.size, g_termW.size };
+        VkWriteDescriptorSet w[19]; VkDescriptorBufferInfo bi[19];
+        for (uint32_t i = 0; i < 19; i++) {
+            bi[i] = {bufs[i], 0, sizes[i]};
+            w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w[i].dstSet = set; w[i].dstBinding = i; w[i].descriptorCount = 1;
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
+        }
+        vkUpdateDescriptorSets(g_device, 19, w, 0, nullptr);
+    };
+    wr(g_egSetR, g_prender.buf, g_prender.size, g_egRL.buf, g_egRL.size, g_egHx.buf, g_egHx.size, g_egHy.buf, g_egHy.size);
+    wr(g_egSetT, g_target.buf, g_target.size, g_egTL.buf, g_egTL.size, g_egTHx.buf, g_egTHx.size, g_egTHy.buf, g_egTHy.size);
+}
+
+// cmdEagleMaps records luma+scharr+var+highpass into hx/hy of the BOUND set (recon or target).
+void cmdEagleMaps(VkDescriptorSet set) {
+    uint32_t pixGroups = (uint32_t)(((size_t)g_w * g_h + 255) / 256);
+    EagPC pc{ g_w, g_h, 0, 0, (float)g_peglambda, g_hasTermW };
+    auto disp = [&](VkPipeline p, int dir, int mode) {
+        pc.dir = dir; pc.mode = mode;
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+        vkCmdPushConstants(g_cmd, g_egPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(g_cmd, pixGroups, 1, 1);
+        cmdBarrierRW();
+    };
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_egPL, 0, 1, &set, 0, nullptr);
+    disp(g_egLumaP, 0, 0);
+    disp(g_egScharrP, 0, 0);
+    disp(g_egVarP, 0, 0);
+    for (int d = 0; d < 2; d++) { // gauss(v[d]) -> t1, then h[d] = v[d] - t1
+        disp(g_egBoxXP, d, d);
+        disp(g_egBoxYP, d, 0);
+        disp(g_egBoxXP, d, 2);
+        disp(g_egBoxYP, d, 0);
+        disp(g_egHpP, d, d);
+    }
+}
+
+// cmdEaglePasses records the recon forward (+ adjoint when forBackward); loss partials via the
+// reduce pipe (the host adds lambda*sum, like FE/SSIM).
+void cmdEaglePasses(bool forBackward) {
+    uint32_t pixGroups = (uint32_t)(((size_t)g_w * g_h + 255) / 256);
+    EagPC pc{ g_w, g_h, 0, 0, (float)g_peglambda, g_hasTermW };
+    auto disp = [&](VkPipeline p, int dir, int mode, uint32_t groups) {
+        pc.dir = dir; pc.mode = mode;
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+        vkCmdPushConstants(g_cmd, g_egPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(g_cmd, groups, 1, 1);
+        cmdBarrierRW();
+    };
+    cmdEagleMaps(g_egSetR);
+    disp(g_egLossP, 0, 0, EG_GROUPS);
+    if (!forBackward) return;
+    for (int d = 0; d < 2; d++) {
+        disp(g_egSignP, d, d, pixGroups);          // s[d] = sign(h[d]-tH[d])
+        disp(g_egBoxXP, d, 3 + d, pixGroups);      // gauss(s[d]) -> t1
+        disp(g_egBoxYP, d, 0, pixGroups);
+        disp(g_egBoxXP, d, 2, pixGroups);
+        disp(g_egBoxYP, d, 0, pixGroups);
+        disp(g_egHpP, d, 2 + d, pixGroups);        // t2 = s[d] - t1 (= u)
+        disp(g_egUmP, d, d, pixGroups);            // v[d] = u*m[d]
+        disp(g_egVarAdjP, d, d, pixGroups);        // s[d] = (2/9)(g[d]*Box9(u) - Box9(u*m))
+    }
+    disp(g_egScharrAdjP, 0, 0, pixGroups);         // adj from sx,sy
+}
+
+// fp_set_polish_eagle sets the EAGLE lambda (pointer ABI like the FE setter) and prepares the
+// fixed target-side maps. lambda<=0 disables; below the CPU reference 8px floor degrades to 0.
+// Call AFTER fp_polish_setup.
+API void fp_set_polish_eagle(const double* lambdaPtr) {
+    g_peglambda = lambdaPtr[0];
+    if (g_peglambda <= 0.0 || !g_device || g_pn < 1) return;
+    if (g_w < 8 || g_h < 8) { g_peglambda = 0.0; return; }
+    size_t npix = (size_t)g_w * g_h;
+    if (g_egDSL == VK_NULL_HANDLE && !buildEagle()) { g_lastError = 2010; return; }
+    if (!ensureTermW()) { g_lastError = 2012; return; }
+    if (g_egTL.buf == VK_NULL_HANDLE) {
+        const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        bool ok = createBufEx(npix * 4, S, dl, false, g_egTL) && createBufEx(npix * 4, S, dl, false, g_egRL)
+               && createBufEx(npix * 8, S, dl, false, g_egTHx) && createBufEx(npix * 8, S, dl, false, g_egTHy)
+               && createBufEx(npix * 8, S, dl, false, g_egGx) && createBufEx(npix * 8, S, dl, false, g_egGy)
+               && createBufEx(npix * 8, S, dl, false, g_egVx) && createBufEx(npix * 8, S, dl, false, g_egVy)
+               && createBufEx(npix * 8, S, dl, false, g_egMx) && createBufEx(npix * 8, S, dl, false, g_egMy)
+               && createBufEx(npix * 8, S, dl, false, g_egHx) && createBufEx(npix * 8, S, dl, false, g_egHy)
+               && createBufEx(npix * 8, S, dl, false, g_egT1) && createBufEx(npix * 8, S, dl, false, g_egT2)
+               && createBufEx(npix * 8, S, dl, false, g_egSx) && createBufEx(npix * 8, S, dl, false, g_egSy)
+               && createHost(EG_GROUPS * 8, g_egParts);
+        if (!ok) { g_lastError = 2011; return; }
+    }
+    writeEagleDescriptors();
+    vkResetCommandBuffer(g_cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_cmd, &bi);
+    cmdEagleMaps(g_egSetT); // target maps land in tHx/tHy via the setT bindings
+    flushBarrier();
+    vkEndCommandBuffer(g_cmd);
+    submitWait();
 }
 
 // buildTiledForward: dedicated 8-binding DSL + pipeline layout (TiledPC push) + pool + set
@@ -861,7 +1068,7 @@ double computeLoss() {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pLoss);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
-    PolishPC pc{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, 0.0f, g_poklab, (float)g_pfelambda, (float)g_psslambda};
+    PolishPC pc{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, 0.0f, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda};
     vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, PLOSS_GROUPS, 1, 1);
     if (g_pfelambda > 0.0) {
@@ -871,6 +1078,10 @@ double computeLoss() {
     if (g_psslambda > 0.0) {
         cmdBarrierRW();
         cmdSSIMPasses(false); // luma(render) + h-pass + map -> g_ssParts (λ·term added below)
+    }
+    if (g_peglambda > 0.0) {
+        cmdBarrierRW();
+        cmdEaglePasses(false); // maps + |hp diff| -> g_egParts (lambda*term added below)
     }
     flushBarrier();
     vkEndCommandBuffer(g_cmd);
@@ -890,6 +1101,12 @@ double computeLoss() {
         for (int i = 0; i < SS_GROUPS; i++) f += sp[i];
         s += g_psslambda * f;
     }
+    if (g_peglambda > 0.0) {
+        double f = 0.0;
+        const double* ep = (const double*)g_egParts.map;
+        for (int i = 0; i < EG_GROUPS; i++) f += ep[i];
+        s += g_peglambda * f;
+    }
     return s;
 }
 
@@ -899,13 +1116,15 @@ void writeSearchDescriptors() {
         w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set; w.dstBinding = b; w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
     };
-    VkWriteDescriptorSet w[18]; VkDescriptorBufferInfo bi[18]; int k = 0;
+    VkWriteDescriptorSet w[24]; VkDescriptorBufferInfo bi[24]; int k = 0;
     wr(g_genSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_genSet, 1, g_kindsB.buf, g_kindsB.size, w[k], bi[k]); k++;
     wr(g_genSet, 2, g_kindcdf.buf, g_kindcdf.size, w[k], bi[k]); k++;
     wr(g_genSet, 3, g_gridcdf.buf, g_gridcdf.size, w[k], bi[k]); k++;
     wr(g_genSet, 4, g_orient.buf, g_orient.size, w[k], bi[k]); k++;
     wr(g_genSet, 5, g_bound.buf, g_bound.size, w[k], bi[k]); k++;
+    wr(g_genSet, 6, g_kgate.buf, g_kgate.size, w[k], bi[k]); k++;
+    wr(g_genSet, 7, g_rampglow.buf, g_rampglow.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 1, g_target.buf, g_target.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 2, g_canvas.buf, g_canvas.size, w[k], bi[k]); k++;
@@ -943,7 +1162,7 @@ void writeMomentDescriptors() {
         w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set; w.dstBinding = b; w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
     };
-    VkWriteDescriptorSet w[7]; VkDescriptorBufferInfo bi[7]; int k = 0;
+    VkWriteDescriptorSet w[10]; VkDescriptorBufferInfo bi[10]; int k = 0;
     wr(g_msSet, 0, g_seeds.buf, g_seeds.size, w[k], bi[k]); k++;
     wr(g_msSet, 1, g_gridcdf.buf, g_gridcdf.size, w[k], bi[k]); k++;
     wr(g_msSet, 2, g_bound.buf, g_bound.size, w[k], bi[k]); k++;
@@ -951,6 +1170,8 @@ void writeMomentDescriptors() {
     wr(g_gmSet, 1, g_seeds.buf, g_seeds.size, w[k], bi[k]); k++;
     wr(g_gmSet, 2, g_kindsB.buf, g_kindsB.size, w[k], bi[k]); k++;
     wr(g_gmSet, 3, g_kindcdf.buf, g_kindcdf.size, w[k], bi[k]); k++;
+    wr(g_gmSet, 4, g_kgate.buf, g_kgate.size, w[k], bi[k]); k++;
+    wr(g_gmSet, 5, g_rampglow.buf, g_rampglow.size, w[k], bi[k]); k++;
     vkUpdateDescriptorSets(g_device, (uint32_t)k, w, 0, nullptr);
 }
 
@@ -964,6 +1185,15 @@ bool ensureMoment(int K) {
     }
     writeMomentDescriptors();
     return true;
+}
+
+// ensureTermW lazily creates the per-pixel term-weight buffer (bound by the FE and EAGLE
+// descriptor sets even when unweighted; kernels only read it when hasTW is set).
+bool ensureTermW() {
+    if (g_termW.buf != VK_NULL_HANDLE) return true;
+    return createBufEx((size_t)g_w * g_h * sizeof(float),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_termW);
 }
 
 } // namespace
@@ -993,10 +1223,12 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
         !createBufEx(8 * sizeof(float), dstStore, devLocal, false, g_kindcdf) ||
         !createBufEx((size_t)gridSize * gridSize * sizeof(float), dstStore, devLocal, false, g_gridcdf) ||
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_orient) ||
-        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_bound)) {
+        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_bound) ||
+        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_kgate) ||
+        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_rampglow)) {
         g_lastError = 1020; teardown(); return g_lastError;
     }
-    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_searchSetsDirty = true;
+    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_hasRampGlow = 0; g_searchSetsDirty = true;
     // upload target + weight; zero the canvas — all via the staging buffer.
     memcpy(g_staging.map, target, tSize); copyBuf(g_staging.buf, g_target.buf, tSize);
     memcpy(g_staging.map, weight, wSize); copyBuf(g_staging.buf, g_weight.buf, wSize);
@@ -1016,7 +1248,7 @@ API void fp_eval(const float* cands, int n, float* out) {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_evalSet, 0, nullptr);
-    EvalPC pc{n, g_w, g_h, g_sampleBudget};
+    EvalPC pc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1); // one workgroup per candidate
     flushBarrier();
@@ -1091,6 +1323,55 @@ API void fp_set_boundary_dist(const float* dist) {
     g_hasBound = 1;
 }
 
+// fp_set_kind_gate uploads the per-pixel region-kinds gate (metric.HardEdgeMap): the on-device
+// generators draw the full kind pool with probability gate[centre] and force ellipse otherwise.
+// NULL clears it (gate off). Mirrors shim.cu.
+// fp_set_glow_swap sets the deep-smooth glow-swap pair (tau, prob): gate cells with hard<tau swap
+// their forced ellipse for a RIMLESS glow with probability prob (the generation-side patchwork
+// kill — an ellipse rim in a structureless zone is a luminance step; a glow's rim does not exist).
+API void fp_set_glow_swap(const float* tauProb) {
+    if (!tauProb) { g_glowTau = 0.f; g_glowProb = 0.f; return; }
+    g_glowTau = tauProb[0];
+    g_glowProb = tauProb[1];
+}
+
+// fp_set_alpha_grid installs (or clears: vals NULL / n<=0) the analytic-alpha grid carried to
+// eval.comp via push constants: the epilogue re-solves the optimal colour per grid alpha and the
+// ΔSSE-min (alpha, colour) pair wins. Mirrors shim.cu (grid capped at 6 here — the PC block size).
+API void fp_set_alpha_grid(const float* vals, int n) {
+    if (!vals || n < 0) n = 0;
+    if (n > 6) n = 6;
+    for (int i = 0; i < 6; i++) g_alphaGrid[i] = (i < n) ? vals[i] : 0.f;
+    g_alphaGridN = n;
+}
+
+API void fp_set_kind_gate(const float* hard) {
+    if (!g_device) return;
+    if (!hard) { g_hasGate = 0; return; }
+    size_t sz = (size_t)g_w * g_h * sizeof(float);
+    ensureStaging(sz);
+    memcpy(g_staging.map, hard, sz);
+    copyBuf(g_staging.buf, g_kgate.buf, sz);
+    g_hasGate = 1;
+}
+
+// fp_set_ramp_glow uploads the per-pixel smooth-gradient map (metric.RampMap, len w*h) and its
+// hot-glow params (params = {thresh, tau, prob}): where rampGlow[centre] > thresh the deep-smooth
+// glow swap runs at the hotter (tau, prob) instead of the global pair. NULL ramp clears it (falls
+// back to the global glow swap everywhere). Mirrors shim.cu fp_set_ramp_glow; rides fp_set_kind_gate.
+API void fp_set_ramp_glow(const float* ramp, const float* params) {
+    if (!g_device) return;
+    if (!ramp) { g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; return; }
+    size_t sz = (size_t)g_w * g_h * sizeof(float);
+    ensureStaging(sz);
+    memcpy(g_staging.map, ramp, sz);
+    copyBuf(g_staging.buf, g_rampglow.buf, sz);
+    g_hasRampGlow = 1;
+    g_rampGlowThresh = params[0];
+    g_rampGlowTau = params[1];
+    g_rampGlowProb = params[2];
+}
+
 // fp_search_random: generate n candidates on-device (seeded RNG + error-grid CDF + kind
 // weighting), score them, apply the compactness penalty, and argmin — all in one submit,
 // returning the single best candidate in out_best[12]. ip/fp carry the scalars (the syscall
@@ -1116,15 +1397,15 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // 1. generate
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPL, 0, 1, &g_genSet, 0, nullptr);
-    GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound,
-              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5]};
+    GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound, g_hasGate, g_hasRampGlow,
+              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb};
     vkCmdPushConstants(g_cmd, g_genPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
     cmdBarrierRW();
     // 2. score (reuse eval pipeline on the search buffers)
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
-    EvalPC epc{n, g_w, g_h, g_sampleBudget};
+    EvalPC epc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
     vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1);
     cmdBarrierRW();
@@ -1177,13 +1458,13 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     cmdBarrierRW();
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_gmPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_gmPL, 0, 1, &g_gmSet, 0, nullptr);
-    GenMomPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), nGen, perSeed, K, nKinds, allowAlpha, g_w, g_h, alphaMin, canvasPad};
+    GenMomPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), nGen, perSeed, K, nKinds, allowAlpha, g_w, g_h, g_hasGate, g_hasRampGlow, alphaMin, canvasPad, g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb};
     vkCmdPushConstants(g_cmd, g_gmPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((nGen + 255) / 256), 1, 1);
     cmdBarrierRW();
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
-    EvalPC epc{nGen, g_w, g_h, g_sampleBudget};
+    EvalPC epc{nGen, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
     vkCmdDispatch(g_cmd, (uint32_t)nGen, 1, 1);
     cmdBarrierRW();
@@ -1242,7 +1523,8 @@ API void fp_polish_setup(const float* base, int n) {
            && createBufEx(16, S, dl, false, g_pbelow)
            && createBufEx(16, S, dl, false, g_pdcsnap)
            && createBufEx(npix * 8, S, dl, false, g_feAdj)  // dcinit binding 10 must be valid even with feLambda=0
-           && createBufEx(npix * 8, S, dl, false, g_ssAdj); // dcinit binding 11, same contract
+           && createBufEx(npix * 8, S, dl, false, g_ssAdj)  // dcinit binding 11, same contract
+           && createBufEx(npix * 8, S, dl, false, g_egAdj); // dcinit binding 12 (EAGLE), same contract
     if (!ok) { g_lastError = 2003; polishTeardown(); return; }
     g_belowCap = 16;
     ensureStaging(npix * 16);
@@ -1260,6 +1542,20 @@ API void fp_set_polish_ste(int on) { g_pste = on ? 1 : 0; }
 // backward seed together (one flag keeps the optimisation self-consistent). Mirrors shim.cu.
 API void fp_set_polish_oklab(int on) { g_poklab = on ? 1 : 0; }
 
+// fp_set_term_weight uploads (or clears, hostW==null) the per-pixel FE/EAGLE term-weight map —
+// region-weighted perceptual λ (1−HardEdgeMap): strong in smooth zones where the rim patchwork
+// lives, ~zero on legitimate line-work. Kernels treat hasTW==0 as uniform 1.
+API void fp_set_term_weight(const float* hostW) {
+    if (!g_device) return;
+    if (!hostW) { g_hasTermW = 0; return; }
+    if (!ensureTermW()) { g_lastError = 2012; return; }
+    size_t sz = (size_t)g_w * g_h * sizeof(float);
+    ensureStaging(sz);
+    memcpy(g_staging.map, hostW, sz);
+    copyBuf(g_staging.buf, g_termW.buf, sz);
+    g_hasTermW = 1;
+}
+
 // fp_set_polish_false_edge sets the false-edge λ (pointer: the Go syscall path keeps doubles out
 // of XMM) and prepares the FE planes + the fixed target-luma plane. λ<=0 disables the term.
 // Call AFTER fp_polish_setup (the FE descriptors reference the polish render buffer).
@@ -1268,6 +1564,7 @@ API void fp_set_polish_false_edge(const double* lambdaPtr) {
     if (g_pfelambda <= 0.0 || !g_device || g_pn < 1) return;
     size_t npix = (size_t)g_w * g_h;
     if (g_feDSL == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; return; }
+    if (!ensureTermW()) { g_lastError = 2012; return; }
     if (g_feTL.buf == VK_NULL_HANDLE) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1282,7 +1579,7 @@ API void fp_set_polish_false_edge(const double* lambdaPtr) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
-    FePC fpc{ g_w, g_h, (float)g_pfelambda };
+    FePC fpc{ g_w, g_h, (float)g_pfelambda, g_hasTermW };
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_feLumaP);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_fePL, 0, 1, &g_feSetT, 0, nullptr);
     vkCmdPushConstants(g_cmd, g_fePL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fpc), &fpc);
@@ -1425,10 +1722,11 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     // False-edge + SSIM adjoint planes first, feeding the dcinit dC seed below.
     if (g_pfelambda > 0.0) cmdFEPasses(true);
     if (g_psslambda > 0.0) cmdSSIMPasses(true);
+    if (g_peglambda > 0.0) cmdEaglePasses(true);
     // dC = 2*weight*(render-target) — full image, shared polish DSL
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pDcinit);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
-    PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab, (float)g_pfelambda, (float)g_psslambda};
+    PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda};
     vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcd), &pcd);
     vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
     cmdBarrierRW();

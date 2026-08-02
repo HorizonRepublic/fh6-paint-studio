@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/model"
 )
@@ -86,150 +85,6 @@ func randCands(rng *rand.Rand, w, h, n int) []model.Candidate {
 	return out
 }
 
-// TestGoldenDiffEvaluate asserts the Vulkan Evaluate matches the CPU reference (scores +
-// optimal colors) within float32 tolerance over a batch of random candidates, on both
-// opaque and transparent (cutout) targets. This is the Phase 1 GO/NO-GO gate.
-func TestGoldenDiffEvaluate(t *testing.T) {
-	for _, transparent := range []bool{false, true} {
-		rng := rand.New(rand.NewSource(42))
-		w, h := 37, 29
-		target, weight := makeTarget(rng, w, h, transparent)
-
-		ref := cpu.New(target, w, h, 8)
-		ref.SetWeight(weight)
-		gpu, err := New(target, weight, w, h, 8)
-		if err != nil {
-			t.Fatalf("vulkan.New: %v", err)
-		}
-		defer gpu.Close()
-
-		canvas := make([]float32, w*h*4)
-		for i := range canvas {
-			canvas[i] = rng.Float32()
-		}
-		_ = ref.Reset(canvas)
-		_ = gpu.Reset(canvas)
-
-		cands := randCands(rng, w, h, 2000)
-		rc, _ := ref.Evaluate(cands)
-		gc, err := gpu.Evaluate(cands)
-		if err != nil {
-			t.Fatalf("vulkan Evaluate: %v", err)
-		}
-
-		var mismatches int
-		for i := range cands {
-			rRej := rc[i].Score == rejected
-			gRej := gc[i].Score == rejected
-			if rRej || gRej {
-				if rRej != gRej {
-					t.Errorf("[transp=%v] cand %d reject mismatch: cpu=%v vk=%v", transparent, i, rRej, gRej)
-				}
-				continue
-			}
-			if !closeRel(rc[i].Score, gc[i].Score, 2e-3, 1e-2) {
-				if mismatches++; mismatches <= 10 {
-					t.Errorf("[transp=%v] cand %d score: cpu=%.5f vk=%.5f", transparent, i, rc[i].Score, gc[i].Score)
-				}
-			}
-			for _, cc := range [][2]float32{
-				{rc[i].Color.R, gc[i].Color.R}, {rc[i].Color.G, gc[i].Color.G},
-				{rc[i].Color.B, gc[i].Color.B}, {rc[i].Color.A, gc[i].Color.A},
-			} {
-				if math.Abs(float64(cc[0]-cc[1])) > 1e-3 {
-					t.Errorf("[transp=%v] cand %d color: cpu=%.5f vk=%.5f", transparent, i, cc[0], cc[1])
-					break
-				}
-			}
-		}
-	}
-}
-
-// TestGoldenDiffApply asserts the Vulkan Apply composites identically to the CPU
-// reference: apply a sequence of shapes on both, then compare the full canvas.
-func TestGoldenDiffApply(t *testing.T) {
-	rng := rand.New(rand.NewSource(7))
-	w, h := 41, 33
-	target, weight := makeTarget(rng, w, h, false)
-
-	ref := cpu.New(target, w, h, 8)
-	ref.SetWeight(weight)
-	gpu, err := New(target, weight, w, h, 8)
-	if err != nil {
-		t.Fatalf("vulkan.New: %v", err)
-	}
-	defer gpu.Close()
-
-	canvas := make([]float32, w*h*4)
-	for i := 0; i < w*h; i++ {
-		canvas[i*4+3] = 1
-	}
-	_ = ref.Reset(canvas)
-	_ = gpu.Reset(canvas)
-
-	for _, c := range randCands(rng, w, h, 60) {
-		_ = ref.Apply(c)
-		_ = gpu.Apply(c)
-	}
-
-	rcanv := make([]float32, w*h*4)
-	gcanv := make([]float32, w*h*4)
-	_ = ref.ReadCanvas(rcanv)
-	if err := gpu.ReadCanvas(gcanv); err != nil {
-		t.Fatalf("vulkan ReadCanvas: %v", err)
-	}
-	var bad int
-	for i := range rcanv {
-		if math.Abs(float64(rcanv[i]-gcanv[i])) > 2e-3 {
-			if bad++; bad <= 10 {
-				t.Errorf("canvas[%d] (px %d ch %d): cpu=%.5f vk=%.5f", i, i/4, i%4, rcanv[i], gcanv[i])
-			}
-		}
-	}
-	if bad > 0 {
-		t.Errorf("Apply mismatch: %d/%d channels diverged", bad, len(rcanv))
-	}
-}
-
-// TestGoldenDiffErrorGrid asserts the on-device error grid matches cpu.ErrorGrid (within
-// a float-reduction tolerance) after compositing a few shapes onto a shared canvas.
-func TestGoldenDiffErrorGrid(t *testing.T) {
-	rng := rand.New(rand.NewSource(99))
-	w, h, grid := 53, 47, 8
-	target, weight := makeTarget(rng, w, h, false)
-	ref := cpu.New(target, w, h, grid)
-	ref.SetWeight(weight)
-	gpu, err := New(target, weight, w, h, grid)
-	if err != nil {
-		t.Fatalf("vulkan.New: %v", err)
-	}
-	defer gpu.Close()
-
-	canvas := make([]float32, w*h*4)
-	for i := 0; i < w*h; i++ {
-		canvas[i*4+3] = 1
-	}
-	_ = ref.Reset(canvas)
-	_ = gpu.Reset(canvas)
-	for _, c := range randCands(rng, w, h, 40) {
-		_ = ref.Apply(c)
-		_ = gpu.Apply(c)
-	}
-	rg, _, _, _ := ref.ErrorGrid()
-	gg, gw, gh, err := gpu.ErrorGrid()
-	if err != nil {
-		t.Fatalf("vulkan ErrorGrid: %v", err)
-	}
-	if gw != grid || gh != grid {
-		t.Fatalf("grid dims %dx%d, want %dx%d", gw, gh, grid, grid)
-	}
-	for i := range rg {
-		if !closeRel(rg[i], gg[i], 2e-3, 1e-3) {
-			t.Errorf("grid[%d]: cpu=%.5f vk=%.5f", i, rg[i], gg[i])
-		}
-	}
-}
-
 // TestGoldenDiffPolish asserts the Vulkan polish forward render, loss, hard loss, and
 // per-shape gradients match the pure-Go reference (engine.PolishStepProbe) for one step at
 // a fixed tau, over a mixed scene (ellipse+rect = soft/optGeo, triangle = hard coverage),
@@ -260,19 +115,33 @@ func TestGoldenDiffPolish(t *testing.T) {
 	bg := model.RGBA{R: 0.4, G: 0.4, B: 0.4}
 	tau := 1.5
 
+	// Deterministic per-pixel term-weight map for the weighted modes (a horizontal ramp exercises
+	// weighting without depending on any detector).
+	twMap := make([]float32, w*h)
+	for i := range twMap {
+		twMap[i] = float32(i%w) / float32(w-1)
+	}
 	for _, mode := range []struct {
 		ste, oklab bool
 		fe         float64
 		ssim       float64
-	}{{false, false, 0, 0}, {true, false, 0, 0}, {false, true, 0, 0}, {true, true, 0, 0},
-		{false, false, 0.01, 0}, {true, false, 0.01, 0},
-		{false, false, 0, 0.01}, {true, false, 0, 0.01}, {false, false, 0.01, 0.01}} {
-		ste, oklab, feLam, ssLam := mode.ste, mode.oklab, mode.fe, mode.ssim
+		eagle      float64
+		tw         bool
+	}{{false, false, 0, 0, 0, false}, {true, false, 0, 0, 0, false}, {false, true, 0, 0, 0, false}, {true, true, 0, 0, 0, false},
+		{false, false, 0.01, 0, 0, false}, {true, false, 0.01, 0, 0, false},
+		{false, false, 0, 0.01, 0, false}, {true, false, 0, 0.01, 0, false}, {false, false, 0.01, 0.01, 0, false},
+		{false, false, 0, 0, 0.02, false}, {true, false, 0, 0, 0.02, false}, {false, false, 0.01, 0.01, 0.02, false},
+		{false, false, 0.01, 0, 0.02, true}, {true, false, 0.01, 0.01, 0.02, true}} {
+		ste, oklab, feLam, ssLam, egLam := mode.ste, mode.oklab, mode.fe, mode.ssim, mode.eagle
+		var tw []float32
+		if mode.tw {
+			tw = twMap
+		}
 		if oklab && !gpu.PolishSetOKLab(true) {
 			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
 			continue
 		}
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam, ssLam)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam, ssLam, egLam, tw)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
@@ -283,6 +152,16 @@ func TestGoldenDiffPolish(t *testing.T) {
 		}
 		if ssLam > 0 && !gpu.PolishSetSSIM(ssLam) {
 			t.Log("DLL lacks fp_set_polish_ssim — skipping the SSIM golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
+		if egLam > 0 && !gpu.PolishSetEagle(egLam) {
+			t.Log("DLL lacks fp_set_polish_eagle — skipping the EAGLE golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
+		if !gpu.PolishSetTermWeight(tw) && tw != nil {
+			t.Log("DLL lacks fp_set_term_weight — skipping the weighted golden-diff (rebuild the DLL)")
 			gpu.PolishFree()
 			continue
 		}

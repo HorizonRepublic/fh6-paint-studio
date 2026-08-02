@@ -9,8 +9,10 @@ layout(std430, binding = 0) writeonly buffer Sc { float scand[]; };
 layout(std430, binding = 1) readonly  buffer Sd { float seeds[]; };
 layout(std430, binding = 2) readonly  buffer Kk { float kinds[]; };
 layout(std430, binding = 3) readonly  buffer Kc { float kindCDF[]; };
+layout(std430, binding = 4) readonly  buffer Kg { float kindGate[]; };
+layout(std430, binding = 5) readonly  buffer Rg { float rampGlow[]; };
 layout(push_constant) uniform PC {
-    uint seedLo, seedHi; int n, perSeed, K, nKinds, allowAlpha, W, H; float alphaMin, canvasPad;
+    uint seedLo, seedHi; int n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb;
 } pc;
 
 uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -60,7 +62,19 @@ void main() {
         if (pc.allowAlpha != 0) alpha = pc.alphaMin + (1.0 - pc.alphaMin) * uf(uint(i), ctr);
         scand[b + 10] = alpha;
         int kind = int(kinds[pc.nKinds - 1] + 0.5);
-        { float ku = uf(uint(i), ctr) * kindCDF[pc.nKinds - 1];
+        bool fullPool = true;
+        if (pc.hasGate != 0) { // gate at the JITTERED centre (engine momentPool kg.pick)
+            int gidx = int(jy) * pc.W + int(jx);
+            if (gidx >= 0 && gidx < pc.W * pc.H && uf(uint(i), ctr) >= kindGate[gidx]) {
+                kind = 0; fullPool = false;
+                // deep-smooth glow swap: a rimless glow where the target has no structure at all;
+                // HOTTER (rampTau/rampProb) in genuine gradient zones (rampGlow[gidx] > rampThresh).
+                float effTau = pc.glowTau, effProb = pc.glowProb;
+                if (pc.hasRampGlow != 0 && rampGlow[gidx] > pc.rampThresh) { effTau = pc.rampTau; effProb = pc.rampProb; }
+                if (kindGate[gidx] < effTau && uf(uint(i), ctr) < effProb) kind = 4;
+            }
+        }
+        if (fullPool) { float ku = uf(uint(i), ctr) * kindCDF[pc.nKinds - 1];
           for (int kk = 0; kk < pc.nKinds; kk++) if (ku < kindCDF[kk]) { kind = int(kinds[kk] + 0.5); break; } }
         scand[b + 0] = float(kind);
         if (kind == 1) {

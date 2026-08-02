@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
@@ -44,8 +43,7 @@ func TestMaskEvalMatchesCPU(t *testing.T) {
 	rng := rand.New(rand.NewSource(31))
 	w, h := 37, 29
 	target, weight := makeTarget(rng, w, h, false)
-	ref := cpu.New(target, w, h, 8)
-	ref.SetWeight(weight)
+	ref := newRef(target, weight, w, h)
 	gpu, err := New(target, weight, w, h, 8)
 	if err != nil {
 		t.Fatalf("cuda.New: %v", err)
@@ -59,11 +57,11 @@ func TestMaskEvalMatchesCPU(t *testing.T) {
 	for i := range canvas {
 		canvas[i] = rng.Float32()
 	}
-	_ = ref.Reset(canvas)
+	ref.Reset(canvas)
 	_ = gpu.Reset(canvas)
 
 	cands := maskCands(rng, w, h, 1200)
-	rc, _ := ref.Evaluate(cands)
+	rc := ref.Evaluate(cands)
 	gc, _ := gpu.Evaluate(cands)
 
 	var mism int
@@ -91,8 +89,7 @@ func TestMaskApplyMatchesCPU(t *testing.T) {
 	rng := rand.New(rand.NewSource(13))
 	w, h := 40, 40
 	target, weight := makeTarget(rng, w, h, false)
-	ref := cpu.New(target, w, h, 8)
-	ref.SetWeight(weight)
+	ref := newRef(target, weight, w, h)
 	gpu, err := New(target, weight, w, h, 8)
 	if err != nil {
 		t.Fatalf("cuda.New: %v", err)
@@ -106,15 +103,15 @@ func TestMaskApplyMatchesCPU(t *testing.T) {
 	for i := 0; i < w*h; i++ {
 		canvas[i*4+3] = 1
 	}
-	_ = ref.Reset(canvas)
+	ref.Reset(canvas)
 	_ = gpu.Reset(canvas)
 	for _, c := range maskCands(rng, w, h, 20) {
-		_ = ref.Apply(c)
+		ref.Apply(c)
 		_ = gpu.Apply(c)
 	}
 	rcv := make([]float32, w*h*4)
 	gcv := make([]float32, w*h*4)
-	_ = ref.ReadCanvas(rcv)
+	ref.ReadCanvas(rcv)
 	_ = gpu.ReadCanvas(gcv)
 	for i := range rcv {
 		if math.Abs(float64(rcv[i]-gcv[i])) > 5e-3 {
@@ -157,7 +154,7 @@ func TestPolishMaskShape(t *testing.T) {
 	tau := 1.5
 
 	for _, ste := range []bool{false, true} {
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, false, 0, 0)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, false, 0, 0, 0, nil)
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
 		gpu.PolishUpload(ref.P, ref.Col, ref.Kinds, ref.BBX, ref.Boff, ref.BelowTotal)
