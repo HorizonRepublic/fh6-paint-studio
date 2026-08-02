@@ -1,9 +1,10 @@
+//go:build cuda
+
 package engine
 
 import (
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -34,7 +35,7 @@ func TestZOrderSwapRecoversOccludedShape(t *testing.T) {
 		rect(16, 16, 8, 8, model.RGBA{B: 1, A: 1}), // ...occluded by a later blue cover
 	}
 
-	be := cpu.New(target, w, h, 8)
+	be := newTestBackend(t, target, w, h, 8)
 	initCanvas := backgroundCanvas(bg, w, h)
 	inErr := renderExcept(be, initCanvas, shapes, -1)
 	if inErr <= 0 {

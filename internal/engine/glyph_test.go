@@ -1,9 +1,10 @@
+//go:build cuda
+
 package engine
 
 import (
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -47,7 +48,7 @@ func TestGlyphProposerNailsAStamp(t *testing.T) {
 		}
 	}
 
-	be := cpu.New(target, w, h, 8)
+	be := newTestBackend(t, target, w, h, 8)
 	res := Run(be, Options{Width: 96, Height: 96, StopAt: 6, Seed: 5, GlyphDict: true, MaxNoImprove: 8})
 	found := false
 	for _, s := range res.Shapes {

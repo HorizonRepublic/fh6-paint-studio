@@ -14,8 +14,55 @@ var maskTexByKind map[model.ShapeKind]*maskTex
 func init() {
 	maskTexByKind = make(map[model.ShapeKind]*maskTex, len(maskbank.All()))
 	for _, e := range maskbank.All() {
-		maskTexByKind[e.Kind] = &maskTex{w: e.W, h: e.H, cov: e.Cov}
+		m := &maskTex{w: e.W, h: e.H, cov: e.Cov}
+		m.computeActiveUV()
+		maskTexByKind[e.Kind] = m
 	}
+}
+
+// computeActiveUV scans the coverage for its tight nonzero bounds in UV. Many bank words leave
+// large transparent margins inside their unit square (e.g. the linear-ramp fill 2204 uses ~half),
+// so placing a word by its P frame alone under-covers the intended area; MaskActiveUV lets callers
+// remap the placement so the ACTIVE area lands on the target frame.
+func (m *maskTex) computeActiveUV() {
+	const tau = 0.01
+	x0, y0, x1, y1 := m.w, m.h, -1, -1
+	for y := 0; y < m.h; y++ {
+		for x := 0; x < m.w; x++ {
+			if m.cov[y*m.w+x] > tau {
+				if x < x0 {
+					x0 = x
+				}
+				if x > x1 {
+					x1 = x
+				}
+				if y < y0 {
+					y0 = y
+				}
+				if y > y1 {
+					y1 = y
+				}
+			}
+		}
+	}
+	if x1 < x0 {
+		return
+	}
+	m.au0 = float64(x0) / float64(m.w)
+	m.au1 = float64(x1+1) / float64(m.w)
+	m.av0 = float64(y0) / float64(m.h)
+	m.av1 = float64(y1+1) / float64(m.h)
+	m.aok = true
+}
+
+// MaskActiveUV returns the tight UV bounds of the mask's nonzero coverage (ok=false for an unknown
+// or fully-transparent word).
+func MaskActiveUV(kind model.ShapeKind) (u0, v0, u1, v1 float64, ok bool) {
+	m := maskByKind(kind)
+	if m == nil || !m.aok {
+		return 0, 0, 0, 0, false
+	}
+	return m.au0, m.av0, m.au1, m.av1, true
 }
 
 func maskByKind(kind model.ShapeKind) *maskTex { return maskTexByKind[kind] }
@@ -26,6 +73,9 @@ func maskByKind(kind model.ShapeKind) *maskTex { return maskTexByKind[kind] }
 type maskTex struct {
 	w, h int
 	cov  []float32
+	// Tight nonzero-coverage bounds in UV (computeActiveUV; aok=false for an empty mask).
+	au0, av0, au1, av1 float64
+	aok                bool
 }
 
 // sampleUV returns the bilinearly-interpolated coverage at (u,v). Outside the unit square -> 0;

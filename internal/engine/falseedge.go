@@ -32,10 +32,11 @@ type feState struct {
 	tl  []float32 // target luma (fixed)
 	rl  []float32 // recon luma scratch
 	adj []float64 // dFE/dLuma per pixel (the adjoint scattered through the Sobel stencil)
+	tw  []float32 // optional per-pixel term weight (PolishOptions.TermWeight); nil = uniform
 }
 
-func newFEState(target []float32, w, h int) *feState {
-	fe := &feState{tl: make([]float32, w*h), rl: make([]float32, w*h), adj: make([]float64, w*h)}
+func newFEState(target []float32, w, h int, tw []float32) *feState {
+	fe := &feState{tl: make([]float32, w*h), rl: make([]float32, w*h), adj: make([]float64, w*h), tw: tw}
 	lumaOf(target, w, h, fe.tl)
 	return fe
 }
@@ -60,6 +61,9 @@ func (fe *feState) total(render []float32, w, h int) float64 {
 			gx, gy := sobelAtFast(fe.rl, w, x, y)
 			tx, ty := sobelAtFast(fe.tl, w, x, y)
 			if d := math.Hypot(gx, gy) - math.Hypot(tx, ty); d > 0 {
+				if fe.tw != nil {
+					d *= float64(fe.tw[y*w+x])
+				}
 				f0 += d
 			}
 		}
@@ -85,8 +89,12 @@ func (fe *feState) adjoint(render []float32, w, h int) float64 {
 			if d <= 0 || gr < 1e-12 {
 				continue
 			}
-			f0 += d
-			cx, cy := gx/gr, gy/gr
+			wi := 1.0
+			if fe.tw != nil {
+				wi = float64(fe.tw[y*w+x])
+			}
+			f0 += wi * d
+			cx, cy := wi*gx/gr, wi*gy/gr
 			i := y*w + x
 			fe.adj[i-w-1] += -cx - cy
 			fe.adj[i-w] += -2 * cy

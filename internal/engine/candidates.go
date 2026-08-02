@@ -75,7 +75,7 @@ func randRange(rng *rand.Rand, lo, hi float32) float32 { return lo + (hi-lo)*rng
 // the livery editor natively supports 8-bit per-layer alpha). Opaque-only
 // (allowAlpha=false) is kept for cutout images, where the reconstructed object must
 // stay fully opaque.
-func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weights []float32, s *ErrorSampler, progress float32, orient []float32, allowAlpha bool, alphaMin, aspectMax float32, bc *boundaryCtx) []model.Candidate {
+func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weights []float32, s *ErrorSampler, progress float32, orient []float32, allowAlpha bool, alphaMin, aspectMax float32, bc *boundaryCtx, kg *kindGate) []model.Candidate {
 	if len(kinds) == 0 {
 		kinds = []model.ShapeKind{model.KindEllipse}
 	}
@@ -109,7 +109,7 @@ func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weig
 				defer wg.Done()
 				r := rand.New(rand.NewSource(seed))
 				for i := lo; i < hi; i++ {
-					out[i] = genCandidate(r, w, h, kinds, kindCDF, s, maxR, orient, allowAlpha, alphaMin, aspectMax, progress, bc)
+					out[i] = genCandidate(r, w, h, kinds, kindCDF, s, maxR, orient, allowAlpha, alphaMin, aspectMax, progress, bc, kg)
 				}
 			}(lo, hi, seeds[wk])
 		}
@@ -117,14 +117,14 @@ func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weig
 		return out
 	}
 	for i := 0; i < count; i++ {
-		out[i] = genCandidate(rng, w, h, kinds, kindCDF, s, maxR, orient, allowAlpha, alphaMin, aspectMax, progress, bc)
+		out[i] = genCandidate(rng, w, h, kinds, kindCDF, s, maxR, orient, allowAlpha, alphaMin, aspectMax, progress, bc, kg)
 	}
 	return out
 }
 
 // genCandidate produces one error-biased, kind-weighted, orientation-seeded
 // candidate (color left zero; the backend solves the optimal color).
-func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []float32, s *ErrorSampler, maxR float32, orient []float32, allowAlpha bool, alphaMin, aspectMax, progress float32, bc *boundaryCtx) model.Candidate {
+func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []float32, s *ErrorSampler, maxR float32, orient []float32, allowAlpha bool, alphaMin, aspectMax, progress float32, bc *boundaryCtx, kg *kindGate) model.Candidate {
 	x, y := s.Sample(r)
 	x = clampF(x, 0, float32(w-1))
 	y = clampF(y, 0, float32(h-1))
@@ -146,7 +146,7 @@ func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []flo
 	if allowAlpha {
 		alpha = randRange(r, alphaMin, 1)
 	}
-	return randomShapeOfKind(r, pickKind(r, kinds, kindCDF), x, y, maxR, float32(w), float32(h), theta, alpha, aspectMax)
+	return randomShapeOfKind(r, kg.pick(r, x, y, kinds, kindCDF), x, y, maxR, float32(w), float32(h), theta, alpha, aspectMax)
 }
 
 // buildKindCDF returns a cumulative-weight table over kinds for weighted random
@@ -242,7 +242,7 @@ func randomShapeOfKind(rng *rand.Rand, kind model.ShapeKind, cx, cy, maxR, w, h,
 
 // RandomEllipses is a Segment-1 compatibility wrapper for ellipse-only generation.
 func RandomEllipses(rng *rand.Rand, w, h, count int, s *ErrorSampler, progress float32) []model.Candidate {
-	return RandomShapes(rng, w, h, count, []model.ShapeKind{model.KindEllipse}, nil, s, progress, nil, false, 1, 0, nil)
+	return RandomShapes(rng, w, h, count, []model.ShapeKind{model.KindEllipse}, nil, s, progress, nil, false, 1, 0, nil, nil)
 }
 
 // MutateShape perturbs the geometry of a base candidate per kind (color is

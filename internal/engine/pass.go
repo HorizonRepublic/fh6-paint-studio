@@ -18,9 +18,13 @@ func postPasses() []pass {
 	return []pass{
 		backfitPolishPass{},
 		backfitPass{},
+		softSwapPolishPass{},
 		polishPass{},
+		looRefitPass{},
+		artifactFixPass{},
 		annealPass{},
 		zswapPass{},
+		softSwapPass{},
 		standoutPass{},
 	}
 }
@@ -31,7 +35,7 @@ func postPasses() []pass {
 func (r *run) newBackfitEnv() *greedyEnv {
 	return &greedyEnv{
 		be: r.be, rng: r.rng, w: r.w, h: r.h,
-		kinds: r.kinds, kindWeights: r.kindWeights, kindCDF: r.kindCDF, orient: r.orient,
+		kinds: r.kinds, kindWeights: r.kindWeights, kindCDF: r.kindCDF, orient: r.orient, kg: r.kindGate,
 		devSearch: r.devSearch, allowAlpha: r.allowAlpha, alphaMin: r.alphaMin, aspectMax: r.opt.AspectMax,
 		compact: r.opt.CompactPenalty, moveStep: r.moveStep, radiusStep: r.radiusStep,
 		rounds: r.rounds, perRound: r.perRound, randomN: r.opt.RandomSamples, canvasPad: r.opt.CanvasPad, tm: nil,
@@ -85,7 +89,9 @@ func (backfitPass) apply(r *run) {
 // polishPass handles the joint differentiable polish with back-fitting off.
 type polishPass struct{}
 
-func (polishPass) enabled(opt Options) bool { return opt.Polish && !opt.BackFit }
+func (polishPass) enabled(opt Options) bool {
+	return opt.Polish && !opt.BackFit && !(opt.SoftSwapPre && opt.SoftSwapTol > 0)
+}
 
 func (polishPass) apply(r *run) {
 	r.setStatus("Polishing…")
@@ -104,6 +110,32 @@ func (annealPass) apply(r *run) {
 	r.setStatus("Annealing…")
 	r.shapes, r.finalErr = anneal(r.be, r.newBackfitEnv(), r.shapes, r.finalErr,
 		r.initCanvas, r.be.Target(), r.be.Weight(), r.opt, r.w, r.h, &r.tm, r.rng)
+}
+
+// softSwapPolishPass is the PRE-polish soft-swap + polish combination (SoftSwapPre): it replaces
+// polishPass in the trio partition and gates end-to-end inside softSwapPrePolish.
+type softSwapPolishPass struct{}
+
+func (softSwapPolishPass) enabled(opt Options) bool {
+	return opt.SoftSwapPre && opt.SoftSwapTol > 0 && opt.Polish && !opt.BackFit
+}
+
+func (softSwapPolishPass) apply(r *run) {
+	r.setStatus("Soft-swapping + polishing…")
+	softSwapPrePolish(r)
+}
+
+// softSwapPass replaces standout rect/triangle shapes with a soft shape moment-fitted to the same
+// footprint (substitution keeps the coverage, so the SSE gate starves it far less than the standout
+// pass's remove/recolour menu). Runs before standoutPass so that pass can still clean what a swap
+// couldn't fix. Opt-in via SoftSwapTol > 0 (post-polish form; SoftSwapPre routes to the combined pass).
+type softSwapPass struct{}
+
+func (softSwapPass) enabled(opt Options) bool { return opt.SoftSwapTol > 0 && !opt.SoftSwapPre }
+
+func (softSwapPass) apply(r *run) {
+	r.setStatus("Soft-swapping standouts…")
+	r.shapes, r.finalErr = softSwapStandouts(r.be, r.shapes, r.finalErr, r.initCanvas, r.opt, r.w, r.h)
 }
 
 // standoutPass is the final perceptual pass: suppress standout shapes whose rim draws an edge the

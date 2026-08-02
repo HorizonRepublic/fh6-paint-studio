@@ -52,7 +52,7 @@ func (randomSource) search(r *run, progress float32, sampGrid []float32, penalty
 		r.devSearch = nil // older DLL without the export — fall back for the rest of the run
 	}
 	t0 := time.Now()
-	cands := RandomShapes(r.rng, w, h, r.opt.RandomSamples, r.kinds, r.kindWeights, r.sampler, progress, r.orient, r.allowAlpha, r.alphaMin, r.opt.AspectMax, r.boundCtx)
+	cands := RandomShapes(r.rng, w, h, r.opt.RandomSamples, r.kinds, r.kindWeights, r.sampler, progress, r.orient, r.allowAlpha, r.alphaMin, r.opt.AspectMax, r.boundCtx, r.kindGate)
 	clampCandidatesToCanvas(cands, float32(w), float32(h), r.opt.CanvasPad)
 	r.tm.Generate += time.Since(t0)
 	t0 = time.Now()
@@ -112,9 +112,9 @@ func (momentSource) search(r *run, progress float32, sampGrid []float32, penalty
 			}
 		}
 		if scx, scy, srx, sry, sth, ok := momentSeedFromGrid(sampGrid, r.gw, r.gh, w, h, px, py, cR); ok {
-			pool = append(pool, momentPool(r.rng, scx, scy, srx, sry, sth, cR, r.kinds, r.kindCDF, perSeed, float32(w), float32(h), r.allowAlpha, r.alphaMin)...)
+			pool = append(pool, momentPool(r.rng, scx, scy, srx, sry, sth, cR, r.kinds, r.kindCDF, perSeed, float32(w), float32(h), r.allowAlpha, r.alphaMin, r.kindGate)...)
 		} else {
-			pool = append(pool, RandomShapes(r.rng, w, h, perSeed, r.kinds, r.kindWeights, r.sampler, progress, r.orient, r.allowAlpha, r.alphaMin, r.opt.AspectMax, r.boundCtx)...)
+			pool = append(pool, RandomShapes(r.rng, w, h, perSeed, r.kinds, r.kindWeights, r.sampler, progress, r.orient, r.allowAlpha, r.alphaMin, r.opt.AspectMax, r.boundCtx, r.kindGate)...)
 		}
 	}
 	clampCandidatesToCanvas(pool, float32(w), float32(h), r.opt.CanvasPad)

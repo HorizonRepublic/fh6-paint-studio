@@ -6,6 +6,7 @@ import (
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -35,9 +36,20 @@ type Options struct {
 	BoundaryStart                 float32           // progress at which the cap engages, ramping to full by progress 1 (0 -> 0.42). Earlier = tighter silhouettes sooner, but constrains the coarse base.
 	CanvasPad                     float32           // canvas-edge radius clamp: shrink any ellipse/rect whose rotated bbox extends past the canvas by more than CanvasPad*min(w,h) px on a side. Stops shapes ballooning outside the image rectangle (visible in-game, clipped in the preview) + saves budget on near-out-of-frame shapes. 0 = off. ~0.04 keeps a small edge bleed; helps opaque/busy content most.
 	StandoutTol                   float64           // post-polish PERCEPTUAL standout suppression: detect shapes whose rim draws an edge the TARGET lacks (a visible circle/square the SSE metric is blind to) and recolour-to-local-mean or remove them, gated so the GLOBAL error rises at most this fraction. Opt-in (0 = off). The metric will NOT show the win — validate by eye; the gate only bounds the loss. ~0.005 = conservative.
+	RegionKinds                   bool              // region-gated kind selection (anime default): precompute metric.HardEdgeMap of the target; a candidate draws from the full kind pool with probability hard[centre] and is forced to ELLIPSE otherwise — rect/triangle rims only where the target itself has line-work/wedges, smooth shading built from ellipses. The generation-side fix for the standout-rect complaint (repair passes cap at ~1% of shapes; the kinds A/B showed the ellipse-only win/loss is decided by exactly this local split). On-device generators gate per-cell via fp_set_kind_gate; a device with on-device search but no gate export disables the feature for the run (speed-safe) — host generation gates natively.
+	RampGlow                      bool              // ramp-aware hotter glow swap (opt-in, BUST — not defaulted; needs RegionKinds): precompute metric.RampMap of the target and, where a cell reads as a genuine smooth gradient (ramp > thresh), run the deep-smooth glow swap at a HOTTER tau/prob than the global pair. Aimed to recover the img_10 win from a global tau-raise without its structured-content regression; measured noise (img_10 SSE +0.01% parity) because the global win came from moderate-hardness cells RampMap excludes. Code kept + CLI-reachable; on-device via fp_set_ramp_glow (rides fp_set_kind_gate + fp_set_glow_swap), inert when off. See regionkinds.go.
+	SoftSwapTol                   float64           // post-polish SOFT-SWAP standout repair (opt-in, 0 = off): replace the worst standout rect/triangle shapes (rim draws an edge the target lacks) with a soft/round shape moment-fitted to the SAME footprint (ellipse / feathered disk / glow; same colour + z), gated so the GLOBAL error rises at most this fraction. Substitution keeps the coverage, so — unlike StandoutTol's recolour/fade/remove menu, which live polish starves at the gate — many repairs fit in the same budget. ~0.005-0.02. Judge by eye; see softswap.go.
+	SoftSwapPre                   bool              // soft-swap PRE-polish variant: run the swap on the GREEDY result and let the joint polish co-adapt around the substitutions, gated end-to-end (polish(greedy) vs polish(swap(greedy)): keep the swap branch only if SSE lands within SoftSwapTol AND the global false-edge ratio improves). The post-polish pass starves at the cumulative gate (~4-7 swaps — every substitution on a converged optimum costs irreducible SSE); pre-polish the redistribution is the polish's job. Needs Polish; no-op with BackFit (trio partition).
 	ZSwapTrials                   int               // z-order local swap EXPERIMENT (opt-in, 0 = off): after polish, try swapping up to this many z-adjacent overlapping pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render — keep the cap modest. Aimed at opaque/flat content where stack order owns contested pixels.
 	PersistGain                   float64           // persistent-error sampling EXPERIMENT (opt-in, 0 = off): upweight sampling cells whose error stagnates across refreshes by (1 + gain·stagnation), so small stubborn details (a saturated iris) stop losing the importance lottery to big soft regions. Sampling-only — the accept gate, knee and progress stay on the raw grid. See persist.go.
 	SaliencyQuota                 float64           // saliency QUOTA (opt-in, 0 = off): the final quota-fraction of the budget places shapes ONLY inside the top-detail cells of the target (sampling grid hard-masked to the salient region; the accept gate stays raw). Unlike a sampling BIAS (measured wash, see persist.go), zeroing the rest forces the per-shape argmax to spend the reserved shapes on the most visible detail (eyes/faces at mid budgets). Needs the detail map (auto-built when set).
+	ShadePrepass                  bool              // shading PRE-PASS (opt-in): before the greedy, claim coherent linear-ramp regions of the target as a two-shape stack — an opaque base rect + the bank's linear-gradient word on top, both colours exact-solved by the backend. In linear light the stack IS a linear interpolation between the two colours, so one claim replaces the many translucent facets greedy spends on smooth shading. Only regions with a coherent non-zero gradient are claimed and the ramp must beat the flat cover by a margin (never claims flat fills — the region-fill lesson). Needs a mask-capable backend. See shadepre.go.
+	LooRefit                      int               // LOO refit rounds (opt-in, 0=off; needs Polish): after the polish, measure every shape's exact leave-one-out fit contribution in the FINAL stack (occlusion-aware — greedy scores at placement time and later shapes overpaint), prune the harmful + tiny tail (≤25%/round), regrow the freed budget against the residual, re-polish, and gate end-to-end. Directly reclaims the wasted budget the owner sees during generation. See loorefit.go.
+	AnalyticAlpha                 bool              // analytic per-candidate alpha (opt-in): eval re-solves the optimal color for a small alpha grid over [alphaMin,1] and keeps the ΔSSE-min (alpha, color) pair — alpha becomes (grid-)exact instead of sampled ~U(alphaMin,1). Organic modes only (needs free alpha). See alphagrid.go.
+	ArtifactFix                   bool              // artifact-repair pass (opt-in): rank shapes by false-edge energy they own in the final render (contrast the target doesn't have — eye-visible specks/rims SSE undercharges), then delete / soften / glow-swap the offenders under local FE+SSE gates. See artifactfix.go.
+	MergeRefit                    bool              // merge consolidation inside the LOO-refit rounds (opt-in; needs LooRefit>0): collapse near-duplicate pairs (same kind, near-same color, high overlap — 6-8% of a @3000 stack) into one moment-fitted shape, freeing slots the round's regrow re-spends. See mergerefit.go.
+	TermRegionWeight              bool              // region-weighted FE/EAGLE polish terms (opt-in): build PolishOpts.TermWeight = 1−metric.HardEdgeMap(target) so the perceptual λ terms press hard in SMOOTH zones (where the translucent-rim patchwork lives) and ~vanish on legitimate line-work. Lets λ run far stronger than the global-λ compromise. Applies only when FE/EAGLE λ > 0; device without fp_set_term_weight runs unweighted (log, GPU polish kept).
+	SmoothBase                    bool              // smooth-region gradient BASE (opt-in): before the greedy, segment LARGE smooth regions (low HardEdgeMap cells, colour-continuous BFS) and claim each with a minimal stack — an opaque base + up to 3 gradient primitives (linear-ramp word / arc bands / glow / disk), ALL colours solved jointly in linear light (stacksolve.go). One 2-4 shape stack replaces the hundreds of translucent facets whose rims are the smooth-zone patchwork artifact; every layer must deepen the earn ≥25% and the gradient layers must carry ≥20% of it, else the stack rolls back (the region-fill lesson). See smoothbase.go.
 	GlyphPrepass                  bool              // glyph PRE-PASS (opt-in): before the greedy, claim flat-colour components of the TARGET that match a dictionary silhouette (signature match + strict IoU verification) as single mask-word shapes — one word instead of the many primitives the greedy would spend. Needs a mask-capable backend; flat/logo content is the target audience. See glyphpre.go.
 	GlyphDict                     bool              // glyph-dictionary EXPERIMENT (opt-in): offer the bank's mask words as greedy candidates — each word moment-fitted onto a residual blob, competing by exact ΔSSE against the primitive winner. Needs a backend that scores mask kinds (CPU; CUDA with the atlas); silently off otherwise. See glyph.go.
 	CompactPenalty                bool              // bias the per-shape pick toward compact shapes (esp. the first few) — cleaner coarse stage
@@ -109,6 +121,11 @@ type sampleBudgeter interface{ SetSampleBudget(n int) }
 // CPU backend does not implement it (it already evaluates gradients natively). Set every run.
 type gradientEvaluator interface{ SetGradients(on bool) bool }
 
+// deviceKindGater is the optional capability of a backend to gate on-device candidate kind picks
+// with the per-pixel region-kinds map (fp_set_kind_gate). SetKindGate(nil) clears a stale map;
+// false = the export is missing (older DLL / Vulkan) and the engine disables the gate for the run.
+type deviceKindGater interface{ SetKindGate(hard []float32) bool }
+
 // coarseSearcher is the optional capability of a backend to run the on-device random search
 // in two passes — a cheap coarse filter then a full-budget re-score of the survivors. Only
 // the CUDA backend implements it; the CPU backend does not (the engine type-asserts, so it
@@ -171,6 +188,17 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	// reference. Both run the same algorithm; the GPU path just moves forward/loss/backward
 	// onto the device. A non-zero false-edge λ needs the device-side term (fp_set_polish_false_edge);
 	// when the backend lacks it the CPU driver carries the experiment.
+	// Region-weighted terms: build the 1−hard map once per run (Options.TermRegionWeight); the
+	// setters below ship it to the device, the CPU driver reads it natively.
+	if opt.TermRegionWeight && opt.PolishOpts.TermWeight == nil &&
+		(opt.PolishOpts.FalseEdgeLambda > 0 || opt.PolishOpts.EagleLambda > 0) {
+		hard := metric.HardEdgeMap(be.Target(), w, h)
+		tw := make([]float32, len(hard))
+		for i, hv := range hard {
+			tw[i] = 1 - hv
+		}
+		opt.PolishOpts.TermWeight = tw
+	}
 	feOK := opt.PolishOpts.FalseEdgeLambda == 0
 	if !feOK {
 		if s, ok := be.(interface{ PolishSetFalseEdge(lambda float64) bool }); ok {
@@ -183,8 +211,25 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 			ssimOK = s.PolishSetSSIM(0)
 		}
 	}
+	eagleOK := opt.PolishOpts.EagleLambda == 0
+	if !eagleOK {
+		if s, ok := be.(interface{ PolishSetEagle(lambda float64) bool }); ok {
+			eagleOK = s.PolishSetEagle(0) // capability probe; PolishWithBackend sets the real λ after setup
+		}
+		// EAGLE ships as an anime-mode DEFAULT, so an accel backend without the export (older DLL,
+		// Vulkan until its port) must NOT drag the whole polish onto the CPU driver — drop the term
+		// and keep the GPU polish instead. (FE/SSIM keep the CPU-fallback contract: their absence
+		// means a truly old DLL, and an EXPLICIT experiment λ still deserves the exact term.)
+		if !eagleOK {
+			if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() {
+				applog.Printf("polish: device lacks fp_set_polish_eagle — EAGLE term disabled (GPU polish kept)")
+				opt.PolishOpts.EagleLambda = 0
+				eagleOK = true
+			}
+		}
+	}
 	var pr PolishResult
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK {
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)

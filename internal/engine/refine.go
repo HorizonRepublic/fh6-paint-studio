@@ -129,3 +129,35 @@ func pruneToBudget(shapes []model.Shape, target, weight []float32, w, h, budget 
 	}
 	return out
 }
+
+// PruneToBudgetBlend prunes a shape list (shapes[0] = background, kept) to at most budget TOTAL
+// shapes by the alpha-aware top-2-owner contribution rank, preserving z-order. Experiment API for
+// the O&R over-provision→prune A/B (debug tooling); the in-run Overdraw path stays opaque-only.
+func PruneToBudgetBlend(shapes []model.Shape, target, weight []float32, w, h, budget int, bg model.RGBA, transparent bool) []model.Shape {
+	if len(shapes) <= 1 || budget <= 1 || len(shapes) <= budget {
+		return shapes
+	}
+	contrib := shapeContributionsBlend(shapes, target, weight, w, h, bg, transparent)
+	type ranked struct {
+		idx int
+		c   float64
+	}
+	cand := make([]ranked, 0, len(shapes)-1)
+	for j := 1; j < len(shapes); j++ {
+		cand = append(cand, ranked{j, contrib[j]})
+	}
+	sort.Slice(cand, func(a, b int) bool { return cand[a].c > cand[b].c })
+	cand = cand[:budget-1]
+	keep := make([]bool, len(shapes))
+	keep[0] = true
+	for _, r := range cand {
+		keep[r.idx] = true
+	}
+	out := make([]model.Shape, 0, budget)
+	for j := range shapes {
+		if keep[j] {
+			out = append(out, shapes[j])
+		}
+	}
+	return out
+}

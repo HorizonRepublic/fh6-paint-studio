@@ -9,6 +9,7 @@ package preset
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 
@@ -59,13 +60,15 @@ type Choices struct {
 	Weighted                                    *bool // nil = true
 	Compact                                     *bool // nil = true (engine still skips it for cutouts)
 	Overdraw                                    float64
+	BestOf                                      int     // full-pipeline attempts with decorrelated seeds, keep the best; 0 = mode default (single run)
+	RampWeight                                  float64 // -1 = mode default; >=0 overrides the smooth-gradient weight boost
 }
 
 // DefaultChoices returns the GUI's starting configuration (matches the CLI flag defaults).
 func DefaultChoices() Choices {
 	return Choices{
 		Shapes: 1000, Mode: "anime", Quality: "balanced", Seed: 1, SS: 1,
-		Grid: 48, Aspect: -1, WeightStrength: -1, AlphaMin: -1, Overdraw: 1,
+		Grid: 48, Aspect: -1, WeightStrength: -1, AlphaMin: -1, Overdraw: 1, RampWeight: -1,
 	}
 }
 
@@ -73,12 +76,14 @@ func DefaultChoices() Choices {
 // grid size for the backend constructor, the concrete (auto-resolved) mode, the preview
 // supersample factor, and a human-readable settings summary for the log.
 type Resolved struct {
-	Options engine.Options
-	Weight  []float32
-	Grid    int
-	Mode    string
-	SS      int
-	Summary []string
+	Options  engine.Options
+	Weight   []float32
+	Grid     int
+	Mode     string
+	SS       int
+	BestOf   int  // run the pipeline this many times with decorrelated seeds and keep the best (≤1 = single run)
+	PixelArt bool // pixel-art EXACT mode: bypass the engine entirely (internal/pixel rect decomposition)
+	Summary  []string
 	// Target is the working-space pixel buffer the backend should fit — usually the loaded pixels,
 	// but the MONO path replaces it with a binarized single-colour copy. The runner uses this so the
 	// target is binarized ONCE (here) instead of again at backend-build time.
@@ -104,6 +109,19 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 	if resolved == "gaussian" {
 		return resolveGaussian(prep, c, w, h, shapes)
 	}
+	if resolved == "pixel" {
+		// EXACT pixel-art mode: no engine, no backend — the runner calls internal/pixel directly.
+		// Options carries only what the shared Done path needs (canvas dims + cutout semantics for
+		// the WYSIWYG preview); budget/quality knobs are meaningless (the art defines the count).
+		return Resolved{
+			Options:  engine.Options{Width: w, Height: h, Background: prep.Background, TransparentBG: true, StopAt: MaxShapes},
+			Mode:     "pixel",
+			SS:       c.SS,
+			PixelArt: true,
+			Summary:  []string{"mode=pixel (exact rect decomposition — the art defines the shape count)"},
+			Target:   prep.Pixels,
+		}
+	}
 	flatMode := resolved == "flat"
 	transparent := prep.HasTransparency && !prep.PaddedOpaque // padded-opaque keeps content tuning; spill penalty still fires
 
@@ -126,7 +144,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 
 	sp := resolveShapeParams(md, c, flatMode, transparent)
 
-	weight := buildWeightMap(prep, w, h, c, flatMode || transparent, sp.wstr)
+	weight := buildWeightMap(prep, w, h, c, flatMode || transparent, sp.wstr, sp.rampWeight)
 
 	compact := true
 	if c.Compact != nil {
@@ -210,7 +228,16 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		MomentSeed:        true,
 		MomentDetailStart: 0.55,
 		Polish:            sp.polish,
-		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim),
+		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim, sp.eagle),
+		ShadePrepass:      sp.shadePre,
+		SmoothBase:        sp.smoothBase,
+		RegionKinds:       sp.regionKinds,
+		RampGlow:          sp.rampGlow,
+		TermRegionWeight:  sp.termRegionW,
+		LooRefit:          sp.looRefit,
+		MergeRefit:        sp.mergeRefit,
+		AnalyticAlpha:     sp.analyticAlpha,
+		SaliencyQuota:     md.SaliencyQuota,
 		BackFit:           sp.backfit,
 		BackFitPasses:     2,
 		BackFitFrac:       0.1,
@@ -238,7 +265,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		fmt.Sprintf("random=%d  mutated=%d  sample-budget=%d  grid=%d", random, mutated, sampleBudget, grid),
 	}
 
-	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, Summary: summary, Target: prep.Pixels}
+	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, BestOf: sp.bestOf, Summary: summary, Target: prep.Pixels}
 }
 
 // clampShapes constrains the budget to [1, MaxShapes] — the FH6 per-group layer ceiling.
@@ -275,20 +302,31 @@ func resolveSampleCounts(c Choices) (random, mutated, sampleBudget, maxNI int) {
 // explicit Choices overrides. Grouped into one value so resolveShapeParams stays a single cohesive
 // resolver instead of a function returning a dozen results (an anti-pattern in its own right).
 type shapeParams struct {
-	allowAlpha  bool
-	alphaMin    float32
-	kindsCSV    string
-	kindWeights []float32
-	wstr        float64 // edge-weight blend toward uniform; also drives the saliency map
-	aspectMax   float32
-	polish      bool
-	boundaryOn  bool
-	backfit     bool
-	iters       int
-	tau1        float64
-	falseEdge   float64
-	ssim        float64
-	ste         bool
+	allowAlpha    bool
+	alphaMin      float32
+	kindsCSV      string
+	kindWeights   []float32
+	wstr          float64 // edge-weight blend toward uniform; also drives the saliency map
+	aspectMax     float32
+	polish        bool
+	boundaryOn    bool
+	backfit       bool
+	iters         int
+	tau1          float64
+	falseEdge     float64
+	ssim          float64
+	eagle         float64
+	shadePre      bool
+	smoothBase    bool
+	regionKinds   bool
+	rampGlow      bool
+	termRegionW   bool
+	looRefit      int
+	mergeRefit    bool
+	rampWeight    float64
+	bestOf        int
+	analyticAlpha bool
+	ste           bool
 }
 
 // resolveShapeParams layers the explicit Choices overrides on top of the mode defaults. The
@@ -296,17 +334,31 @@ type shapeParams struct {
 // cover the override semantics (which sentinel means "unset").
 func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) shapeParams {
 	sp := shapeParams{
-		alphaMin:    md.AlphaMin,
-		kindWeights: md.KindWeights,
-		wstr:        md.WeightStr,
-		aspectMax:   md.AspectMax,
-		boundaryOn:  md.Boundary,
-		backfit:     md.Backfit,
-		iters:       md.PolishIters,
-		tau1:        md.PolishTau1,
-		falseEdge:   md.FalseEdge,
-		ssim:        md.SSIM,
-		ste:         true,
+		alphaMin:      md.AlphaMin,
+		kindWeights:   md.KindWeights,
+		wstr:          md.WeightStr,
+		aspectMax:     md.AspectMax,
+		boundaryOn:    md.Boundary,
+		backfit:       md.Backfit,
+		iters:         md.PolishIters,
+		tau1:          md.PolishTau1,
+		falseEdge:     md.FalseEdge,
+		ssim:          md.SSIM,
+		eagle:         md.Eagle,
+		shadePre:      md.ShadePre,
+		smoothBase:    md.SmoothBase,
+		regionKinds:   md.RegionKinds,
+		rampGlow:      md.RampGlow,
+		termRegionW:   md.TermRegionWeight,
+		looRefit:      md.LooRefit,
+		mergeRefit:    md.MergeRefit,
+		rampWeight:    md.RampWeight,
+		bestOf:        md.BestOf,
+		analyticAlpha: md.AnalyticAlpha,
+		ste:           true,
+	}
+	if c.BestOf > 0 {
+		sp.bestOf = c.BestOf
 	}
 
 	// Alpha: organic (anime/photo) = semi-transparent for smooth gradients; flat = OPAQUE (crisp
@@ -339,6 +391,11 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 	// uses -1 as the "auto" sentinel, so any value >= 0 overrides.
 	if c.WeightStrength >= 0 {
 		sp.wstr = c.WeightStrength
+	}
+
+	// Ramp-weight boost: -1 = mode default; any >= 0 overrides (0 disables).
+	if c.RampWeight >= 0 {
+		sp.rampWeight = c.RampWeight
 	}
 
 	// Aspect slivers: flat 8, organic 6; explicit (>=0, incl 0 for round) overrides.
@@ -377,12 +434,57 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 	return sp
 }
 
+// The shadow clamp/cap pair of the sRGB-derivative perceptual weight is CONTENT-ADAPTIVE
+// (see the linear-light block in buildWeightMap). The original 0.02/16 pair UNDER-weights the
+// darkest zones relative to the true sRGB metric (a near-black dress sits below the clamp and
+// loses ~6× of its honest weight) — on DARK-DOMINANT art that is exactly where the translucent
+// facet ghosts survive, and 0.005/64 visibly deepens/cleans them (img_10: dress ghosts gone by
+// eye, face intact). But globally the stronger pair steals weight from bright content: light art
+// (img_5) pays ΔE 2.09→2.51 with SSIM/banding worse. The bank splits cleanly by the dark-pixel
+// fraction (linear luma < 0.02): dark arts sit at 0.43-0.63, everything else ≤ 0.24 — the 0.35
+// threshold has a wide margin on both sides (the borderline img_24 stays on the mild pair, where
+// the strong one measured mixed).
+const (
+	darkFracTau = 0.35 // fraction of linear-luma<0.02 pixels at which the art counts as dark-dominant
+)
+
+// DarkWeightParams returns the shadow clamp/cap pair of the perceptual weight for a target with
+// the given dark-pixel fraction — the SINGLE source for the studio (buildWeightMap) and the CLI's
+// mirrored -linear path. FH6_DARKW ("clamp,cap") overrides for lab A/Bs.
+func DarkWeightParams(darkFrac float64) (clamp, cap float64) {
+	clamp, cap = 0.02, 16
+	if darkFrac >= darkFracTau {
+		clamp, cap = 0.005, 64
+	}
+	if s := os.Getenv("FH6_DARKW"); s != "" {
+		fmt.Sscanf(s, "%f,%f", &clamp, &cap)
+	}
+	return clamp, cap
+}
+
+// DarkFrac measures the fraction of pixels whose LINEAR luma sits below 0.02 — the dark-dominance
+// feature DarkWeightParams keys on. pixels is the linear RGBA plane (len w*h*4).
+func DarkFrac(pixels []float32) float64 {
+	n := len(pixels) / 4
+	if n == 0 {
+		return 0
+	}
+	dark := 0
+	for i := 0; i < n; i++ {
+		y := 0.2126*pixels[i*4] + 0.7152*pixels[i*4+1] + 0.0722*pixels[i*4+2]
+		if y < 0.02 {
+			dark++
+		}
+	}
+	return float64(dark) / float64(n)
+}
+
 // buildWeightMap produces the per-pixel saliency weight. It optionally builds an edge-saliency map
 // (richer dilated V2 for flat/cutout, Sobel for smooth content), blends it toward uniform by
 // weight-strength, then — under linear-light output — multiplies in the perceptual sRGB-derivative
 // weight. Returns nil only when saliency weighting is off AND linear-light is off (the engine then
 // treats the run as uniform).
-func buildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr float64) []float32 {
+func buildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr, rampWeight float64) []float32 {
 	weighted := true
 	if c.Weighted != nil {
 		weighted = *c.Weighted
@@ -415,18 +517,21 @@ func buildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr
 				weight[i] = 1
 			}
 		}
+		// Dark-zone fidelity of the sRGB-derivative weight: the clamp/cap pair bounds how much the
+		// deep shadows may dominate, keyed on dark-dominance (single source: DarkWeightParams).
+		clampY, capF := DarkWeightParams(DarkFrac(prep.Pixels))
 		wp := make([]float32, w*h)
 		var sum float64
 		for i := 0; i < w*h; i++ {
 			y := 0.2126*prep.Pixels[i*4] + 0.7152*prep.Pixels[i*4+1] + 0.0722*prep.Pixels[i*4+2]
 			yd := float64(y)
-			if yd < 0.02 {
-				yd = 0.02 // clamp the dark blow-up of the sRGB derivative
+			if yd < clampY {
+				yd = clampY // clamp the dark blow-up of the sRGB derivative
 			}
 			d := 0.4396 * math.Pow(yd, -0.5833) // d/dlin of 1.055*lin^(1/2.4)-0.055
 			f := float32(d * d)
-			if f > 16 {
-				f = 16
+			if f > float32(capF) {
+				f = float32(capF)
 			}
 			wp[i] = f
 			sum += float64(f)
@@ -436,6 +541,26 @@ func buildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr
 			for i := range weight {
 				weight[i] *= wp[i] / mean // normalised so the overall weight scale is ~unchanged
 			}
+		}
+	}
+
+	// Ramp-weight boost: the edge-biased weight starves SMOOTH GRADIENT
+	// zones of shapes, so their few big facets stand out (the owner's complaint). Detect the ramp
+	// cells (metric.RampMap) and multiply their weight by (1 + rampWeight·ramp) so the sampler spends
+	// more of the budget there — "understand where the gradient is and push shapes into it". Content-
+	// adaptive by construction: cel/flat art has ~no ramp cells so this is inert there. rampWeight ≤ 0
+	// = off. Applied AFTER normalisation so it is a deliberate, un-normalised local up-weight.
+	if rampWeight > 0 {
+		if weight == nil {
+			weight = make([]float32, w*h)
+			for i := range weight {
+				weight[i] = 1
+			}
+		}
+		rm := metric.RampMap(prep.Pixels, w, h)
+		b := float32(rampWeight)
+		for i := range weight {
+			weight[i] *= 1 + b*rm[i]
 		}
 	}
 	return weight
@@ -461,10 +586,23 @@ type ModeDefaults struct {
 	PolishTau1  float64   // final polish edge softness
 	FalseEdge   float64   // false-edge additive polish loss λ (0 = off)
 	SSIM        float64   // SSIM additive polish loss λ (0 = off)
+	Eagle       float64   // EAGLE additive polish loss λ (0 = off)
 	Boundary    bool      // boundary-aware radius
 	Backfit     bool      // post-polish back-fitting
 	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
 	KneeFloor   float64   // knee absolute floor (frac of initialErr) so it trips on near-SOLVED flat content
+	ShadePre    bool      // shading pre-pass: claim coherent linear-ramp regions as base+gradient-word stacks
+	SmoothBase  bool      // smooth-region gradient base: claim LARGE smooth regions with jointly-solved base+gradient stacks
+	RegionKinds bool      // region-gated kind selection: rect/tri only where the target has hard structure
+	RampGlow    bool      // ramp-aware hotter glow swap: dissolve gradient patchwork with rimless glows where metric.RampMap flags a genuine gradient (needs RegionKinds)
+
+	SaliencyQuota    float64 // reserve this budget fraction for top-detail cells (eyes/faces); 0 = off
+	TermRegionWeight bool    // region-weighted FE/EAGLE polish terms: λ × (1−HardEdgeMap) — strong in smooth zones, ~zero on line-work
+	LooRefit         int     // exact leave-one-out prune→regrow→re-polish rounds after the polish (0 = off)
+	MergeRefit       bool    // merge near-duplicate pairs inside the LOO rounds (extra slot source; needs LooRefit>0)
+	RampWeight       float64 // boost the shape-budget weight in smooth-gradient (ramp) cells by (1+this·rampMap); 0 = off
+	AnalyticAlpha    bool    // analytic per-candidate alpha: eval picks the ΔSSE-min alpha from a grid over [alphaMin, 0.75] instead of a random draw
+	BestOf           int     // full-pipeline attempts with decorrelated seeds, keep the best (≤1 = single; never defaulted >1 — owner 2026-07-20: manual only, studio Advanced / CLI -best-of)
 }
 
 // ModeDefaultsFor returns the tuned defaults for a resolved preset (anime|photo|flat). palette is the
@@ -490,6 +628,26 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 	switch PresetMode(resolvedMode) {
 	case "photo":
 		d.WeightStr = 0.40
+		// Shading pre-pass, photo only (owner decision 2026-07-19): claim coherent linear-ramp
+		// regions (sky / metallic paint / soft studio backgrounds) as base-rect + gradient-word
+		// stacks before the greedy. SAFE BY CONSTRUCTION on content without such ramps: the claim
+		// gate requires the ramp to beat the flat cover by ≥30% exact-scored ΔSSE, else full
+		// rollback — the whole anime bench passes through bit-identical (0 claims). Anime cel is
+		// two-tone/flat by nature (OFF); flat/logo has no shading (OFF). See engine/shadepre.go.
+		d.ShadePre = true
+		// Smooth-region gradient base, photo too (owner decision 2026-07-20): large smooth zones
+		// (sky / bokeh / studio backgrounds) are exactly its content, and it is gate-safe by
+		// construction — every stack must contain an EARNING gradient layer over the hard base
+		// (region-restricted exact ΔSSE) or it rolls back entirely. The weighted-term flag stays
+		// off here: photo runs all perceptual λ terms at 0 (measured ΔE cost), so it would be inert.
+		d.SmoothBase = true
+		// Region-gated kinds for photo too (2026-07-20): the smooth-glow swap rides the kind gate,
+		// and photo's soft backgrounds (bokeh/sky) are exactly where the translucent-facet
+		// patchwork lives. Measured on img_10 photo @native: ΔE 3.25→3.16, p95 −3%, SSIM +0.008
+		// with the swap; the gate itself is inert on structured zones (full pool at hard cells).
+		d.RegionKinds = true
+		// LOO refit (see the anime case below for the measured rationale) — photo shares it.
+		d.LooRefit = 2
 	case "flat":
 		d.WeightStr = 0
 	default: // anime
@@ -501,7 +659,13 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// img_24/img_25/img_12 tie/inert; eye: smoother skin/hair, line work intact. Photo pays a
 		// consistent +1..2% weighted for the banding drop (OFF); flat is content-scattered (img_1
 		// line-art likes 0.008 — manual flag), so both stay 0.
-		d.FalseEdge = 0.004
+		// 2026-07-19 re-tune UNDER REGION WEIGHTING (the 0.004 was the global-λ-era compromise;
+		// EAGLE was re-tuned for TermRegionWeight but FE was not): grid {0.004,0.012,0.03,0.06} ×
+		// 3 imgs vs the artifact analyzer's false-edge total. 0.012 = strictly better on smooth
+		// cel (img_10 FE −6%, banding+SSIM better, ΔE unchanged), parity-plus on img_5, the usual
+		// spiky-content ΔE tax on img_24 (+0.09, the accepted family split). ≥0.03 buys more FE
+		// but starts washing color (ΔE 3.14→3.30→3.51).
+		d.FalseEdge = 0.012
 		// SSIM additive polish term (λ·Σ(1−SSIM_8×8) on luma — local contrast/structure SSE
 		// undercharges), anime only. GPU λ-grid {1e-4..0.02} × img_5/img_22/img_24 × seeds 1/2/3:
 		// SSIM/banding improve monotonically with λ (band −10..16%) but ΔE drifts past ~0.006;
@@ -510,6 +674,89 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// damage; painterly (img_24) a coin toss. Photo pays real colour (cat ΔE 2.87→3.08, +7%
 		// weighted at 0.01) — OFF; flat thin evidence (one image) — OFF, manual -polish-ssim.
 		d.SSIM = 0.006
+		// EAGLE additive polish term (λ·Σ|HP(var₃(Scharr))| mismatch — hard-edge STRUCTURE the
+		// magnitude-only FE relu can't see), anime only. GPU λ-grid {0.005/0.015/0.03} ×
+		// img_5/img_24 × seeds 1/2: smooth cel wins both seeds at 0.015 (−1.0/−3.0% SSE with
+		// SSIM/banding better; −8% at 0.005 on seed 2), spiky img_24 pays +1.3..1.8% SSE at
+		// perceptual parity — the same content split FE/SSIM показали. λ=1e-3 from the paper is an
+		// order too small here (term 0.1% of SSE); 0.015 ≈ 1% of SSE is the balance; ≥0.05
+		// over-presses everything. Wall cost on GPU ≈ 0. Devices without the term (old DLL,
+		// Vulkan pending its port) disable it instead of falling back to the CPU polish driver.
+		// 2026-07-20: with the REGION-WEIGHTED terms (TermRegionWeight below) the λ compromise
+		// moves — weighting by 1−HardEdgeMap zeroes the term on legitimate line-work, so smooth
+		// zones can take 0.1 (the weighted grid's working point; 0.05 ≈ neutral). Measured with
+		// SmoothBase as the combo: img_10 SSE parity + ΔE/p95/SSIM all better + visibly fewer
+		// translucent rims in smooth zones (the Nexus-screenshot patchwork), img_5 −7% SSE with
+		// every metric better, img_24 (spikes) pays +6% SSE — the family's known content split,
+		// accepted by the owner for the smooth-content win.
+		d.Eagle = 0.1
+		d.TermRegionWeight = true
+		// Region-gated kind selection, anime only (the generation-side fix for hard rects/tris
+		// "standing out" of organic content — the owner's original complaint). Host-path A/B,
+		// sRGB 3-channel map: img_5 −7.4/−0.9% across seeds with SSIM/banding better, img_22
+		// −1.5%, img_12/img_25 ties, img_24 +1.7..5.1% SSE at perceptual PARITY (eye: spikes a
+		// hair softer, shading cleaner — the perceptual intent). Per-cell gating runs inside the
+		// CUDA generators (fp_set_kind_gate), wall cost ≈ 0; photo unmeasured (no photo bench
+		// yet) and flat needs its rect-rich pool — both OFF.
+		d.RegionKinds = true
+		// Smooth-region gradient base (see the photo case for the gate-safety rationale): the
+		// other half of the anime combo above — claims replace the greedy's translucent facet
+		// patchwork in large smooth zones with 2-4 jointly-colour-solved gradient stacks.
+		d.SmoothBase = true
+		// LOO refit (2026-07-20, the owner's "shapes are wasted" complaint measured and fixed):
+		// after the polish, 17-25% of shapes are individually harmful-or-neutral in the FINAL
+		// stack (greedy scores at placement; later shapes overpaint). Two exact-LOO prune→regrow→
+		// re-polish rounds reclaim that budget: img_10 −10.5% SSE, img_5 −11.9%, img_24 −11.6%,
+		// with ΔE/p95/SSIM ALL better on every image, both seeds. Rounds converge at 2 (round 3
+		// prunes nothing); each round is gated end-to-end so it can never regress. Wall +30-50%
+		// (the owner: quality over time). Flat keeps BackFit instead (unmeasured overlap).
+		d.LooRefit = 2
+		// Analytic per-candidate alpha (2026-07-19 night), anime only: the eval epilogue re-solves
+		// the optimal color for a 6-point alpha grid over [alphaMin, 0.75] and keeps the ΔSSE-min
+		// pair — alpha becomes exact instead of ~U(alphaMin,1), at zero wall cost (the accumulators
+		// are alpha-independent). The 0.75 cap is essential: uncapped, the grid over-picks opaque
+		// greedy-optimal claims that kill the soft layering the polish co-adapts (img_5 SSIM −0.02).
+		// Capped: 7/9 SSE better (img_10 −1.7..−2.7%) across 3 imgs × 3 seeds, perceptual
+		// parity-or-better. Photo measured flat (+0.6% SSE, parity) — stays off there.
+		d.AnalyticAlpha = true
+		// Shading pre-pass for anime too (2026-07-20 night, the owner's "gradients stand out"
+		// complaint on ChatGPT-style art): claim coherent linear-ramp regions (lit walls, soft
+		// vignettes) as base+gradient-word stacks before the greedy — the ramp detector was
+		// photo-only while modern anime-tagged art is full of real ramps. Measured on img_9
+		// (ramp-heavy): SSIM +0.011/+0.014 with ΔE −0.2 and banding better on BOTH seeds — the
+		// biggest perceptual jump of the campaign (SSE pays up to +5%: the known smoothness split).
+		// Cel stays safe by the ≥30% gate: img_24 bit-identical, img_5 slightly better, img_10
+		// seed-noise. NB NOT combined with a hotter glow-swap (0.15/0.9) — measured anti-synergy.
+		d.ShadePre = true
+		// Merge consolidation inside the LOO rounds (owner's idea, 2026-07-20 night): collapse
+		// near-duplicate pairs (same kind, near-same color, IoU≥0.55 — the translucent-stack
+		// convergence greedy leaves in smooth cel) into one moment-fitted shape; the freed slots
+		// regrow on the residual under the round's e2e gate. Measured: img_10 SSE −1.7/−3.0% with
+		// false-edge −5% and SSIM +0.005 on BOTH seeds; img_5/img_24 parity (few mergeable pairs).
+		d.MergeRefit = true
+		// Saliency quota (built 2026-06-11, defaulted 2026-07-20 on the owner's "eyes break the
+		// image" complaint): the final 15% of the budget places shapes ONLY inside the top-detail
+		// cells, so eyes/faces can't be outbid by big soft regions. Measured: img_10 iris/pupil
+		// visibly reassemble (the exact complaint) with unweighted SSE −1.4% and banding better
+		// (ΔE +0.12 — budget honestly leaves the background); img_5 parity; img_24 (June) both
+		// irises alive. Photo unmeasured — off there.
+		d.SaliencyQuota = 0.15
+		// Ramp-weight boost (the "gradients stand out" complaint, 2026-07-20):
+		// up-weight the shape budget in smooth-gradient (ramp) cells so they get enough shapes to
+		// render smoothly — edge-biased weighting starves gradients, leaving big standout facets.
+		// metric.RampMap-gated so it self-limits on cel/line content. Measured: img_10 (ramp 0.148)
+		// SSE −2.2% + SSIM +0.001 + FE −2% with the dress folds visibly smoother (eye: dress crop),
+		// img_5 SSE −0.4% + SSIM +0.003 + banding better; 1.5 is the balanced point (2.5 over-pushes:
+		// img_5/img_9 SSIM regress). img_9 (ramp ~0) is near-inert. See metric/gradient.go RampMap.
+		d.RampWeight = 1.5
+		// Ramp-aware hotter glow swap (Options.RampGlow) is NOT defaulted — measured 2026-07-20 as a
+		// BUST. The idea: run the deep-smooth glow swap at tau 0.30 / prob 0.90 (vs the global 0.10 /
+		// 0.80) only where RampMap flags a genuine gradient, to recover the global-tau-raise img_10 win
+		// (SSE −4.7%, bokeh smoother) without its structured-content regression. It doesn't: the global
+		// win came from glow-swapping MODERATE-hardness cells (hard 0.1-0.3 — dress folds), but RampMap
+		// requires hard < 0.14, so ramp cells already glow at the global tau and the hot pair captures
+		// ~none of the win. Measured img_10 SSE +0.01% (parity), img_24 −0.44%, img_9 +0.13% — noise.
+		// Code kept + CLI-reachable (-ramp-glow); the device path is inert (byte-identical) when off.
 	}
 	if flat {
 		d.AspectMax = 8
@@ -633,6 +880,8 @@ func PresetMode(mode string) string {
 		return "flat" // hybrid line-art: OPAQUE flat fill (a white background stays clean — no semi-transparent casts) + FDoG ink lines on top
 	case "gaussian", "gauss", "smooth", "gradient":
 		return "gaussian" // NICHE: soft-glow reconstruction for smooth/gradient content (engine.GenerateGaussian)
+	case "pixel", "pixel-art", "pixelart":
+		return "pixel" // EXACT pixel-art reproduction (internal/pixel rect decomposition — no engine)
 	default: // "", "auto", "anime", "anime-ink", "hybrid", "shaded", "illustration", anything else
 		return "anime" // hybrid anime-ink/hybrid: semi-transparent fill (alive eyes/gradients) + FDoG ink on top
 	}
@@ -718,7 +967,7 @@ func resolveGaussian(prep imageio.Prepared, c Choices, w, h, shapes int) Resolve
 		Seed:          c.Seed,
 		TransparentBG: prep.HasTransparency,
 		Gaussian:      true,
-		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0, 0),
+		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0, 0, 0),
 	}
 	return Resolved{
 		Options: opt,
@@ -746,7 +995,7 @@ func gaussTrainIters(shapes int) int {
 	return it
 }
 
-func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda float64) engine.PolishOptions {
+func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda, eagleLambda float64) engine.PolishOptions {
 	o := engine.DefaultPolishOptions()
 	if iters > 0 {
 		o.Iters = iters
@@ -760,6 +1009,7 @@ func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda fl
 	o.STE = ste
 	o.FalseEdgeLambda = feLambda
 	o.SSIMLambda = ssimLambda
+	o.EagleLambda = eagleLambda
 	return o
 }
 

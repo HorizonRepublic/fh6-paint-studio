@@ -75,6 +75,19 @@ type PolishOptions struct {
 	// loss so local contrast/structure errors SSE undercharges are pressed during the descent.
 	// EXPERIMENT, additive-only per the OKLab lesson; 0 = off (CLI -polish-ssim).
 	SSIMLambda float64
+
+	// EagleLambda adds λ·Σ|HP(var₃(Scharr recon)) − HP(var₃(Scharr target))| (edge-aware gradient
+	// STRUCTURE mismatch — see eagleterm.go) to the polish loss. CPU polish driver only (a non-zero
+	// λ routes polish off the GPU, like FE before its port). 0 = off.
+	EagleLambda float64
+
+	// TermWeight (optional, len w*h) multiplies the FE/EAGLE per-pixel charges — REGION-WEIGHTED
+	// perceptual terms. Built from 1−metric.HardEdgeMap (Options.TermRegionWeight): the rim
+	// patchwork lives in SMOOTH zones, but a global λ strong enough to clean it over-presses
+	// legitimate line-work, so λ was capped low; weighting by smoothness lets λ run much stronger
+	// exactly where the artifact is and ~vanish on real edges. nil = uniform (the pre-weighting
+	// behaviour, bit-identical). Applies to FE + EAGLE (SSIM windows span regions — left uniform).
+	TermWeight []float32
 	STE        bool // straight-through estimator: FORWARD composites HARD coverage (the exact deliverable), BACKWARD keeps the SOFT surrogate dcov/dsdf for the geometry chain only. Closes the soft->hard snap gap (optimizes the shipped hard SSE directly). Default false (soft polish).
 
 	// Early-stop: break the loop once the polish hits DIMINISHING RETURNS — when the best-HARD
@@ -204,7 +217,7 @@ type PolishProbeResult struct {
 
 // PolishStepProbe runs ONE CPU forward+loss+backward at the given tau and returns the
 // result + layout. It is the reference the GPU polish primitives must match bit-for-bit.
-func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, bg model.RGBA, transparent bool, tau float64, ste, oklab bool, feLambda, ssimLambda float64) PolishProbeResult {
+func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, bg model.RGBA, transparent bool, tau float64, ste, oklab bool, feLambda, ssimLambda, eagleLambda float64, termWeight []float32) PolishProbeResult {
 	base := make([]float32, w*h*4)
 	if !transparent {
 		for i := 0; i < w*h; i++ {
@@ -235,7 +248,7 @@ func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, b
 	var fe *feState
 	var feAdj []float64
 	if feLambda > 0 {
-		fe = newFEState(target, w, h)
+		fe = newFEState(target, w, h, termWeight)
 		feAdj = fe.adj
 	}
 	var ss *ssimState
@@ -243,6 +256,13 @@ func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, b
 	if ssimLambda > 0 {
 		if ss = newSSIMState(target, w, h); ss != nil {
 			ssimAdj = ss.adj
+		}
+	}
+	var eag *eagleState
+	var eagAdj []float64
+	if eagleLambda > 0 {
+		if eag = newEagleState(target, w, h, termWeight); eag != nil {
+			eagAdj = eag.adj
 		}
 	}
 	polishForward(ps, base, render, below, bbx, w, h, tau, ste)
@@ -253,7 +273,10 @@ func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, b
 	if ss != nil {
 		loss += ssimLambda * ss.adjoint(render, w, h)
 	}
-	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, ste, oklab, feAdj, feLambda, ssimAdj, ssimLambda)
+	if eag != nil {
+		loss += eagleLambda * eag.adjoint(render, w, h)
+	}
+	polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, ste, oklab, feAdj, feLambda, ssimAdj, ssimLambda, eagAdj, eagleLambda)
 	hardScratch := make([]float32, w*h*4)
 	hardLoss := polishHardLoss(ps, base, target, weight, hardScratch, w, h, oklab, false)
 	if fe != nil {
@@ -261,6 +284,9 @@ func PolishStepProbe(shapes []model.Shape, target, weight []float32, w, h int, b
 	}
 	if ss != nil {
 		hardLoss += ssimLambda * ss.total(hardScratch, w, h)
+	}
+	if eag != nil {
+		hardLoss += eagleLambda * eag.total(hardScratch, w, h)
 	}
 
 	res := PolishProbeResult{N: n, Base: base, Render: render, Loss: loss, HardLoss: hardLoss,
@@ -353,6 +379,21 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		if !s.PolishSetSSIM(opt.SSIMLambda) && opt.SSIMLambda > 0 {
 			applog.Printf("polish: SSIM λ requested but the device lacks fp_set_polish_ssim — term disabled")
 		}
+	}
+	// EAGLE λ: same contract (always reset, device folds the term in).
+	if s, ok := accel.(interface{ PolishSetEagle(lambda float64) bool }); ok {
+		if !s.PolishSetEagle(opt.EagleLambda) && opt.EagleLambda > 0 {
+			applog.Printf("polish: EAGLE λ requested but the device lacks fp_set_polish_eagle — term disabled")
+		}
+	}
+	// Region term weight: same contract (always reset — nil clears a previous run's map). An old
+	// DLL without the export runs the terms UNWEIGHTED at the given λ (log, no CPU fallback).
+	if s, ok := accel.(interface{ PolishSetTermWeight(tw []float32) bool }); ok {
+		if !s.PolishSetTermWeight(opt.TermWeight) && opt.TermWeight != nil {
+			applog.Printf("polish: term weight requested but the device lacks fp_set_term_weight — weighting disabled")
+		}
+	} else if opt.TermWeight != nil {
+		applog.Printf("polish: term weight requested but the accel backend has no PolishSetTermWeight — weighting disabled")
 	}
 	defer accel.PolishFree()
 
@@ -651,7 +692,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	feLambda := opt.FalseEdgeLambda
 	var feAdj []float64
 	if feLambda > 0 {
-		fe = newFEState(target, w, h)
+		fe = newFEState(target, w, h, opt.TermWeight)
 		feAdj = fe.adj
 	}
 	// SSIM additive term (see ssimterm.go) — same contract as FE: descent + best-hard combined,
@@ -662,6 +703,16 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 	if ssimLambda > 0 {
 		if ss = newSSIMState(target, w, h); ss != nil {
 			ssimAdj = ss.adj
+		}
+	}
+	// EAGLE additive term (see eagleterm.go) — same contract: descent + best-hard combined, gate pure
+	// SSE. CPU driver only for now (a non-zero λ routes polish off the GPU, like FE pre-port).
+	var eag *eagleState
+	eagLambda := opt.EagleLambda
+	var eagAdj []float64
+	if eagLambda > 0 {
+		if eag = newEagleState(target, w, h, opt.TermWeight); eag != nil {
+			eagAdj = eag.adj
 		}
 	}
 	polishForward(ps, base, render, below, bbx, w, h, opt.Tau0, opt.STE)
@@ -683,6 +734,9 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		if ss != nil {
 			hl += ssimLambda * ss.total(hardScratch, w, h)
 		}
+		if eag != nil {
+			hl += eagLambda * eag.total(hardScratch, w, h)
+		}
 		return hl
 	}
 	bestHard := hardCheck()
@@ -690,6 +744,12 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		sse0 := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false, true)
 		applog.Printf("polish-debug(cpu) false-edge: sse0=%.1f fe0=%.1f lambda=%g (term=%.1f, %.1f%% of sse)",
 			sse0, (bestHard-sse0)/feLambda, feLambda, bestHard-sse0, 100*(bestHard-sse0)/sse0)
+	}
+	if polishDebug && eag != nil {
+		sse0 := polishHardLoss(ps, base, target, weight, hardScratch, w, h, false, true)
+		e0 := eag.total(hardScratch, w, h)
+		applog.Printf("polish-debug(cpu) eagle: sse0=%.1f e0=%.1f lambda=%g (term=%.1f, %.1f%% of sse)",
+			sse0, e0, eagLambda, eagLambda*e0, 100*eagLambda*e0/sse0)
 	}
 	bestP := snapshotParams(ps)
 	checkEvery := maxInt(1, opt.Iters/25)
@@ -723,7 +783,10 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		if ss != nil {
 			post += ssimLambda * ss.adjoint(render, w, h)
 		}
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE, false, feAdj, feLambda, ssimAdj, ssimLambda)
+		if eag != nil {
+			post += eagLambda * eag.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, opt.STE, false, feAdj, feLambda, ssimAdj, ssimLambda, eagAdj, eagLambda)
 		adamStep(ps, opt, it+1, w, h, 1)
 		last := it == opt.Iters-1
 		if (it+1)%checkEvery == 0 || last {
@@ -783,7 +846,10 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		if ss != nil {
 			ss.adjoint(render, w, h)
 		}
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, fineTau, opt.STE, opt.OKLab, feAdj, feLambda, ssimAdj, ssimLambda)
+		if eag != nil {
+			eag.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, fineTau, opt.STE, opt.OKLab, feAdj, feLambda, ssimAdj, ssimLambda, eagAdj, eagLambda)
 		adamStep(ps, fineOpt, it+1, w, h, polishFineLRScale)
 		if (it+1)%polishFineCheck == 0 || it == fineCap-1 {
 			hl := hardCheck()
@@ -1064,7 +1130,7 @@ func polishLoss(render, target, weight []float32, w, h int, oklab bool) float64 
 
 // polishBackward accumulates dLoss/dparam into each pshape's grad slice,
 // recomputing per-pixel gradients in a reverse (top-to-bottom) pass.
-func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste, oklab bool, feAdj []float64, feLambda float64, ssimAdj []float64, ssimLambda float64) {
+func polishBackward(ps []pshape, base, render, target, weight []float32, below [][]float32, bbx [][4]int, dC []float64, w, h int, tau float64, ste, oklab bool, feAdj []float64, feLambda float64, ssimAdj []float64, ssimLambda float64, eagAdj []float64, eagLambda float64) {
 	_ = base
 	// dL/dC_final = 2*weight*(C-target) per channel (OKLab mode: 2*weight*Jᵀ*ΔLab — see oklab.go).
 	// The false-edge term (feAdj from feState.adjoint, same forward render) chains through
@@ -1081,13 +1147,16 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 				dC[p+c] = 2 * wt * float64(render[p+c]-target[p+c])
 			}
 		}
-		if feAdj != nil || ssimAdj != nil {
+		if feAdj != nil || ssimAdj != nil || eagAdj != nil {
 			var a float64
 			if feAdj != nil {
 				a = feLambda * feAdj[idx]
 			}
 			if ssimAdj != nil {
 				a += ssimLambda * ssimAdj[idx]
+			}
+			if eagAdj != nil {
+				a += eagLambda * eagAdj[idx]
 			}
 			dC[p+0] += a * feLumaR
 			dC[p+1] += a * feLumaG

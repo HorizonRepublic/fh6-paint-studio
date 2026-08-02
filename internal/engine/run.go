@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
@@ -40,6 +41,7 @@ type run struct {
 	orient     []float32
 	detailGrid []float32
 	boundCtx   *boundaryCtx
+	kindGate   *kindGate
 	devSearch  randomSearcher
 	devMoment  momentSearcher
 
@@ -71,6 +73,12 @@ func Run(be backend.Backend, opt Options) Result {
 			r.greedy() // ...then greedy fills the remaining budget with detail (two-phase economy)
 		}
 	} else {
+		if r.opt.SmoothBase {
+			r.smoothBase() // broad smooth-region stacks claim FIRST (deepest in the z-stack)
+		}
+		if r.opt.ShadePrepass && r.glyphs {
+			r.shadePrepass()
+		}
 		if r.opt.GlyphPrepass && r.glyphs {
 			r.glyphPrepass()
 		}
@@ -221,6 +229,21 @@ func newRun(be backend.Backend, opt Options) *run {
 		}
 	}
 
+	// Region-gated kinds (RegionKinds; anime default): precompute the target's hard-structure map
+	// ONCE. Candidate kind picks draw the full pool only where the target itself has line-work/
+	// wedges and fall back to ellipse in smooth shading (regionkinds.go) — the generation-side fix
+	// for the standout rect/tri artifact. The on-device generators gate per-cell via
+	// fp_set_kind_gate; a device that searches on-device but lacks the export DISABLES the gate
+	// (a silent 2× host-generation wall regression is worse than losing the default — rebuild the
+	// DLL, or force host gating with OnDeviceSearch off).
+	var kg *kindGate
+	if opt.RegionKinds {
+		kg = &kindGate{hard: metric.HardEdgeMap(be.Target(), w, h), w: w, h: h}
+		if opt.RampGlow {
+			kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
+		}
+	}
+
 	// On-device search: if requested and the backend supports it, each shape's
 	// random-candidate phase runs entirely on the GPU (generate+score+argmin, one call,
 	// no per-chunk host transfer). Upload the fixed orientation map once and build the
@@ -242,11 +265,62 @@ func newRun(be backend.Backend, opt Options) *run {
 			devMoment = m
 		}
 	}
+	// Region gate × device generators: upload the map (fp_set_kind_gate) when supported, else
+	// disable the gate (see the comment above). ALWAYS clear a stale map when the gate is off —
+	// a pooled backend must not carry the previous run's gate.
+	if gk, ok := be.(deviceKindGater); ok {
+		if kg != nil && (devSearch != nil || devMoment != nil) {
+			if !gk.SetKindGate(kg.hard) {
+				applog.Printf("region-kinds: device search lacks fp_set_kind_gate — gate disabled (rebuild the DLL, or disable on-device search to force host gating)")
+				kg = nil
+			}
+		}
+		if kg == nil {
+			_ = gk.SetKindGate(nil)
+		}
+		// Deep-smooth glow swap rides the gate: same degradation contract (an old DLL without the
+		// export runs the plain ellipse gate — visibly weaker in smooth zones, never slower).
+		if gs, ok2 := be.(interface{ SetGlowSwap(tau, prob float32) bool }); ok2 {
+			tau, prob := float32(0), float32(0)
+			if kg != nil {
+				tau, prob = smoothGlowTau, smoothGlowProb
+			}
+			if !gs.SetGlowSwap(tau, prob) && kg != nil && smoothGlowProb > 0 {
+				applog.Printf("region-kinds: device lacks fp_set_glow_swap — glow swap disabled on-device (rebuild the DLL)")
+			}
+		}
+		// Ramp-aware hotter glow swap (Options.RampGlow) rides the same gate: upload the ramp map +
+		// hot params where present, else clear (a pooled backend must not carry a stale ramp map).
+		if rg, ok3 := be.(interface {
+			SetRampGlow(ramp []float32, thresh, tau, prob float32) bool
+		}); ok3 {
+			if kg != nil && kg.ramp != nil {
+				if !rg.SetRampGlow(kg.ramp, rampGlowThresh, smoothGlowTauHot, smoothGlowProbHot) {
+					applog.Printf("region-kinds: device lacks fp_set_ramp_glow — plain glow swap kept (rebuild the DLL)")
+				}
+			} else {
+				_ = rg.SetRampGlow(nil, 0, 0, 0)
+			}
+		}
+	}
+	// Analytic-alpha grid: eval re-solves the optimal color per grid alpha and keeps the ΔSSE-min
+	// (alpha, color) pair — each candidate's alpha becomes exact instead of sampled. Only sensible
+	// where alpha is free (organic modes); ALWAYS cleared when off so a pooled backend never
+	// carries the previous run's grid.
+	if ag, ok := be.(interface{ SetAlphaGrid([]float32) error }); ok {
+		if opt.AnalyticAlpha && allowAlpha {
+			if err := ag.SetAlphaGrid(alphaGridValues(alphaMin)); err != nil {
+				applog.Printf("analytic-alpha: %v — disabled (rebuild the DLL)", err)
+			}
+		} else {
+			_ = ag.SetAlphaGrid(nil)
+		}
+	}
 	kindCDF := buildKindCDF(kinds, kindWeights)
 	tm.Setup = time.Since(setupStart)
 
 	glyphs := false
-	if opt.GlyphDict || opt.GlyphPrepass {
+	if opt.GlyphDict || opt.GlyphPrepass || opt.ShadePrepass || opt.SmoothBase {
 		if dme, ok := be.(deviceMaskEvaluator); ok && dme.MasksOnDevice() {
 			glyphs = true
 		}
@@ -258,7 +332,7 @@ func newRun(be backend.Backend, opt Options) *run {
 		allowAlpha: allowAlpha, alphaMin: alphaMin, maxNI: maxNI, genTarget: genTarget,
 		moveStep: moveStep, radiusStep: radiusStep, rounds: rounds, perRound: perRound,
 		detailStart: detailStart,
-		orient:      orient, detailGrid: detailGrid, boundCtx: boundCtx,
+		orient:      orient, detailGrid: detailGrid, boundCtx: boundCtx, kindGate: kg,
 		devSearch: devSearch, devMoment: devMoment, src: newShapeSource(opt),
 		initCanvas: initCanvas, shapes: shapes, grid: grid, gw: gw, gh: gh,
 		sampler: sampler, persist: persist, glyphs: glyphs, initialErr: initialErr,

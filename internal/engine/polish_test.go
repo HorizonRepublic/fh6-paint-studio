@@ -62,7 +62,7 @@ func TestPolishGradientFD(t *testing.T) {
 		var fe *feState
 		var feAdj []float64
 		if tc.feLambda > 0 {
-			fe = newFEState(target, w, h)
+			fe = newFEState(target, w, h, nil)
 			feAdj = fe.adj
 		}
 		var ssim *ssimState
@@ -78,7 +78,7 @@ func TestPolishGradientFD(t *testing.T) {
 		if ssim != nil {
 			ssim.adjoint(render, w, h)
 		}
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda, ssimAdj, tc.ssimLambda)
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda, ssimAdj, tc.ssimLambda, nil, 0)
 		ana := make([][10]float64, len(ps))
 		for i := range ps {
 			ana[i] = ps[i].grad

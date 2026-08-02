@@ -1,9 +1,10 @@
+//go:build cuda
+
 package engine
 
 import (
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -41,8 +42,8 @@ func TestBackFitNeverIncreasesError(t *testing.T) {
 			BackFitFrac:   0.25,
 		}
 	}
-	base := Run(cpu.New(target, w, h, 8), opts(false))
-	bf := Run(cpu.New(target, w, h, 8), opts(true))
+	base := Run(newTestBackend(t, target, w, h, 8), opts(false))
+	bf := Run(newTestBackend(t, target, w, h, 8), opts(true))
 	if bf.FinalError > base.FinalError+1e-6 {
 		t.Fatalf("back-fitting increased error: %.6f (backfit) > %.6f (baseline)", bf.FinalError, base.FinalError)
 	}
@@ -83,8 +84,8 @@ func TestBackFitPolishEndToEndGate(t *testing.T) {
 			BackFitFrac:   0.25,
 		}
 	}
-	base := Run(cpu.New(target, w, h, 8), opts(false)) // polish only
-	bf := Run(cpu.New(target, w, h, 8), opts(true))    // polish + back-fitting (end-to-end gated)
+	base := Run(newTestBackend(t, target, w, h, 8), opts(false)) // polish only
+	bf := Run(newTestBackend(t, target, w, h, 8), opts(true))    // polish + back-fitting (end-to-end gated)
 	if bf.FinalError > base.FinalError+1e-6 {
 		t.Fatalf("end-to-end gate failed: backfit+polish %.6f > polish-only %.6f", bf.FinalError, base.FinalError)
 	}
