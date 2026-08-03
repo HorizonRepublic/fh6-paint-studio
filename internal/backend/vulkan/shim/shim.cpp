@@ -92,7 +92,8 @@ int g_w = 0, g_h = 0, g_maxCands = 0, g_grid = 0;
 int g_sampleBudget = 4000;
 int g_lastError = 0;
 
-struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; }; // agN/ag = analytic-alpha grid (fp_set_alpha_grid), agN=0 off
+struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; int32_t gradOn; }; // agN/ag = analytic-alpha grid (fp_set_alpha_grid), agN=0 off; gradOn = per-pixel-alpha scoring for the radial gradients
+int g_gradOn = 0;
 struct ApplyPC { int32_t kind; float p0, p1, p2, p3, p4, p5; float cr, cg, cb, ca; int32_t W, H; };
 struct GridPC  { int32_t W, H, gw, gh; };
 
@@ -1326,7 +1327,7 @@ API void fp_eval(const float* cands, int n, float* out) {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_evalSet, 0, nullptr);
-    EvalPC pc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}};
+    EvalPC pc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1); // one workgroup per candidate
     flushBarrier();
@@ -1573,6 +1574,12 @@ API void fp_reset(const float* canvas) {
 API void fp_set_sample_budget(int n) { g_sampleBudget = (n < 1) ? 4000 : n; }
 
 API int fp_last_error() { int e = g_lastError; g_lastError = 0; return e; }
+
+// fp_set_gradients tells fp_eval the batch may contain the native gradient kinds (KindGlow/
+// KindDisk), which carry a per-pixel alpha. Off, they score as flat ellipses — the same split the
+// CUDA shim has between its warp (hard) and block (gradient) eval kernels, kept so the on-device
+// search behaves identically on both backends.
+API void fp_set_gradients(int on) { g_gradOn = on ? 1 : 0; }
 
 // ===================== joint-polish API (mirrors shim.cu fp_polish_*) =====================
 

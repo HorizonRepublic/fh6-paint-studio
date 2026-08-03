@@ -67,6 +67,7 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
+	procGradients,
 	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
@@ -130,6 +131,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")     // optional: SSIM additive polish term
 	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")   // optional: EAGLE additive polish term
 	g.procKindGate, _ = dll.FindProc("fp_set_kind_gate")      // optional: region-kinds per-pixel gate
+	g.procGradients, _ = dll.FindProc("fp_set_gradients")     // optional: per-pixel-alpha eval for glow/disk
 	g.procGlowSwap, _ = dll.FindProc("fp_set_glow_swap")      // optional: deep-smooth glow swap
 	g.procRampGlow, _ = dll.FindProc("fp_set_ramp_glow")      // optional: ramp-aware hotter glow swap
 	g.procAlphaGrid, _ = dll.FindProc("fp_set_alpha_grid")    // optional: analytic-alpha grid in the eval epilogue
@@ -198,10 +200,9 @@ func (g *Vulkan) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
-		// The Vulkan eval kernel has no mask/gradient geometry yet (Phase 2+): its inside
-		// switch falls through to ELLIPSE for kind >= KindMaskBase and rejects gradients.
-		// Reject mask candidates here (fail-loud, never selected); the on-device generator
-		// never emits masks, so this is inert for the default pipeline.
+		// The eval kernel scores the hard kinds and the radial gradients (glow/disk); the
+		// dictionary masks are not in it yet, so reject those here (fail-loud, never selected)
+		// rather than let the kernel's inside switch treat one as an ellipse.
 		if cands[i].Kind >= model.KindMaskBase {
 			out[i] = backend.EvalResult{Score: maskRejected}
 			continue
@@ -366,6 +367,17 @@ func (g *Vulkan) SetKindGate(hard []float32) bool {
 	}
 	g.procKindGate.Call(fptr(hard))
 	runtime.KeepAlive(hard)
+	return true
+}
+
+// SetGradients tells the eval kernel the batch may contain the native gradient kinds, which carry
+// a per-pixel alpha. Off (the greedy's hard path), a glow scores as a flat ellipse — mirroring the
+// CUDA warp/block split, so the on-device search picks the same shapes on both backends.
+func (g *Vulkan) SetGradients(on bool) bool {
+	if g.procGradients == nil {
+		return false
+	}
+	g.procGradients.Call(uintptr(b2i32(on)))
 	return true
 }
 

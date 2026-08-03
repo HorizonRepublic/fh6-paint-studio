@@ -19,6 +19,7 @@ layout(std430, binding = 4) writeonly buffer Out    { float outb[]; };
 layout(push_constant) uniform PC {
     int n; int W; int H; int sampleBudget;
     int agN; float ag0; float ag1; float ag2; float ag3; float ag4; float ag5;
+    int gradOn; // 1 = score the radial gradients with their per-pixel alpha (fp_set_gradients)
 } pc;
 
 const int   NACC     = 19;
@@ -63,6 +64,34 @@ bool insideShape(int kind, float P[6], int x, int y) {
     }
 }
 
+// ---- radial-gradient coverage (mirrors raster.FalloffGlow / FalloffDisk and shim.cu gradFalloff) ----
+// The native FH6 gradient kinds (KindGlow=4, KindDisk=5) contribute a per-pixel alpha
+// A*falloff(t), t = elliptical normalised radius. Constants are calibrated in-game; they must
+// match internal/raster/gradient.go and the CUDA shim exactly.
+#define GRAD_GLOW_E 0.0820849986238988
+float gradFalloff(int kind, float t2) {
+    if (t2 >= 1.0) return 0.0;
+    if (kind == 4) { // soft gaussian glow: 0.89 * (exp(-2.5 t2) - e) / (1 - e)
+        float g = (exp(-2.5 * t2) - float(GRAD_GLOW_E)) / (1.0 - float(GRAD_GLOW_E));
+        return 0.89 * g;
+    }
+    float t = sqrt(t2); // disk: opaque core to 0.40, then 1 - smoothstep over the rim
+    if (t <= 0.40) return 1.0;
+    float u = (t - 0.40) * (1.0 / 0.60);
+    return 1.0 - (3.0 * u * u - 2.0 * u * u * u);
+}
+
+float gradCovP(int kind, float P[6], int x, int y) {
+    float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+    float th = P[4] * 0.017453292519943295;
+    float c = cos(th), sn = sin(th);
+    float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
+    float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
+}
+
+bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+
 void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out int xMax, out int yMax) {
     if (kind == 2) {
         float minX = min(P[0], min(P[2], P[4])), maxX = max(P[0], max(P[2], P[4]));
@@ -106,7 +135,7 @@ void main() {
         P[3] = cands[base + 4u]; P[4] = cands[base + 5u]; P[5] = cands[base + 6u];
         Ain = cands[base + 10u];
 
-        if (kind <= 3) {
+        if (kind <= 5) {
             int xMin, yMin, xMax, yMax;
             bboxOf(kind, P, pc.W, pc.H, xMin, yMin, xMax, yMax);
             int area = (xMax - xMin + 1) * (yMax - yMin + 1);
@@ -115,6 +144,33 @@ void main() {
             int cols = (xMax - xMin) / step + 1;
             int rows = (yMax - yMin) / step + 1;
             int total = cols * rows;
+            if (isGradKind(kind) && pc.gradOn != 0) {
+                // Per-pixel alpha a(x)=A*cov. The accumulator slots differ from the hard path:
+                // L0=sum(w a^2) L1=n L2=n_transparent | L3-5=sum(w a r) | L6-8=sum(w a^2 s) |
+                // L9-11=sum(w a r s) | L12-14=sum(w a^2 s^2) | L15=alpha dSSE | L16=spill.
+                float ac = clamp(Ain, 1e-3, 1.0);
+                for (int tt = int(lid); tt < total; tt += 128) {
+                    int x = xMin + (tt % cols) * step;
+                    int y = yMin + (tt / cols) * step;
+                    float cov = gradCovP(kind, P, x, y);
+                    if (cov <= 0.0) continue;
+                    float ap = ac * cov;
+                    int idx = y * pc.W + x, p = idx * 4;
+                    float ta = target[p + 3];
+                    float wgt = weightb[idx];
+                    float wa = wgt * ap, wa2 = wa * ap;
+                    if (ta < 0.5) { L[2] += 1.0; L[16] += wa2; continue; }
+                    float sr = canvasb[p], sg = canvasb[p + 1], sb = canvasb[p + 2], sa = canvasb[p + 3];
+                    float rr = target[p] - sr, rg = target[p + 1] - sg, rb = target[p + 2] - sb;
+                    L[0] += wa2; L[1] += 1.0;
+                    L[3] += wa * rr; L[4] += wa * rg; L[5] += wa * rb;
+                    L[6] += wa2 * sr; L[7] += wa2 * sg; L[8] += wa2 * sb;
+                    L[9] += wa * rr * sr; L[10] += wa * rg * sg; L[11] += wa * rb * sb;
+                    L[12] += wa2 * sr * sr; L[13] += wa2 * sg * sg; L[14] += wa2 * sb * sb;
+                    float oms = 1.0 - sa;
+                    L[15] += wgt * (ap * ap * oms * oms - 2.0 * ap * oms * (ta - sa));
+                }
+            } else
             for (int tt = int(lid); tt < total; tt += 128) {
                 int x = xMin + (tt % cols) * step;
                 int y = yMin + (tt / cols) * step;
@@ -148,7 +204,34 @@ void main() {
     if (a < 1e-3LF) a = 1e-3LF;
     if (a > 1.0LF) a = 1.0LF;
     double W_ = double(sh[0]), nn = double(sh[1]), nt = double(sh[2]);
-    if (kind > 3 || nn < 1.0LF || W_ <= 0.0LF) { outb[ob] = REJECTED; return; }
+    if (isGradKind(kind) && pc.gradOn != 0) {
+        // Gradient epilogue: the per-pixel alpha makes the optimal colour a weighted ratio and the
+        // dSSE a quadratic in it. Mirrors the CUDA gradient branch term for term.
+        double saa = W_;
+        if (nn < 1.0LF || saa <= 0.0LF) { outb[ob] = REJECTED; return; }
+        if (nt > 0.0LF && nt > 1.5LF * nn) { outb[ob] = REJECTED; return; }
+        double sarR = double(sh[3]), sarG = double(sh[4]), sarB = double(sh[5]);
+        double saasR = double(sh[6]), saasG = double(sh[7]), saasB = double(sh[8]);
+        double sarsR = double(sh[9]), sarsG = double(sh[10]), sarsB = double(sh[11]);
+        double saassR = double(sh[12]), saassG = double(sh[13]), saassB = double(sh[14]);
+        double dAcc = double(sh[15]), saaT = double(sh[16]);
+        double oR = clamp((sarR + saasR) / saa, 0.0LF, 1.0LF);
+        double oG = clamp((sarG + saasG) / saa, 0.0LF, 1.0LF);
+        double oB = clamp((sarB + saasB) / saa, 0.0LF, 1.0LF);
+        double td = dAcc;
+        td += 2.0LF * sarsR + saassR - 2.0LF * oR * (sarR + saasR) + oR * oR * saa;
+        td += 2.0LF * sarsG + saassG - 2.0LF * oG * (sarG + saasG) + oG * oG * saa;
+        td += 2.0LF * sarsB + saassB - 2.0LF * oB * (sarB + saasB) + oB * oB * saa;
+        if (nt > 0.0LF) {
+            double spillFrac = nt / (nn + nt);
+            td += saaT * (1.0LF + 2.0LF * spillFrac) * (oR * oR + oG * oG + oB * oB + 1.0LF);
+        }
+        outb[ob] = float(td * double(step * step));
+        outb[ob + 1u] = float(oR); outb[ob + 2u] = float(oG); outb[ob + 3u] = float(oB);
+        outb[ob + 4u] = Ain;
+        return;
+    }
+    if (kind > 5 || nn < 1.0LF || W_ <= 0.0LF) { outb[ob] = REJECTED; return; }
     if (nt > 0.0LF && nt > 1.5LF * nn) { outb[ob] = REJECTED; return; }
     double sTR = double(sh[3]), sTG = double(sh[4]), sTB = double(sh[5]), sTA = double(sh[6]);
     double sCR = double(sh[7]), sCG = double(sh[8]), sCB = double(sh[9]), sCA = double(sh[10]);
