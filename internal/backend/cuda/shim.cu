@@ -1339,6 +1339,21 @@ static double* d_ploss_partial = nullptr;    // per-block partial loss, up to 10
 static float* d_pdcsnap = nullptr;           // tiled backward Pass A: dC-as-seen-by-shape, sized == d_pbelow
 static int  g_pN = 0;
 static long g_pbelowCap = 0;
+
+// SHAPE BINNING. The polish kernels are thread-per-pixel and used to walk the ENTIRE shape list
+// per pixel just to bbox-test it away: at 3000 shapes over an 11.6 MP canvas that is 35 billion
+// rejected tests per pass, and the transparent surround (a third of the canvas at the default
+// pad) pays it in full for nothing. Binning shapes into tiles once per upload lets each pixel walk
+// only the handful whose bbox reaches its tile. The list is built in ascending shape order, so the
+// composite order — and therefore the result — is unchanged; the per-pixel bbox test still runs.
+#define PTILE 32
+static int* d_tileCount = nullptr; // shapes overlapping each tile
+static int* d_tileOff   = nullptr; // prefix sum over d_tileCount, nTiles+1 entries
+static int* d_tileList  = nullptr; // shape indices per tile, ascending
+static int* d_tileTotal = nullptr; // device scalar: total list length
+static long long g_tileListCap = 0;
+static int g_tilesX = 0, g_tilesY = 0, g_nTiles = 0;
+static int g_binned = 0; // 0 = lists unusable this iteration (too large) -> kernels scan all shapes
 static int  g_polishSTE = 0; // straight-through: hard forward coverage, soft surrogate gradient
 static int  g_polishOKLab = 0; // perceptual loss: OKLab colour distance in loss/dcinit/hard (mirrors engine/oklab.go)
 
@@ -1695,17 +1710,56 @@ __global__ void polishGradReduceAll(const double* gpartial, double* pgrad) {
 // or reverse (backward dC), replacing the N sequential per-shape kernel launches with O(1)
 // launches. Mirrors the per-shape kernels above byte-for-byte (incl. gradient kinds). =====
 
+__global__ void tileBinCount(const int* pbbx, int n, int tilesX, int nTiles, int* counts) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    int x0 = (t % tilesX) * PTILE, y0 = (t / tilesX) * PTILE;
+    int x1 = x0 + PTILE - 1, y1 = y0 + PTILE - 1;
+    int c = 0;
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1) continue;
+        c++;
+    }
+    counts[t] = c;
+}
+
+__global__ void tileBinScan(const int* counts, int nTiles, int* offs, int* total) {
+    if (blockIdx.x || threadIdx.x) return; // nTiles is ~10k; a sequential scan here costs microseconds
+    int acc = 0;
+    for (int t = 0; t < nTiles; t++) { offs[t] = acc; acc += counts[t]; }
+    offs[nTiles] = acc;
+    *total = acc;
+}
+
+__global__ void tileBinFill(const int* pbbx, int n, int tilesX, int nTiles, const int* offs, int* list) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    int x0 = (t % tilesX) * PTILE, y0 = (t / tilesX) * PTILE;
+    int x1 = x0 + PTILE - 1, y1 = y0 + PTILE - 1;
+    int w = offs[t];
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1) continue;
+        list[w++] = si;
+    }
+}
+
 // polishForwardTiled — render = base then composite every shape in order (one dispatch).
 __global__ void polishForwardTiled(const float* base, float* render, float* below,
                                    const double* pP, const double* pcol, const int* pkind,
                                    const int* pbbx, const long long* pboff, int n, int W, int H,
-                                   double tau, int ste) {
+                                   double tau, int ste,
+                                   const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < n; si++) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = lo; k < hi; k++) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1738,13 +1792,17 @@ __global__ void polishForwardTiled(const float* base, float* render, float* belo
 // polishHardTiled — HARD-coverage deliverable render (no below snapshot), one dispatch.
 __global__ void polishHardTiled(const float* base, float* render, const double* pP,
                                 const double* pcol, const int* pkind, const int* pbbx,
-                                int n, int W, int H) {
+                                int n, int W, int H,
+                                const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < n; si++) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = lo; k < hi; k++) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1777,13 +1835,17 @@ __global__ void polishHardTiled(const float* base, float* render, const double* 
 // conditions match exactly (else Pass B could read an unwritten dcsnap slot).
 __global__ void polishDCWalk(const float* dC, float* dcsnap, const double* pP, const double* pcol,
                              const int* pkind, const int* pbbx, const long long* pboff, int n,
-                             int W, int H, double tau, int ste) {
+                             int W, int H, double tau, int ste,
+                             const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
-    for (int si = n - 1; si >= 0; si--) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = hi - 1; k >= lo; k--) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -2672,6 +2734,12 @@ API void fp_polish_setup(const float* base, int n) {
     if (!d_pdC)     cudaMalloc(&d_pdC, npix * 4 * sizeof(float));
     if (!d_ploss)   cudaMalloc(&d_ploss, sizeof(double));
     if (!d_ploss_partial) cudaMalloc(&d_ploss_partial, 1024 * sizeof(double)); // max 1024 loss blocks
+    g_tilesX = (g_w + PTILE - 1) / PTILE;
+    g_tilesY = (g_h + PTILE - 1) / PTILE;
+    g_nTiles = g_tilesX * g_tilesY;
+    if (!d_tileCount) cudaMalloc(&d_tileCount, (size_t)g_nTiles * sizeof(int));
+    if (!d_tileOff)   cudaMalloc(&d_tileOff, ((size_t)g_nTiles + 1) * sizeof(int));
+    if (!d_tileTotal) cudaMalloc(&d_tileTotal, sizeof(int));
     cudaFree(d_pP); cudaFree(d_pcol); cudaFree(d_pkind); cudaFree(d_pbbx); cudaFree(d_pboff); cudaFree(d_pgrad);
     cudaFree(d_pgrad_partial);
     cudaMalloc(&d_pP, (size_t)n * 6 * sizeof(double));
@@ -2682,6 +2750,28 @@ API void fp_polish_setup(const float* base, int n) {
     cudaMalloc(&d_pgrad, (size_t)n * 10 * sizeof(double));
     cudaMalloc(&d_pgrad_partial, (size_t)n * PMAXBLK * 10 * sizeof(double)); // per (shape,block) partial grad
     cudaMemcpy(d_pbase, base, npix * 4 * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+// buildTileBins re-bins the shapes after every upload (the expanded bboxes move with tau). Falls
+// back to the unbinned scan when the lists would not fit the cap — correctness never depends on it.
+static void buildTileBins() {
+    const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
+    g_binned = 0;
+    if (g_nTiles <= 0 || g_pN <= 0) return;
+    int tblocks = (g_nTiles + 255) / 256;
+    tileBinCount<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileCount);
+    tileBinScan<<<1, 1>>>(d_tileCount, g_nTiles, d_tileOff, d_tileTotal);
+    int total = 0;
+    gpuWait(WAIT_READ);
+    cudaMemcpy(&total, d_tileTotal, sizeof(int), cudaMemcpyDeviceToHost);
+    if (total <= 0 || (long long)total > cap) return;
+    if ((long long)total > g_tileListCap) {
+        cudaFree(d_tileList);
+        if (cudaMalloc(&d_tileList, (size_t)total * sizeof(int)) != cudaSuccess) { d_tileList = nullptr; g_tileListCap = 0; return; }
+        g_tileListCap = total;
+    }
+    tileBinFill<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileOff, d_tileList);
+    g_binned = 1;
 }
 
 API void fp_polish_upload(const double* P, const double* col, const int* kinds,
@@ -2699,6 +2789,7 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
         cudaMalloc(&d_pdcsnap, (size_t)belowTotal * sizeof(float)); // tiled backward Pass A snapshot
         g_pbelowCap = belowTotal;
     }
+    buildTileBins();
 }
 
 // fp_polish_forward — ONE tiled dispatch (thread-per-pixel walks all shapes). The kernel inits
@@ -2708,7 +2799,7 @@ API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
     double tau = tauPtr[0];
     long long npix = (long long)g_w * g_h;
     int blocks = (int)((npix + BLOCK - 1) / BLOCK);
-    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE, d_tileOff, d_tileList, g_tilesX, g_binned);
 }
 
 API void fp_polish_loss(double* out) {
@@ -2733,7 +2824,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     (void)bbxHost; // bbx is on-device (d_pbbx)
     long long npix = (long long)g_w * g_h;
     int hblocks = (int)((npix + BLOCK - 1) / BLOCK);
-    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h);
+    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h, d_tileOff, d_tileList, g_tilesX, g_binned);
     int npx = g_w * g_h;
     int blocks = (npx + BLOCK - 1) / BLOCK;
     if (blocks > 1024) blocks = 1024;
@@ -2786,7 +2877,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda, ssAdjPtr, g_polishSSIMLambda, egAdjPtr, g_polishEagleLambda);
     // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
     int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
-    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE, d_tileOff, d_tileList, g_tilesX, g_binned);
     // Pass B: 2D grid (x=block-in-shape up to PMAXBLK, y=shape) — all shapes' gradients at once.
     dim3 grd(PMAXBLK, g_pN);
     polishBackwardReduce<<<grd, BLOCK>>>(d_pbelow, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, tau, d_pgrad_partial, g_polishSTE);
@@ -2830,6 +2921,7 @@ API void fp_polish_free() {
     d_pP = d_pcol = d_pgrad = d_ploss = nullptr;
     d_pgrad_partial = d_ploss_partial = nullptr; d_pdcsnap = nullptr;
     d_pkind = nullptr; d_pbbx = nullptr; d_pboff = nullptr;
+    cudaFree(d_tileList); d_tileList = nullptr; g_tileListCap = 0; g_binned = 0;
     g_pN = 0; g_pbelowCap = 0;
 }
 
