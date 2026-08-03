@@ -50,7 +50,7 @@ bool optGeoKind(int kind) { return kind == 0 || kind == 1 || kind == 2; }
 
 // ---- radial-gradient coverage (mirrors raster.FalloffGlow/FalloffDisk, shim.cu gradFalloff) ----
 #define PGRAD_GLOW_E 0.0820849986238988
-bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+bool isGradKind(int kind) { return kind == 4 || kind == 5 || kind >= MASKBASE; }
 
 float gradFalloff(int kind, float t2) {
     if (t2 >= 1.0) return 0.0;
@@ -72,12 +72,19 @@ float gradCovP(int kind, float P[6], int x, int y) {
     return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
 }
 
+// gradCovAny: per-pixel alpha for every soft kind — the radial falloff for glow/disk, the atlas
+// sample for a bank word (whose geometry stays frozen, as in engine/polish.go).
+float gradCovAny(int kind, float P[6], int x, int y) {
+    if (kind >= MASKBASE) return maskCovP(kind, P, x, y);
+    return gradCovP(kind, P, x, y);
+}
+
 // gaussianCovGrad: KindGlow coverage AND its gradient wrt [cx,cy,rx,ry,thetaDeg]. Disk and any
 // other kind return coverage only with a zero gradient (geometry frozen). Mirrors the FD-verified
 // raster.GaussianCovGrad and shim.cu gaussianCovGradD.
 float gaussianCovGrad(int kind, float P[6], int x, int y, out float g[6]) {
     for (int i = 0; i < 6; i++) g[i] = 0.0;
-    if (kind != 4) return gradCovP(kind, P, x, y);
+    if (kind != 4) return gradCovAny(kind, P, x, y);
     float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
     float th = P[4] * PDEG2RAD, c = cos(th), sn = sin(th);
     float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];

@@ -417,3 +417,108 @@ func TestGoldenDiffEvaluateGradientKindsHardPath(t *testing.T) {
 		}
 	}
 }
+
+// randMaskCands places dictionary words — the bank primitives the smooth-base stacks, the shade
+// pre-pass and the glyph passes are built from.
+func randMaskCands(t *testing.T, rng *rand.Rand, w, h, n int) []model.Candidate {
+	t.Helper()
+	var kinds []model.ShapeKind
+	for _, word := range []uint16{2204, 2202, 2219, 2220} {
+		if k, ok := model.MaskKind(word); ok {
+			kinds = append(kinds, k)
+		}
+	}
+	if len(kinds) == 0 {
+		t.Skip("no bank words compiled in")
+	}
+	out := make([]model.Candidate, n)
+	for i := range out {
+		out[i] = model.Candidate{
+			Kind: kinds[rng.Intn(len(kinds))],
+			P: [6]float32{rng.Float32() * float32(w), rng.Float32() * float32(h),
+				6 + rng.Float32()*float32(w)/2, 6 + rng.Float32()*float32(h)/2, rng.Float32() * 180, 0},
+			Color: model.RGBA{R: rng.Float32(), G: rng.Float32(), B: rng.Float32(), A: 0.3 + rng.Float32()*0.7},
+		}
+	}
+	return out
+}
+
+// TestGoldenDiffMaskWords: a bank word carries its coverage in an atlas on the device. Vulkan used
+// to have no atlas at all, so every word was rejected and the passes built on them quietly did
+// nothing — invisible to a gate that only fed ellipses.
+func TestGoldenDiffMaskWords(t *testing.T) {
+	rng := rand.New(rand.NewSource(17))
+	w, h := 41, 33
+	target, weight := makeTarget(rng, w, h, false)
+
+	ref, refErr := cuda.New(target, weight, w, h, 8)
+	if refErr != nil {
+		t.Skipf("cross golden-diff needs the CUDA golden backend on this machine: %v", refErr)
+	}
+	defer ref.Close()
+	gpu, err := New(target, weight, w, h, 8)
+	if err != nil {
+		t.Fatalf("vulkan.New: %v", err)
+	}
+	defer gpu.Close()
+
+	if !ref.MasksOnDevice() {
+		t.Skip("golden backend has no atlas")
+	}
+	if !gpu.MasksOnDevice() {
+		t.Fatal("vulkan reports no word atlas on device — the bank never reached the GPU")
+	}
+	ref.SetGradients(true)
+	defer ref.SetGradients(false)
+	gpu.SetGradients(true)
+
+	canvas := make([]float32, w*h*4)
+	for i := range canvas {
+		canvas[i] = rng.Float32()
+	}
+	_ = ref.Reset(canvas)
+	_ = gpu.Reset(canvas)
+
+	cands := randMaskCands(t, rng, w, h, 200)
+	rc, _ := ref.Evaluate(cands)
+	gc, err := gpu.Evaluate(cands)
+	if err != nil {
+		t.Fatalf("vulkan Evaluate: %v", err)
+	}
+	var mismatches int
+	for i := range cands {
+		if rc[i].Score == rejected || rc[i].Score >= maskRejected {
+			continue
+		}
+		if gc[i].Score >= maskRejected {
+			t.Fatalf("cand %d: vulkan rejects a word the golden backend scores (%.5f)", i, rc[i].Score)
+		}
+		if !closeRel(rc[i].Score, gc[i].Score, 2e-3, 1e-2) {
+			if mismatches++; mismatches <= 10 {
+				t.Errorf("cand %d word score: cuda=%.5f vk=%.5f", i, rc[i].Score, gc[i].Score)
+			}
+		}
+	}
+
+	// And the composite: a word's per-pixel coverage must land on the canvas identically.
+	for _, c := range cands[:6] {
+		if err := ref.Apply(c); err != nil {
+			t.Fatalf("cuda Apply: %v", err)
+		}
+		if err := gpu.Apply(c); err != nil {
+			t.Fatalf("vulkan Apply: %v", err)
+		}
+	}
+	rcv, gcv := make([]float32, w*h*4), make([]float32, w*h*4)
+	if err := ref.ReadCanvas(rcv); err != nil {
+		t.Fatalf("cuda ReadCanvas: %v", err)
+	}
+	if err := gpu.ReadCanvas(gcv); err != nil {
+		t.Fatalf("vulkan ReadCanvas: %v", err)
+	}
+	for i := range rcv {
+		if math.Abs(float64(rcv[i]-gcv[i])) > 2e-3 {
+			t.Fatalf("canvas[%d] after word composites: cuda=%.5f vk=%.5f", i, rcv[i], gcv[i])
+		}
+	}
+}

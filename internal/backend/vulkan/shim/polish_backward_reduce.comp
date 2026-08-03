@@ -18,7 +18,10 @@ layout(std430, binding = 5) readonly  buffer Sb { float  dcsnap[]; };
 layout(std430, binding = 6) writeonly buffer Gb { double pgrad[]; };
 layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
 layout(std430, binding = 8) readonly  buffer Ob { int    boff[]; };
+layout(std430, binding = 11) readonly buffer MA { float maskAtlas[]; };
+layout(std430, binding = 12) readonly buffer MM { int   maskMeta[]; };
 layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+#include "mask_common.glsl"
 #include "polish_common.glsl"
 
 const int NG = 10;

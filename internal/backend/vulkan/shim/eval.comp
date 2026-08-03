@@ -1,5 +1,6 @@
 #version 450
 #extension GL_ARB_gpu_shader_fp64 : require
+#extension GL_GOOGLE_include_directive : require
 // eval.comp — Vulkan port of shim.cu evalKernel (HARD path). One workgroup per
 // candidate; 128 threads stride the bbox pixels, accumulate 19 float32 sums in
 // shared memory, fixed-order tree-reduce (deterministic, no atomics), then thread 0
@@ -13,6 +14,9 @@ layout(std430, binding = 1) readonly  buffer Target { float target[]; };
 layout(std430, binding = 2) readonly  buffer Canvas { float canvasb[]; };
 layout(std430, binding = 3) readonly  buffer Weight { float weightb[]; };
 layout(std430, binding = 4) writeonly buffer Out    { float outb[]; };
+layout(std430, binding = 5) readonly  buffer MA     { float maskAtlas[]; };
+layout(std430, binding = 6) readonly  buffer MM     { int   maskMeta[]; };
+#include "mask_common.glsl"
 
 // agN/ag0..ag5 = analytic-alpha grid (fp_set_alpha_grid): the epilogue re-solves the optimal
 // colour per grid alpha and keeps the ΔSSE-min (alpha, colour) pair. agN=0 = off (pass-through).
@@ -90,9 +94,16 @@ float gradCovP(int kind, float P[6], int x, int y) {
     return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
 }
 
-bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+bool isGradKind(int kind) { return kind == 4 || kind == 5 || kind >= MASKBASE; }
+
+// gradCov dispatches the per-pixel alpha: radial falloff for glow/disk, atlas sample for a word.
+float gradCov(int kind, float P[6], int x, int y) {
+    if (kind >= MASKBASE) return maskCovP(kind, P, x, y);
+    return gradCovP(kind, P, x, y);
+}
 
 void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out int xMax, out int yMax) {
+    if (kind >= MASKBASE) { maskBBoxOf(P, W, H, xMin, yMin, xMax, yMax); return; }
     if (kind == 2) {
         float minX = min(P[0], min(P[2], P[4])), maxX = max(P[0], max(P[2], P[4]));
         float minY = min(P[1], min(P[3], P[5])), maxY = max(P[1], max(P[3], P[5]));
@@ -135,7 +146,7 @@ void main() {
         P[3] = cands[base + 4u]; P[4] = cands[base + 5u]; P[5] = cands[base + 6u];
         Ain = cands[base + 10u];
 
-        if (kind <= 5) {
+        if (kind <= 5 || kind >= MASKBASE) {
             int xMin, yMin, xMax, yMax;
             bboxOf(kind, P, pc.W, pc.H, xMin, yMin, xMax, yMax);
             int area = (xMax - xMin + 1) * (yMax - yMin + 1);
@@ -152,7 +163,7 @@ void main() {
                 for (int tt = int(lid); tt < total; tt += 128) {
                     int x = xMin + (tt % cols) * step;
                     int y = yMin + (tt / cols) * step;
-                    float cov = gradCovP(kind, P, x, y);
+                    float cov = gradCov(kind, P, x, y);
                     if (cov <= 0.0) continue;
                     float ap = ac * cov;
                     int idx = y * pc.W + x, p = idx * 4;

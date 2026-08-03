@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
 
 	"golang.org/x/sys/windows"
@@ -52,6 +53,7 @@ type Vulkan struct {
 	candBuf []float32 // reused Evaluate/Apply staging buffer
 	outBuf  []float32
 
+	masksOn       bool // word atlas uploaded — bank words score/composite/polish on device
 	dll           *windows.DLL
 	procEval      *windows.Proc
 	procApply     *windows.Proc
@@ -67,7 +69,7 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
-	procGradients,
+	procGradients, procSetMasks,
 	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
@@ -132,6 +134,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")   // optional: EAGLE additive polish term
 	g.procKindGate, _ = dll.FindProc("fp_set_kind_gate")      // optional: region-kinds per-pixel gate
 	g.procGradients, _ = dll.FindProc("fp_set_gradients")     // optional: per-pixel-alpha eval for glow/disk
+	g.procSetMasks, _ = dll.FindProc("fp_set_masks")          // optional: dictionary-word coverage atlas
 	g.procGlowSwap, _ = dll.FindProc("fp_set_glow_swap")      // optional: deep-smooth glow swap
 	g.procRampGlow, _ = dll.FindProc("fp_set_ramp_glow")      // optional: ramp-aware hotter glow swap
 	g.procAlphaGrid, _ = dll.FindProc("fp_set_alpha_grid")    // optional: analytic-alpha grid in the eval epilogue
@@ -152,6 +155,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		g.Close()
 		return nil, fmt.Errorf("fp_init failed (code %d) — check GPU/Vulkan driver", ret)
 	}
+	g.uploadMasks()
 	return g, nil
 }
 
@@ -200,10 +204,9 @@ func (g *Vulkan) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
-		// The eval kernel scores the hard kinds and the radial gradients (glow/disk); the
-		// dictionary masks are not in it yet, so reject those here (fail-loud, never selected)
-		// rather than let the kernel's inside switch treat one as an ellipse.
-		if cands[i].Kind >= model.KindMaskBase {
+		// Without the atlas a word has no coverage to score, so reject it fail-loud rather than
+		// let the kernel's inside switch treat one as an ellipse and silently ship it.
+		if cands[i].Kind >= model.KindMaskBase && !g.masksOn {
 			out[i] = backend.EvalResult{Score: maskRejected}
 			continue
 		}
@@ -369,6 +372,42 @@ func (g *Vulkan) SetKindGate(hard []float32) bool {
 	runtime.KeepAlive(hard)
 	return true
 }
+
+// uploadMasks ships the bank's coverage atlas to the device so words can be scored, composited and
+// polished there. Same layout as the CUDA path: the atlas is every word's coverage concatenated and
+// meta is (offset,w,h) per word. Without it the backend has no words and says so via MasksOnDevice.
+func (g *Vulkan) uploadMasks() {
+	if g.procSetMasks == nil {
+		return
+	}
+	bank := maskbank.All()
+	if len(bank) == 0 {
+		return
+	}
+	var total int
+	for _, e := range bank {
+		total += e.W * e.H
+	}
+	atlas := make([]float32, 0, total)
+	meta := make([]int32, 0, len(bank)*3)
+	for _, e := range bank {
+		meta = append(meta, int32(len(atlas)), int32(e.W), int32(e.H))
+		atlas = append(atlas, e.Cov...)
+	}
+	ret, _, _ := g.procSetMasks.Call(
+		fptr(atlas), uintptr(len(atlas)),
+		uintptr(unsafe.Pointer(&meta[0])), uintptr(len(bank)),
+	)
+	runtime.KeepAlive(atlas)
+	runtime.KeepAlive(meta)
+	if ret == 0 {
+		g.masksOn = true
+	}
+}
+
+// MasksOnDevice reports whether the word atlas made it to the device — the engine gates the glyph
+// and shade pre-passes on this, and it is what tells a bank word apart from a rejected candidate.
+func (g *Vulkan) MasksOnDevice() bool { return g.masksOn }
 
 // SetGradients tells the eval kernel the batch may contain the native gradient kinds, which carry
 // a per-pixel alpha. Off (the greedy's hard path), a glow scores as a flat ellipse — mirroring the

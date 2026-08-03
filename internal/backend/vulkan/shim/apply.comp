@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // apply.comp — Vulkan port of shim.cu applyKernel / cpu.Apply. Composites one shape
 // onto the device canvas at full coverage (step 1, exact). Dispatched with enough
 // workgroups that #threads >= image area, so each covered pixel is written exactly
@@ -7,6 +8,9 @@
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) buffer Canvas { float canvasb[]; };
+layout(std430, binding = 1) readonly buffer MA { float maskAtlas[]; };
+layout(std430, binding = 2) readonly buffer MM { int   maskMeta[]; };
+#include "mask_common.glsl"
 
 layout(push_constant) uniform PC {
     int kind;
@@ -74,9 +78,15 @@ float gradCovP(int kind, float P[6], int x, int y) {
     return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
 }
 
-bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+bool isGradKind(int kind) { return kind == 4 || kind == 5 || kind >= MASKBASE; }
+
+float gradCov(int kind, float P[6], int x, int y) {
+    if (kind >= MASKBASE) return maskCovP(kind, P, x, y);
+    return gradCovP(kind, P, x, y);
+}
 
 void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out int xMax, out int yMax) {
+    if (kind >= MASKBASE) { maskBBoxOf(P, W, H, xMin, yMin, xMax, yMax); return; }
     if (kind == 2) {
         float minX = min(P[0], min(P[2], P[4])), maxX = max(P[0], max(P[2], P[4]));
         float minY = min(P[1], min(P[3], P[5])), maxY = max(P[1], max(P[3], P[5]));
@@ -102,7 +112,7 @@ void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out 
 }
 
 void main() {
-    if (pc.kind > 5) return; // dictionary masks are not in this kernel yet
+    if (pc.kind > 5 && pc.kind < MASKBASE) return;
     float P[6] = float[6](pc.p0, pc.p1, pc.p2, pc.p3, pc.p4, pc.p5);
     int xMin, yMin, xMax, yMax;
     bboxOf(pc.kind, P, pc.W, pc.H, xMin, yMin, xMax, yMax);
@@ -115,7 +125,7 @@ void main() {
         int x = xMin + tt % cols, y = yMin + tt / cols;
         float a = aBase;
         if (grad) { // per-pixel falloff: aEff = A * cov(x)
-            float cov = gradCovP(pc.kind, P, x, y);
+            float cov = gradCov(pc.kind, P, x, y);
             if (cov <= 0.0) continue;
             a *= cov;
         } else if (!insideShape(pc.kind, P, x, y)) {

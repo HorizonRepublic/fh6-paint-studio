@@ -92,7 +92,12 @@ int g_w = 0, g_h = 0, g_maxCands = 0, g_grid = 0;
 int g_sampleBudget = 4000;
 int g_lastError = 0;
 
-struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; int32_t gradOn; }; // agN/ag = analytic-alpha grid (fp_set_alpha_grid), agN=0 off; gradOn = per-pixel-alpha scoring for the radial gradients
+struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; int32_t gradOn; };
+// DICTIONARY MASKS: the bank words are captured coverage textures packed into one atlas, with a
+// meta table {count, then (offset,w,h) per word}. Kept as plain storage buffers so every shader
+// that scores or composites a word reads the same data the CUDA constant/global pair holds.
+Buf g_maskAtlas, g_maskMeta;
+int g_masksOn = 0; // agN/ag = analytic-alpha grid (fp_set_alpha_grid), agN=0 off; gradOn = per-pixel-alpha scoring for the radial gradients
 int g_gradOn = 0;
 struct ApplyPC { int32_t kind; float p0, p1, p2, p3, p4, p5; float cr, cg, cb, ca; int32_t W, H; };
 struct GridPC  { int32_t W, H, gw, gh; };
@@ -435,7 +440,7 @@ bool buildContext() {
         ci.bindingCount = count; ci.pBindings = bs.data();
         return vkCreateDescriptorSetLayout(g_device, &ci, nullptr, &dsl) == VK_SUCCESS;
     };
-    if (!makeDSL(5, g_evalDSL) || !makeDSL(1, g_applyDSL)) { g_lastError = 1009; return false; }
+    if (!makeDSL(7, g_evalDSL) || !makeDSL(3, g_applyDSL)) { g_lastError = 1009; return false; }
 
     auto makePL = [](VkDescriptorSetLayout dsl, uint32_t pcSize, VkPipelineLayout& pl) -> bool {
         VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, pcSize};
@@ -471,7 +476,7 @@ bool buildContext() {
     if (!makePL(g_msDSL, sizeof(MomSeedPC), g_msPL) || !makePL(g_gmDSL, sizeof(GenMomPC), g_gmPL)) { g_lastError = 1010; return false; }
     if (!makePipe(g_msPL, momentseed_spv, sizeof(momentseed_spv), g_msPipe) || !makePipe(g_gmPL, genmoment_spv, sizeof(genmoment_spv), g_gmPipe)) { g_lastError = 1011; return false; }
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 45}; // eval5+apply1+grid4+gen8+seval5+prep3+arg4+ms3+gm6=39, margin to 45
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64}; // + the two mask-atlas bindings on eval (x2 sets) and apply
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 9; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_descPool) != VK_SUCCESS) { g_lastError = 1012; return false; }
@@ -502,18 +507,22 @@ void writeDescriptors() {
         w.dstSet = set; w.dstBinding = binding; w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
     };
-    VkWriteDescriptorSet ws[10]; VkDescriptorBufferInfo bis[10];
+    VkWriteDescriptorSet ws[16]; VkDescriptorBufferInfo bis[16];
     wr(g_evalSet, 0, g_cands.buf,  g_cands.size,  ws[0], bis[0]);
     wr(g_evalSet, 1, g_target.buf, g_target.size, ws[1], bis[1]);
     wr(g_evalSet, 2, g_canvas.buf, g_canvas.size, ws[2], bis[2]);
     wr(g_evalSet, 3, g_weight.buf, g_weight.size, ws[3], bis[3]);
     wr(g_evalSet, 4, g_out.buf,    g_out.size,    ws[4], bis[4]);
     wr(g_applySet, 0, g_canvas.buf, g_canvas.size, ws[5], bis[5]);
+    wr(g_evalSet,  5, g_maskAtlas.buf, g_maskAtlas.size, ws[10], bis[10]);
+    wr(g_evalSet,  6, g_maskMeta.buf,  g_maskMeta.size,  ws[11], bis[11]);
+    wr(g_applySet, 1, g_maskAtlas.buf, g_maskAtlas.size, ws[12], bis[12]);
+    wr(g_applySet, 2, g_maskMeta.buf,  g_maskMeta.size,  ws[13], bis[13]);
     wr(g_gridSet, 0, g_target.buf,  g_target.size,  ws[6], bis[6]);
     wr(g_gridSet, 1, g_canvas.buf,  g_canvas.size,  ws[7], bis[7]);
     wr(g_gridSet, 2, g_weight.buf,  g_weight.size,  ws[8], bis[8]);
     wr(g_gridSet, 3, g_gridBuf.buf, g_gridBuf.size, ws[9], bis[9]);
-    vkUpdateDescriptorSets(g_device, 10, ws, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 14, ws, 0, nullptr);
 }
 
 // submitWait records nothing itself — caller fills g_cmd; this submits + waits the fence.
@@ -1022,13 +1031,13 @@ void writeTileBinnerDescriptors() {
 // for the one-dispatch tiled forward/hard. Fully separate from the per-shape polish DSL so
 // the two paths never share descriptor/push state (the trap the first tiling attempt hit).
 bool buildTiledForward() {
-    VkDescriptorSetLayoutBinding bs[10];
-    for (uint32_t i = 0; i < 10; i++) {
+    VkDescriptorSetLayoutBinding bs[12];
+    for (uint32_t i = 0; i < 12; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 10; dci.pBindings = bs;
+    dci.bindingCount = 12; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_ptDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TiledPC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1047,7 +1056,7 @@ bool buildTiledForward() {
     };
     if (!mk(pt_forward_spv, sizeof(pt_forward_spv), g_ptFwd)) return false;
     if (!mk(pt_hard_spv, sizeof(pt_hard_spv), g_ptHard)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_ptPool) != VK_SUCCESS) return false;
@@ -1060,30 +1069,32 @@ bool buildTiledForward() {
 // is (re)allocated, since its handle changes.
 void writeTiledForwardDescriptors() {
     if (g_ptSet == VK_NULL_HANDLE) return;
-    VkBuffer bufs[10] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_prender.buf, g_pbelow.buf,
-                         g_pbbxBuf.buf, g_pboffBuf.buf, g_pbase.buf, g_tileOff.buf, g_tileList.buf };
-    VkDeviceSize sizes[10] = { g_pP.size, g_pcol.size, g_pkinds.size, g_prender.size, g_pbelow.size,
-                              g_pbbxBuf.size, g_pboffBuf.size, g_pbase.size, g_tileOff.size, g_tileList.size };
-    VkWriteDescriptorSet w[10]; VkDescriptorBufferInfo bi[10];
-    for (uint32_t i = 0; i < 10; i++) {
+    VkBuffer bufs[12] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_prender.buf, g_pbelow.buf,
+                         g_pbbxBuf.buf, g_pboffBuf.buf, g_pbase.buf, g_tileOff.buf, g_tileList.buf,
+                         g_maskAtlas.buf, g_maskMeta.buf };
+    VkDeviceSize sizes[12] = { g_pP.size, g_pcol.size, g_pkinds.size, g_prender.size, g_pbelow.size,
+                              g_pbbxBuf.size, g_pboffBuf.size, g_pbase.size, g_tileOff.size, g_tileList.size,
+                              g_maskAtlas.size, g_maskMeta.size };
+    VkWriteDescriptorSet w[12]; VkDescriptorBufferInfo bi[12];
+    for (uint32_t i = 0; i < 12; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_ptSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 10, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 12, w, 0, nullptr);
 }
 
 // buildBackwardTiled: dedicated 9-binding DSL + pipeline layout (TiledPC push) + pool + set
 // for the two-pass barrier-free backward (Pass A dC walk + Pass B per-shape reduce).
 bool buildBackwardTiled() {
-    VkDescriptorSetLayoutBinding bs[11];
-    for (uint32_t i = 0; i < 11; i++) {
+    VkDescriptorSetLayoutBinding bs[13];
+    for (uint32_t i = 0; i < 13; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 11; dci.pBindings = bs;
+    dci.bindingCount = 13; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_pbDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TiledPC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1102,7 +1113,7 @@ bool buildBackwardTiled() {
     };
     if (!mk(pt_dcwalk_spv, sizeof(pt_dcwalk_spv), g_pbWalk)) return false;
     if (!mk(pt_breduce_spv, sizeof(pt_breduce_spv), g_pbReduce)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_pbPool) != VK_SUCCESS) return false;
@@ -1115,20 +1126,20 @@ bool buildBackwardTiled() {
 // Re-called when g_pbelow/g_pdcsnap/g_tileList are (re)allocated (their handles change).
 void writeBackwardDescriptors() {
     if (g_pbSet == VK_NULL_HANDLE) return;
-    VkBuffer bufs[11] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_pdC.buf, g_pbelow.buf,
+    VkBuffer bufs[13] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_pdC.buf, g_pbelow.buf,
                          g_pdcsnap.buf, g_ppgrad.buf, g_pbbxBuf.buf, g_pboffBuf.buf,
-                         g_tileOff.buf, g_tileList.buf };
-    VkDeviceSize sizes[11] = { g_pP.size, g_pcol.size, g_pkinds.size, g_pdC.size, g_pbelow.size,
+                         g_tileOff.buf, g_tileList.buf, g_maskAtlas.buf, g_maskMeta.buf };
+    VkDeviceSize sizes[13] = { g_pP.size, g_pcol.size, g_pkinds.size, g_pdC.size, g_pbelow.size,
                               g_pdcsnap.size, g_ppgrad.size, g_pbbxBuf.size, g_pboffBuf.size,
-                              g_tileOff.size, g_tileList.size };
-    VkWriteDescriptorSet w[11]; VkDescriptorBufferInfo bi[11];
-    for (uint32_t i = 0; i < 11; i++) {
+                              g_tileOff.size, g_tileList.size, g_maskAtlas.size, g_maskMeta.size };
+    VkWriteDescriptorSet w[13]; VkDescriptorBufferInfo bi[13];
+    for (uint32_t i = 0; i < 13; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_pbSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 11, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 13, w, 0, nullptr);
 }
 
 // ensureStaging grows the shared staging buffer if a transfer needs more than its size.
@@ -1209,6 +1220,8 @@ void writeSearchDescriptors() {
     wr(g_sevalSet, 2, g_canvas.buf, g_canvas.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 3, g_weight.buf, g_weight.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 4, g_sout.buf, g_sout.size, w[k], bi[k]); k++;
+    wr(g_sevalSet, 5, g_maskAtlas.buf, g_maskAtlas.size, w[k], bi[k]); k++; // search-eval shares the eval DSL
+    wr(g_sevalSet, 6, g_maskMeta.buf, g_maskMeta.size, w[k], bi[k]); k++;
     wr(g_prepSet, 0, g_sout.buf, g_sout.size, w[k], bi[k]); k++;
     wr(g_prepSet, 1, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_prepSet, 2, g_adj.buf, g_adj.size, w[k], bi[k]); k++;
@@ -1304,9 +1317,17 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_orient) ||
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_bound) ||
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_kgate) ||
-        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_rampglow)) {
+        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_rampglow) ||
+        // Placeholders so every set can be written before a bank arrives; meta[0]=0 = no words.
+        !createBufEx(16, dstStore, devLocal, false, g_maskAtlas) ||
+        !createBufEx(16, dstStore, devLocal, false, g_maskMeta)) {
         g_lastError = 1020; teardown(); return g_lastError;
     }
+    {
+        int32_t zero[4] = {0, 0, 0, 0};
+        memcpy(g_staging.map, zero, sizeof(zero)); copyBuf(g_staging.buf, g_maskMeta.buf, sizeof(zero));
+    }
+    g_masksOn = 0;
     g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_hasRampGlow = 0; g_searchSetsDirty = true;
     // upload target + weight; zero the canvas — all via the staging buffer.
     memcpy(g_staging.map, target, tSize); copyBuf(g_staging.buf, g_target.buf, tSize);
@@ -1315,6 +1336,35 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
     writeDescriptors();
     return 0;
 }
+
+// fp_set_masks uploads the dictionary-word coverage atlas and its meta table, so the eval, apply
+// and polish shaders can score and composite bank words. Layout mirrors the CUDA shim: the atlas is
+// every word's coverage concatenated; meta is {count, (offset,w,h) x count}. Returns 0 on success.
+API int fp_set_masks(const float* atlas, long long totalFloats, const int* meta, int count) {
+    if (!g_device || !atlas || !meta || count < 1 || totalFloats < 1) return 1;
+    destroyBuf(g_maskAtlas); destroyBuf(g_maskMeta);
+    const VkBufferUsageFlags use = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    size_t aSize = (size_t)totalFloats * sizeof(float);
+    size_t mSize = (size_t)(1 + count * 3) * sizeof(int32_t);
+    if (!createBufEx(aSize, use, dl, false, g_maskAtlas) || !createBufEx(mSize, use, dl, false, g_maskMeta)) {
+        g_lastError = 1021; return 2;
+    }
+    ensureStaging(aSize > mSize ? aSize : mSize);
+    memcpy(g_staging.map, atlas, aSize); copyBuf(g_staging.buf, g_maskAtlas.buf, aSize);
+    std::vector<int32_t> m(1 + (size_t)count * 3);
+    m[0] = count;
+    memcpy(m.data() + 1, meta, (size_t)count * 3 * sizeof(int32_t));
+    memcpy(g_staging.map, m.data(), mSize); copyBuf(g_staging.buf, g_maskMeta.buf, mSize);
+    g_masksOn = 1;
+    writeDescriptors();      // the atlas handles changed: rebind eval/apply
+    g_searchSetsDirty = true; // and the search-eval set
+    writeTiledForwardDescriptors();
+    writeBackwardDescriptors();
+    return 0;
+}
+
+API int fp_masks_on() { return g_masksOn; }
 
 API void fp_eval(const float* cands, int n, float* out) {
     if (n <= 0 || !g_device) return;
