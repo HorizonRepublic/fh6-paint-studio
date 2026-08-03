@@ -1,6 +1,6 @@
 name: Release build
 
-# Builds the Windows release (GUI exe + fat CUDA DLL + cross-vendor Vulkan DLL). On a release it attaches the .7z to the
+# Builds the Windows release (GUI exe + cross-vendor Vulkan DLL). On a release it attaches the .7z to the
 # GitHub release; on a release-touching PR it builds the same and uploads the .7z as an artifact (a
 # dry-run, so a tag is never the first time the release build runs). Also dispatchable by hand.
 on:
@@ -25,7 +25,6 @@ on:
     paths:
       - "scripts/**"
       - "cmd/studio/**"
-      - "internal/backend/cuda/shim.cu"
       - "internal/backend/vulkan/**"
       - ".github/workflows/release-build.yml"
 
@@ -36,10 +35,10 @@ permissions:
 
 jobs:
   windows:
-    name: Build & attach (GUI + CUDA + Vulkan)
-    # windows-2022 ships VS 2022 (MSVC 14.4x), which CUDA 12.8's cudafe++ supports. windows-latest now
-    # ships VS 18 / MSVC 14.51, on which 12.8's cudafe++ crashes (ACCESS_VIOLATION at compile time).
-    runs-on: windows-2022
+    name: Build & attach (GUI + Vulkan)
+    # The windows-2022 pin existed only for CUDA 12.8's cudafe++, which crashed on newer MSVC. With
+    # CUDA out of the release the runner is free to track latest again.
+    runs-on: windows-latest
     env:
       VERSION: ${{ inputs.tag || format('0.0.0-pr.{0}', github.run_number) }}
     steps:
@@ -52,29 +51,21 @@ jobs:
           cache: true
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
-      # CUDA 12.8 is required for the sm_120 (Blackwell) SASS. shim.cu only needs the core runtime
-      # headers (cuda_runtime.h / cuda_fp16.h), so nvcc + cudart is enough — no CUB/cccl.
-      - name: Install CUDA 12.8 toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: "12.8.1"
-          sub-packages: '["nvcc", "cudart"]'
-          method: "network"
       # Vulkan shim toolchain (glslang + headers + volk) assembled into third_party\vulkan so
       # build-vulkan.ps1 can compile fh6vk.dll; MSVC (set up above) compiles the shim + volk.
       - name: Set up Vulkan toolchain
         shell: pwsh
         run: .\scripts\setup-vulkan-ci.ps1
-      - name: Build release (CUDA + Vulkan + GUI)
+      - name: Build release (Vulkan + GUI)
         shell: pwsh
-        run: .\scripts\build-release.ps1 -Toolkit "$env:CUDA_PATH" -Version "$env:VERSION"
+        run: .\scripts\build-release.ps1 -Version "$env:VERSION"
       # Archived from inside bin\ so the files sit flat (no bin\ folder on extract).
       - name: Package (7z)
         shell: pwsh
         run: |
           $archive = "fh6-paint-studio-${env:VERSION}-windows-x64.7z"
           Push-Location bin
-          7z a -mx=9 "..\$archive" fh6-paint-studio.exe fh6cuda.dll fh6vk.dll
+          7z a -mx=9 "..\$archive" fh6-paint-studio.exe fh6vk.dll
           $code = $LASTEXITCODE
           Pop-Location
           if ($code -ne 0) { throw "7z failed ($code)" }
