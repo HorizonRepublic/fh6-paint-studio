@@ -2042,6 +2042,32 @@ static void gpuWait(int site) {
 #endif
 }
 
+// calibrateSpinWindow measures what a nap actually costs on THIS machine (arming the timer plus
+// the scheduler getting back to us) and sizes the poll window from it. Napping only pays once the
+// wait left clearly exceeds that cost, and the cost is hardware and OS dependent — a fixed constant
+// was measured to be either wasteful (a wide window polls waits it could have slept through) or
+// harmful on a different kernel mix. Measured here: ~0.3-0.5 ms, giving a ~1 ms window.
+static void calibrateSpinWindow() {
+#ifdef _WIN32
+    LARGE_INTEGER freq, a, b;
+    QueryPerformanceFrequency(&freq);
+    const double perUs = (double)freq.QuadPart * 1e-6;
+    double best = 1e9;
+    for (int i = 0; i < 3; i++) {
+        QueryPerformanceCounter(&a);
+        gpuNap(200);
+        QueryPerformanceCounter(&b);
+        const double overhead = (double)(b.QuadPart - a.QuadPart) / perUs - 200;
+        if (overhead > 0 && overhead < best) best = overhead;
+    }
+    if (best < 1e9) {
+        g_spinUs = 2.5 * best;
+        if (g_spinUs < 500) g_spinUs = 500;
+        if (g_spinUs > 5000) g_spinUs = 5000;
+    }
+#endif
+}
+
 // ---- extern C API ----
 
 API int fp_init(const float* target, const float* weight, int w, int h, int maxCands, int gridSize) {
@@ -2053,8 +2079,9 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
     {
         const char* spin = getenv("FH6_CUDA_SPIN");
         g_gpuSpin = (spin && spin[0] == '1') ? 1 : 0;
+        calibrateSpinWindow();
         if (const char* su = getenv("FH6_CUDA_SPIN_US")) {
-            double v = atof(su);
+            double v = atof(su); // explicit override wins over the calibration
             if (v >= 0) g_spinUs = v;
         }
 
