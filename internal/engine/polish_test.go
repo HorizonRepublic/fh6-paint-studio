@@ -50,7 +50,10 @@ func TestPolishGradientFD(t *testing.T) {
 		oklab      bool
 		feLambda   float64
 		ssimLambda float64
-	}{{"sse", false, 0, 0}, {"oklab", true, 0, 0}, {"false-edge", false, 0.5, 0}, {"ssim", false, 0, 0.5}}
+		ldLambda   float64
+	}{{"sse", false, 0, 0, 0}, {"oklab", true, 0, 0, 0}, {"false-edge", false, 0.5, 0, 0},
+		{"ssim", false, 0, 0.5, 0}, {"lost-detail", false, 0, 0, 0.5},
+		{"false-edge+lost-detail", false, 0.5, 0, 0.5}}
 	for _, tc := range cases {
 		tc := tc
 		// Analytic gradients at the unperturbed params (soft mode — the FD check validates the
@@ -71,6 +74,15 @@ func TestPolishGradientFD(t *testing.T) {
 			ssim = newSSIMState(target, w, h)
 			ssimAdj = ssim.adj
 		}
+		// lost-detail: the MIRROR of false-edge. The combined case matters on its own — the two
+		// terms scatter opposite signs through the same Sobel stencil, so a sign slip in either
+		// cancels in isolation and only shows up when both are live.
+		var ld *ldState
+		var ldAdj []float64
+		if tc.ldLambda > 0 {
+			ld = newLDState(target, w, h, nil)
+			ldAdj = ld.adj
+		}
 		polishForward(ps, base, render, below, bbx, w, h, tau, false)
 		if fe != nil {
 			fe.adjoint(render, w, h)
@@ -78,7 +90,10 @@ func TestPolishGradientFD(t *testing.T) {
 		if ssim != nil {
 			ssim.adjoint(render, w, h)
 		}
-		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda, ssimAdj, tc.ssimLambda, nil, 0)
+		if ld != nil {
+			ld.adjoint(render, w, h)
+		}
+		polishBackward(ps, base, render, target, weight, below, bbx, dC, w, h, tau, false, oklab, feAdj, tc.feLambda, ssimAdj, tc.ssimLambda, nil, 0, ldAdj, tc.ldLambda)
 		ana := make([][10]float64, len(ps))
 		for i := range ps {
 			ana[i] = ps[i].grad
@@ -92,6 +107,9 @@ func TestPolishGradientFD(t *testing.T) {
 			}
 			if ssim != nil {
 				l += tc.ssimLambda * ssim.total(render, w, h)
+			}
+			if ld != nil {
+				l += tc.ldLambda * ld.total(render, w, h)
 			}
 			return l
 		}

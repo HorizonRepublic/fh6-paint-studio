@@ -68,6 +68,11 @@ $shaders = [ordered]@{
     'eagle_um'        = 'eagle_um_spv'
     'eagle_varadj'    = 'eagle_varadj_spv'
     'eagle_scharradj' = 'eagle_scharradj_spv'
+    'coarse_min'      = 'coarse_min_spv'
+    'coarse_gather'   = 'coarse_gather_spv'
+    'tile_count'      = 'tb_count_spv'
+    'tile_scan'       = 'tb_scan_spv'
+    'tile_fill'       = 'tb_fill_spv'
 }
 foreach ($s in $shaders.Keys) {
     & $glsl -V --target-env vulkan1.2 (Join-Path $shim "$s.comp") --vn $shaders[$s] -o (Join-Path $shim "$s.spv.h")

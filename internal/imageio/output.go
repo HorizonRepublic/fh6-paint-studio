@@ -140,6 +140,7 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 			continue
 		}
 		isGrad := raster.IsGradient(kind)
+		prep := raster.Prep(kind, p)
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, W, H)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
@@ -147,12 +148,12 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 				// the in-game render; hard kinds use binary coverage (aEff = a, unchanged).
 				aEff := a
 				if isGrad {
-					cov := float32(raster.Coverage(kind, p, x, y))
+					cov := float32(prep.Coverage(x, y))
 					if cov <= 0 {
 						continue
 					}
 					aEff = a * cov
-				} else if !raster.Inside(kind, p, x, y) {
+				} else if !prep.Inside(x, y) {
 					continue
 				}
 				ia := 1 - aEff
@@ -235,6 +236,7 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 	cg := model.SRGBToLinear(float32(s.Color[1]) / 255)
 	cb := model.SRGBToLinear(float32(s.Color[2]) / 255)
 	isGrad := raster.IsGradient(kind)
+	prep := raster.Prep(kind, p)
 	xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
 	// Clamp the write window to img's bounds (which may be a sub-rectangle of the full w×h canvas) and
 	// index via PixOffset, so this also composites into a small sprite covering just the shape's region.
@@ -255,12 +257,12 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 		for x := xMin; x <= xMax; x++ {
 			aEff := a
 			if isGrad {
-				cov := float32(raster.Coverage(kind, p, x, y))
+				cov := float32(prep.Coverage(x, y))
 				if cov <= 0 {
 					continue
 				}
 				aEff = a * cov
-			} else if !raster.Inside(kind, p, x, y) {
+			} else if !prep.Inside(x, y) {
 				continue
 			}
 			q := img.PixOffset(x, y)
@@ -318,6 +320,75 @@ func EncodeForDisplay(px []float32) []float32 {
 		out[i+3] = px[i+3]
 	}
 	return out
+}
+
+// srgbByteEdge[i] is the smallest linear value that encodes to display byte i+1: the exact rounding
+// boundary of round(255·sRGB(v)). Encoding a live preview frame is 3 pow() calls per pixel — ~50 M
+// of them at native resolution, every frame — while the answer only ever needs 8 bits. Comparing
+// against the boundaries instead gives the identical byte with a handful of compares.
+var srgbByteEdge [255]float32
+
+// srgbLUT maps a 16-bit-quantised linear value to its display byte. A binary search over the
+// boundaries costs more than the pow it replaces (eight unpredictable branches), while a 64 KB table
+// is one multiply and one load. The quantisation can only disagree with the exact encode for a
+// linear value within 1/65536 of a rounding boundary, which is half a display byte at its widest —
+// invisible, and this feeds the live preview only. Saved files keep the exact path.
+var srgbLUT [1 << 16]uint8
+
+func init() {
+	for k := 1; k <= 255; k++ {
+		s := (float64(k) - 0.5) / 255
+		v := s / 12.92
+		if s > 0.04045 {
+			v = math.Pow((s+0.055)/1.055, 2.4)
+		}
+		srgbByteEdge[k-1] = float32(v)
+	}
+	edge := 0
+	for i := range srgbLUT {
+		v := float32(i) / float32(len(srgbLUT)-1)
+		for edge < 255 && srgbByteEdge[edge] <= v {
+			edge++
+		}
+		srgbLUT[i] = uint8(edge)
+	}
+}
+
+func srgbByte(v float32) uint8 {
+	if v <= 0 {
+		return 0
+	}
+	if v >= 1 {
+		return 255
+	}
+	// The table is right to within one byte (quantisation only bites within half a step of a
+	// boundary); two compares against the neighbouring boundaries make it exact.
+	b := srgbLUT[int(v*float32(len(srgbLUT)-1)+0.5)]
+	if b > 0 && v < srgbByteEdge[b-1] {
+		b--
+	} else if b < 255 && v >= srgbByteEdge[b] {
+		b++
+	}
+	return b
+}
+
+// EncodeDisplayBytes writes the display-ready RGBA bytes for a linear-light buffer straight into
+// dst (len(dst) == len(px)), skipping the intermediate float slice EncodeForDisplay allocates.
+// Alpha passes through unencoded, as everywhere else.
+func EncodeDisplayBytes(px []float32, dst []uint8) {
+	linear := model.LinearLight
+	for i := 0; i+3 < len(px) && i+3 < len(dst); i += 4 {
+		if linear {
+			dst[i+0] = srgbByte(px[i+0])
+			dst[i+1] = srgbByte(px[i+1])
+			dst[i+2] = srgbByte(px[i+2])
+		} else {
+			dst[i+0] = u8(px[i+0])
+			dst[i+1] = u8(px[i+1])
+			dst[i+2] = u8(px[i+2])
+		}
+		dst[i+3] = u8(px[i+3])
+	}
 }
 
 func SavePreview(path string, px []float32, w, h int) error {

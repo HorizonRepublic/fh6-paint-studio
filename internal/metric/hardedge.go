@@ -2,9 +2,37 @@ package metric
 
 import (
 	"math"
+	"os"
+	"strconv"
+	"strings"
 
 	"fh6-paint-studio/internal/model"
 )
+
+// Calibration of HardEdgeMap. edgeTau is the Sobel magnitude of a real drawn edge (~0.09 sRGB step;
+// shading stays below); densSat is the edge-pixel density at which a cell reads as fully structured;
+// cohFloor is what a corner/wedge (two orientations, low coherence) keeps.
+//
+// densSat is the load-bearing one and it decides where the gates that suppress standouts apply:
+// at 0.08 a 12x12 cell crossed by ONE 12px edge already saturates to "fully structured", so a face's
+// smooth neck (a jawline and a few hair strands within the 3x3 cell smoothing) reads 0.62 mean /
+// 0.72 median — which simultaneously (a) lets rect/tri candidates into smooth skin, (b) puts the
+// deep-smooth glow swap out of reach (needs < tau), and (c) damps the region-weighted FE/EAGLE
+// terms to 1-0.62. All three anti-standout mechanisms go quiet in exactly the zone the owner keeps
+// pointing at. FH6_HARDMAP="edgeTau,densSat,cohFloor" overrides for lab A/Bs.
+var hardEdgeTau, hardDensSat, hardCohFloor = func() (float64, float64, float64) {
+	tau, dens, coh := 0.35, 0.08, 0.4
+	if s := os.Getenv("FH6_HARDMAP"); s != "" {
+		p := strings.Split(s, ",")
+		dst := []*float64{&tau, &dens, &coh}
+		for i := 0; i < len(p) && i < 3; i++ {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(p[i]), 64); err == nil {
+				*dst[i] = v
+			}
+		}
+	}
+	return tau, dens, coh
+}()
 
 // HardEdgeMap returns, per pixel, how much the local target neighbourhood is HARD-EDGED STRUCTURE
 // (line-work, spikes/wedges, geometric borders) in [0,1] вЂ” the regions where hard-cornered shape
@@ -17,12 +45,8 @@ import (
 // orientations and keeps a floor, since corners are triangle territory). The cell grid is box-3x3
 // smoothed and bilinearly upsampled, so the gate has no cell-boundary steps. len = w*h.
 func HardEdgeMap(target []float32, w, h int) []float32 {
-	const (
-		cell     = 12
-		edgeTau  = 0.35 // Sobel luma magnitude of a real drawn edge (~0.09 luma step); shading stays below
-		densSat  = 0.08 // edge-pixel density at which a cell counts as fully structured
-		cohFloor = 0.4  // coherence floor: corners/wedges (2 orientations) keep this much
-	)
+	const cell = 12
+	edgeTau, densSat, cohFloor := hardEdgeTau, hardDensSat, hardCohFloor
 	// Perceptual per-channel planes: sRGB-encode each channel so shadow edges keep their visual
 	// contrast (linear light crushes darks вЂ” dark-on-dark line-work vanished from a linear-luma
 	// map), and keep the channels separate so chroma-only edges (same luma) still register.

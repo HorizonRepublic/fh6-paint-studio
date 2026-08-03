@@ -154,7 +154,7 @@ func TestPolishMaskShape(t *testing.T) {
 	tau := 1.5
 
 	for _, ste := range []bool{false, true} {
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, false, 0, 0, 0, nil)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, false, 0, 0, 0, 0, nil)
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
 		gpu.PolishUpload(ref.P, ref.Col, ref.Kinds, ref.BBX, ref.Boff, ref.BelowTotal)

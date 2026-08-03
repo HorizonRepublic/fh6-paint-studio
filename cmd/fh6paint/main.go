@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -59,6 +60,13 @@ func main() {
 	kneeFloor := flag.Float64("knee-floor", 0, "with -shape-tol: floor the knee denominator at this fraction of the INITIAL error so the same tol also trips on near-SOLVED content (clean line-art / fully-filled flats) where Р вЂњР’В·currentErr blows up and never stops. 0=off (pure relative). ~0.02 = treat <2% residual as solved. Detailed photos (currentErr Р Р†РІР‚В°Р’В« floor) are unaffected.")
 	minGain := flag.Float64("min-gain", 0, "low-contrast shape GATE: reject a shape whose mean per-pixel SSE improvement (Р Р†РІвЂљВ¬РІР‚в„ўscore/area) is below this Р Р†Р вЂљРІР‚Сњ a faint 'ghost facet' that barely differs from what it covers. Budget reallocates to real detail or auto-stops once nothing high-contrast remains. 0=off. The direct fix for flat-background over-fill. Tune by EYE (too high erodes soft gradients). Working space is linear-light 0..1 RGBA, so per-pixel SSE is small Р Р†Р вЂљРІР‚Сњ try ~1e-4..1e-3.")
 	regionKinds := flag.Bool("region-kinds", false, "region-gated kind selection: rect/triangle candidates only where the TARGET has hard-edged structure (line-work, spikes, geometric borders — metric.HardEdgeMap); smooth shading is built from ellipses. The generation-side fix for hard shapes 'standing out' of organic content. Forces host-side candidate generation (the on-device generators use one global kind mix).")
+	backend := flag.String("backend", "", "GPU backend on an allgpu build: \"vulkan\" (default, the supported one) or \"cuda\" (unmaintained fallback, NVIDIA only). Ignored by single-backend builds. Use it to A/B the two on the same machine.")
+	smoothGlowTau := flag.Float64("smooth-glow-tau", 0, "deep-smooth glow-swap gate (needs -region-kinds): cells whose hard-structure reading is BELOW this swap their forced ellipse for a rimless glow. Higher = the swap reaches into moderately-structured cells, dissolving more of the ellipse-rim patchwork the eye reads as facets. 0 = the preset's value. Judge by EYE — SSE is blind to rim patchwork.")
+	smoothGlowProb := flag.Float64("smooth-glow-prob", 0, "with -smooth-glow-tau: probability a qualifying cell actually swaps to a glow. 0 = the preset's value; a low value keeps a mix of ellipses and glows in the same smooth zone.")
+	bigGlowTau := flag.Float64("big-glow-tau", 0, "SIZE-conditioned glow swap (0=preset, independent of -region-kinds): an ellipse candidate whose sqrt(rx*ry) exceeds this fraction of min(w,h) becomes a rimless glow. Past a certain size an ellipse rim stops being a local edge and becomes a long closed contour the eye traces as an oval — in smooth AND textured zones, which is why the hardness gate cannot catch it. ~0.03-0.06.")
+	bigGlowProb := flag.Float64("big-glow-prob", 0, "with -big-glow-tau: probability a qualifying large ellipse actually becomes a glow (0 = the preset's value, so the pool keeps a mix). Judge by EYE.")
+	bigGlowAll := flag.Bool("big-glow-all-kinds", false, "with -big-glow-tau: extend the size-conditioned swap from ellipses to rects and triangles — a big triangle's straight rims are the same contour artifact. A triangle is re-emitted as the glow inscribed in its vertex box.")
+	bigGlowDisk := flag.Bool("big-glow-disk", false, "with -big-glow-tau: emit the feathered DISK instead of the glow — an opaque core out to ~0.4R plus a soft rim, so the swap covers like the ellipse it replaces (cheaper in SSE) while still drawing no step.")
 	rampGlow := flag.Bool("ramp-glow", false, "ramp-aware hotter glow swap (needs -region-kinds): where metric.RampMap flags a genuine smooth gradient, the deep-smooth glow swap runs at tau 0.30/prob 0.90 (vs the global 0.10/0.80) so rimless glows dissolve the gradient patchwork the eye reads as facets — without touching structured content. Anime default; FH6_RAMPGLOW=\"thresh,tau,prob\" tunes.")
 	softSwap := flag.Float64("soft-swap", 0, "post-polish SOFT-SWAP standout repair (0=off): replace the worst standout rects/triangles (rim draws an edge the TARGET lacks) with a soft shape moment-fitted to the SAME footprint (ellipse/feathered-disk/glow, same colour+z), gated so the global error rises at most this fraction. Substitution keeps the coverage, so many repairs fit where -standout's remove/recolour menu starves at the gate. ~0.005-0.02. Judge by EYE.")
 	softSwapPre := flag.Bool("soft-swap-pre", false, "with -soft-swap: run the swap BEFORE the polish (on the greedy result) and let the joint polish co-adapt around the substitutions; gated end-to-end (polish(greedy) vs polish(swap(greedy)) — the swap branch ships only if SSE lands within tol AND the global false-edge ratio improves). The post-polish form starves at the gate (~4-7 swaps); this is the redistribution fix. Needs -polish.")
@@ -105,6 +113,7 @@ func main() {
 	analyticAlpha := flag.Bool("analytic-alpha", false, "EXPERIMENTAL analytic per-candidate alpha: eval re-solves the optimal color for a small alpha grid over [alpha-min,1] and keeps the best (alpha,color) pair — alpha becomes exact instead of random. Organic modes only.")
 	artifactFix := flag.Bool("artifact-fix", false, "EXPERIMENTAL artifact-repair pass: rank shapes by the false-edge energy they own in the final render (specks/rims the eye sees but SSE undercharges), then delete/soften/glow-swap offenders under local FE+SSE gates.")
 	mergeRefit := flag.Bool("merge-refit", false, "EXPERIMENTAL merge consolidation inside the LOO-refit rounds (needs -loo-refit>0): collapse near-duplicate shape pairs (same kind, near-same color, high overlap) into one fitted shape; the freed slots regrow on the residual.")
+	polishLostDetail := flag.Float64("polish-lost-detail", 0, "additive polish term (0=off), the MIRROR of -polish-false-edge: charges lambda*sum relu(|grad target| - |grad recon|) - STRUCTURE THE RECON ERASED. FE catches edges a shape invents; nothing caught the opposite, so a rimless glow laid over detail was invisible to the whole objective (no false edge, and a blob near the local mean is cheap in SSE). Rides the region weight like FE. Judge by EYE.")
 	termRegionW := flag.Bool("term-region-weight", false, "region-weighted FE/EAGLE polish terms: multiply the per-pixel term charges by 1-HardEdgeMap(target) so the perceptual lambdas press hard in SMOOTH zones (where the translucent-rim patchwork lives) and vanish on legitimate line-work -- lets the lambdas run far stronger than the global compromise. Only acts when -polish-false-edge/-polish-eagle > 0.")
 	polishSTE := flag.Bool("polish-ste", false, "polish straight-through estimator: HARD-coverage forward composite (optimizes the EXACT shipped hard render, closing the soft->hard snap gap) with the soft surrogate gradient for geometry. Biggest win on flat/vector content where the snap gap is largest. Default off (soft polish).")
 	polishEarly := flag.Bool("polish-early", true, "early-stop the polish loop on diminishing returns (a late-phase check adds <2% of the total hard-loss gain so far, 3x); the best-hard point is still shipped, so this only drops a genuinely-wasteful tail. Inert at the tuned iters (polish is still productive there); trims when iters are raised. -polish-early=false runs the full -polish-iters.")
@@ -131,6 +140,15 @@ func main() {
 	unsafeShapes := flag.Bool("unsafe-shapes", false, "DEBUG: skip the FH6 3000-shape ceiling clamp. The output is NOT injectable — for over-provision experiments (generate >3000, prune to budget offline).")
 	perceptualLuma := flag.Bool("perceptual-luma", false, "EXPERIMENT (default off): compute WeightMapV2's luma in sRGB space so its darkness/highlight pivots land correctly in the linear pipeline. A/B only Р Р†Р вЂљРІР‚Сњ validate by eye end-to-end (REVIEW M4).")
 	flag.Parse()
+	backendPref = strings.ToLower(*backend)
+
+	if p := os.Getenv("FH6_CPUPROFILE"); p != "" {
+		f, err := os.Create(p)
+		if err == nil {
+			pprof.StartCPUProfile(f)
+			defer pprof.StopCPUProfile()
+		}
+	}
 
 	model.LinearLight = *linear
 	metric.PerceptualLuma = *perceptualLuma
@@ -296,6 +314,17 @@ func main() {
 	if !userSet["smooth-base"] {
 		*smoothBase = md.SmoothBase
 	}
+	// Size-conditioned glow-swap defaults (md.BigGlowTau/-Prob). Pulled here for the same reason
+	// every other preset field is: the studio reads ModeDefaults directly, the CLI does not.
+	if !userSet["big-glow-tau"] {
+		*bigGlowTau = md.BigGlowTau
+	}
+	if !userSet["big-glow-prob"] {
+		*bigGlowProb = md.BigGlowProb
+	}
+	if !userSet["big-glow-all-kinds"] {
+		*bigGlowAll = md.BigGlowAllKinds
+	}
 	// Region-weighted term default (md.TermRegionWeight: anime — pairs with the weighted EAGLE λ).
 	if !userSet["term-region-weight"] {
 		*termRegionW = md.TermRegionWeight
@@ -323,6 +352,13 @@ func main() {
 	// EAGLE polish term default (md.Eagle: anime 0.015, photo/flat 0). -polish-eagle overrides.
 	if !userSet["polish-eagle"] {
 		*polishEagle = md.Eagle
+	}
+	// Lost-detail polish term default (md.LostDetail: anime 0.2, photo/flat 0 — photo measured
+	// +14% worse). -polish-lost-detail overrides. Without this pull the CLI would run the term at
+	// 0 while the studio ran it at the preset value: the same studio-vs-CLI split that made every
+	// benchmark this campaign measure a path the product does not take.
+	if !userSet["polish-lost-detail"] {
+		*polishLostDetail = md.LostDetail
 	}
 	// Region-gated kinds default (md.RegionKinds: anime only). -region-kinds overrides.
 	if !userSet["region-kinds"] {
@@ -542,9 +578,6 @@ func main() {
 	be, beName, err := newBackend(prep.Pixels, weight, prep.W, prep.H, *gridSize)
 	must(err)
 	defer be.Close()
-	if we, ok := be.(interface{ SetWarpEval(bool) }); ok {
-		we.SetWarpEval(*warpEval)
-	}
 	applog.Printf("backend=%s", beName)
 	if prep.HasTransparency {
 		applog.Printf("transparent background detected Р Р†Р вЂљРІР‚Сњ keeping background empty (cutout mode)")
@@ -566,7 +599,7 @@ func main() {
 			Width: prep.W, Height: prep.H, Background: prep.Background, TransparentBG: prep.HasTransparency,
 			RecolorVarSkip: *recolorVar,
 			Polish:         true,
-			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM, *polishEagle),
+			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM, *polishEagle, *polishLostDetail),
 		}, *out, *preview, *ssaa)
 		return
 	}
@@ -584,7 +617,7 @@ func main() {
 			Width: prep.W, Height: prep.H, Background: prep.Background,
 			StopAt: *shapes, Seed: *seed, TransparentBG: prep.HasTransparency,
 			Gaussian:   true,
-			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0, 0, 0),
+			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0, 0, 0, 0),
 		})
 		applog.Printf("gaussian: %d glows, error %.1f -> %.1f in %.1fs",
 			len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
@@ -627,6 +660,13 @@ func main() {
 		CanvasPad:           float32(*canvasPad),
 		StandoutTol:         *standout,
 		RegionKinds:         *regionKinds,
+		SmoothGlowTau:       *smoothGlowTau,
+		SmoothGlowProb:      *smoothGlowProb,
+		BigGlowTau:          *bigGlowTau,
+		BigGlowProb:         *bigGlowProb,
+		BigGlowAllKinds:     *bigGlowAll,
+		BigGlowDisk:         *bigGlowDisk,
+		WarpEval:            *warpEval,
 		RampGlow:            *rampGlow,
 		TermRegionWeight:    *termRegionW,
 		LooRefit:            *looRefit,
@@ -656,7 +696,7 @@ func main() {
 		CoarseK:           *coarseK,
 		CoarseFP16:        *coarseFP16,
 		Polish:            *polish,
-		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM, *polishEagle),
+		PolishOpts:        polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM, *polishEagle, *polishLostDetail),
 		BackFit:           *backfit,
 		BackFitPasses:     *backfitPasses,
 		BackFitFrac:       *backfitFrac,
@@ -668,6 +708,9 @@ func main() {
 			if n%25 == 0 {
 				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, fillBudget, e, time.Since(start).Seconds())
 			}
+		},
+		Status: func(stage string) {
+			applog.Printf("  stage: %s (%.1fs)", stage, time.Since(start).Seconds())
 		},
 	}
 	res := engine.RunBest(be, o, *bestOf)

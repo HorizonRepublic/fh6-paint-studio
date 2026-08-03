@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sort"
+	"sync"
 
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
@@ -35,6 +37,7 @@ const (
 	smoothPad       = 8.0  // px of placement overshoot past the region extents
 	smoothSpill     = 0.5  // weight fraction charged for footprint pixels OUTSIDE the region: the greedy overpaints most of a claim's spill but not all, and an uncharged spill lets the joint solve pick metamer colours (a green base under a grey arc) that ship as ghosts wherever the budget runs out
 	smoothBudget    = 1 << 18
+	smoothTrialPar  = 8 // concurrent menu solves; each holds a φ cache, so this bounds the peak too
 )
 
 var smoothDebug = os.Getenv("FH6_SMOOTH_DEBUG") != ""
@@ -350,20 +353,45 @@ func (r *run) smoothClaimStack(canvas, weight []float32, rg *smoothRegion, sel [
 		var bestCols []model.RGBA
 		roundBest := bestDelta
 		residual := before + bestDelta
+		// The menu trials are independent solves of the same region — the round's cost is the whole
+		// pass's cost, so run them concurrently and keep the selection sequential below (identical
+		// argmin, ties still going to the earlier menu entry).
+		type trial struct {
+			cols []model.RGBA
+			d    float64
+			ok   bool
+		}
+		trials := make([]trial, len(menu))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, minInt(runtime.NumCPU(), smoothTrialPar))
 		for i, cand := range menu {
 			if used[i] {
 				continue
 			}
-			trial := append(append([]model.Candidate(nil), stack...), cand)
-			cols, d, ok := solveStack(canvas, target, weight, w, h, trial, smoothBudget, sel, smoothSpill)
-			if !ok || d >= roundBest {
+			wg.Add(1)
+			go func(i int, cand model.Candidate) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				layers := append(append([]model.Candidate(nil), stack...), cand)
+				cols, d, ok := solveStack(canvas, target, weight, w, h, layers, smoothBudget, sel, smoothSpill)
+				trials[i] = trial{cols, d, ok}
+			}(i, cand)
+		}
+		wg.Wait()
+		for i := range menu {
+			if used[i] || !trials[i].ok {
+				continue
+			}
+			d := trials[i].d
+			if d >= roundBest {
 				continue
 			}
 			// The layer must cut a material fraction of the region's REMAINING error.
 			if d-bestDelta > -smoothLayerGain*residual {
 				continue
 			}
-			roundBest, bestI, bestCols = d, i, cols
+			roundBest, bestI, bestCols = d, i, trials[i].cols
 		}
 		if bestI < 0 {
 			break

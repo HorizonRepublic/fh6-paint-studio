@@ -111,6 +111,11 @@ func TestGoldenDiffPolish(t *testing.T) {
 		mk(model.KindRectangle, [6]float32{10, 12, 6, 8, 10, 0}, 0.1, 0.7, 0.2, 0.6),
 		mk(model.KindTriangle, [6]float32{5, 5, 26, 8, 12, 26}, 0.2, 0.3, 0.9, 0.9),
 		mk(model.KindEllipse, [6]float32{30, 20, 7, 7, 0, 0}, 0.9, 0.9, 0.1, 0.5),
+		// The native gradient primitives: a glow trains its geometry through the analytic
+		// gaussian gradient, a disk composites softly with its geometry frozen. Without them in
+		// the stack the polish golden-diff cannot see a backend that ignores the falloff.
+		mk(model.KindGlow, [6]float32{16, 18, 9, 6, 20, 0}, 0.3, 0.6, 0.8, 0.8),
+		mk(model.KindDisk, [6]float32{24, 10, 6, 8, 0, 0}, 0.7, 0.4, 0.2, 0.6),
 	}
 	bg := model.RGBA{R: 0.4, G: 0.4, B: 0.4}
 	tau := 1.5
@@ -126,13 +131,20 @@ func TestGoldenDiffPolish(t *testing.T) {
 		fe         float64
 		ssim       float64
 		eagle      float64
+		lost       float64
 		tw         bool
-	}{{false, false, 0, 0, 0, false}, {true, false, 0, 0, 0, false}, {false, true, 0, 0, 0, false}, {true, true, 0, 0, 0, false},
-		{false, false, 0.01, 0, 0, false}, {true, false, 0.01, 0, 0, false},
-		{false, false, 0, 0.01, 0, false}, {true, false, 0, 0.01, 0, false}, {false, false, 0.01, 0.01, 0, false},
-		{false, false, 0, 0, 0.02, false}, {true, false, 0, 0, 0.02, false}, {false, false, 0.01, 0.01, 0.02, false},
-		{false, false, 0.01, 0, 0.02, true}, {true, false, 0.01, 0.01, 0.02, true}} {
-		ste, oklab, feLam, ssLam, egLam := mode.ste, mode.oklab, mode.fe, mode.ssim, mode.eagle
+	}{{false, false, 0, 0, 0, 0, false}, {true, false, 0, 0, 0, 0, false}, {false, true, 0, 0, 0, 0, false}, {true, true, 0, 0, 0, 0, false},
+		{false, false, 0.01, 0, 0, 0, false}, {true, false, 0.01, 0, 0, 0, false},
+		{false, false, 0, 0.01, 0, 0, false}, {true, false, 0, 0.01, 0, 0, false}, {false, false, 0.01, 0.01, 0, 0, false},
+		{false, false, 0, 0, 0.02, 0, false}, {true, false, 0, 0, 0.02, 0, false}, {false, false, 0.01, 0.01, 0.02, 0, false},
+		{false, false, 0.01, 0, 0.02, 0, true}, {true, false, 0.01, 0.01, 0.02, 0, true},
+		// Lost-detail (the FE mirror) alone, weighted, and COMBINED with FE. The combined case is
+		// the one that matters: both terms scatter through the same Sobel stencil with opposite
+		// signs into one dir plane, so a sign or activation slip cancels in isolation.
+		{false, false, 0, 0, 0, 0.01, false}, {true, false, 0, 0, 0, 0.01, false},
+		{false, false, 0, 0, 0, 0.01, true}, {false, false, 0.01, 0, 0, 0.01, false},
+		{false, false, 0.01, 0.01, 0.02, 0.01, true}} {
+		ste, oklab, feLam, ssLam, egLam, ldLam := mode.ste, mode.oklab, mode.fe, mode.ssim, mode.eagle, mode.lost
 		var tw []float32
 		if mode.tw {
 			tw = twMap
@@ -141,7 +153,7 @@ func TestGoldenDiffPolish(t *testing.T) {
 			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
 			continue
 		}
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam, ssLam, egLam, tw)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam, ssLam, egLam, ldLam, tw)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
@@ -157,6 +169,11 @@ func TestGoldenDiffPolish(t *testing.T) {
 		}
 		if egLam > 0 && !gpu.PolishSetEagle(egLam) {
 			t.Log("DLL lacks fp_set_polish_eagle — skipping the EAGLE golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
+		if ldLam > 0 && !gpu.PolishSetLostDetail(ldLam) {
+			t.Log("DLL lacks fp_set_polish_lostdetail — skipping the lost-detail golden-diff (rebuild the DLL)")
 			gpu.PolishFree()
 			continue
 		}
@@ -209,4 +226,45 @@ func TestGoldenDiffPolish(t *testing.T) {
 		}
 	}
 	gpu.PolishSetSTE(false)
+}
+
+// randGradCands generates the NATIVE FH6 gradient primitives — a glow and a disk have a per-pixel
+// alpha (a radial falloff), not the binary coverage the hard kinds have.
+func randGradCands(rng *rand.Rand, w, h, n int) []model.Candidate {
+	kinds := []model.ShapeKind{model.KindGlow, model.KindDisk}
+	out := make([]model.Candidate, n)
+	for i := range out {
+		out[i] = model.Candidate{
+			Kind: kinds[rng.Intn(len(kinds))],
+			P: [6]float32{rng.Float32() * float32(w), rng.Float32() * float32(h),
+				2 + rng.Float32()*float32(w)/3, 2 + rng.Float32()*float32(h)/3, rng.Float32() * 180, 0},
+			Color: model.RGBA{R: rng.Float32(), G: rng.Float32(), B: rng.Float32(), A: 0.2 + rng.Float32()*0.8},
+		}
+	}
+	return out
+}
+
+// randMaskCands places dictionary words — the bank primitives the smooth-base stacks, the shade
+// pre-pass and the glyph passes are built from.
+func randMaskCands(t *testing.T, rng *rand.Rand, w, h, n int) []model.Candidate {
+	t.Helper()
+	var kinds []model.ShapeKind
+	for _, word := range []uint16{2204, 2202, 2219, 2220} {
+		if k, ok := model.MaskKind(word); ok {
+			kinds = append(kinds, k)
+		}
+	}
+	if len(kinds) == 0 {
+		t.Skip("no bank words compiled in")
+	}
+	out := make([]model.Candidate, n)
+	for i := range out {
+		out[i] = model.Candidate{
+			Kind: kinds[rng.Intn(len(kinds))],
+			P: [6]float32{rng.Float32() * float32(w), rng.Float32() * float32(h),
+				6 + rng.Float32()*float32(w)/2, 6 + rng.Float32()*float32(h)/2, rng.Float32() * 180, 0},
+			Color: model.RGBA{R: rng.Float32(), G: rng.Float32(), B: rng.Float32(), A: 0.3 + rng.Float32()*0.7},
+		}
+	}
+	return out
 }

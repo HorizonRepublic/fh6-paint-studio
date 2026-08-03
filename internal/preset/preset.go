@@ -228,10 +228,15 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		MomentSeed:        true,
 		MomentDetailStart: 0.55,
 		Polish:            sp.polish,
-		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim, sp.eagle),
+		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim, sp.eagle, sp.lostDetail),
 		ShadePrepass:      sp.shadePre,
 		SmoothBase:        sp.smoothBase,
 		RegionKinds:       sp.regionKinds,
+		SmoothGlowTau:     sp.glowTau,
+		SmoothGlowProb:    sp.glowProb,
+		BigGlowTau:        sp.bigGlowTau,
+		BigGlowProb:       sp.bigGlowProb,
+		BigGlowAllKinds:   sp.bigGlowAll,
 		RampGlow:          sp.rampGlow,
 		TermRegionWeight:  sp.termRegionW,
 		LooRefit:          sp.looRefit,
@@ -316,9 +321,15 @@ type shapeParams struct {
 	falseEdge     float64
 	ssim          float64
 	eagle         float64
+	lostDetail    float64
 	shadePre      bool
 	smoothBase    bool
 	regionKinds   bool
+	glowTau       float64
+	glowProb      float64
+	bigGlowTau    float64
+	bigGlowProb   float64
+	bigGlowAll    bool
 	rampGlow      bool
 	termRegionW   bool
 	looRefit      int
@@ -345,9 +356,15 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 		falseEdge:     md.FalseEdge,
 		ssim:          md.SSIM,
 		eagle:         md.Eagle,
+		lostDetail:    md.LostDetail,
 		shadePre:      md.ShadePre,
 		smoothBase:    md.SmoothBase,
 		regionKinds:   md.RegionKinds,
+		glowTau:       md.SmoothGlowTau,
+		glowProb:      md.SmoothGlowProb,
+		bigGlowTau:    md.BigGlowTau,
+		bigGlowProb:   md.BigGlowProb,
+		bigGlowAll:    md.BigGlowAllKinds,
 		rampGlow:      md.RampGlow,
 		termRegionW:   md.TermRegionWeight,
 		looRefit:      md.LooRefit,
@@ -587,14 +604,28 @@ type ModeDefaults struct {
 	FalseEdge   float64   // false-edge additive polish loss λ (0 = off)
 	SSIM        float64   // SSIM additive polish loss λ (0 = off)
 	Eagle       float64   // EAGLE additive polish loss λ (0 = off)
-	Boundary    bool      // boundary-aware radius
-	Backfit     bool      // post-polish back-fitting
-	KneeTol     float64   // auto-shape-count knee tolerance (0 = off / fill budget)
-	KneeFloor   float64   // knee absolute floor (frac of initialErr) so it trips on near-SOLVED flat content
-	ShadePre    bool      // shading pre-pass: claim coherent linear-ramp regions as base+gradient-word stacks
-	SmoothBase  bool      // smooth-region gradient base: claim LARGE smooth regions with jointly-solved base+gradient stacks
-	RegionKinds bool      // region-gated kind selection: rect/tri only where the target has hard structure
-	RampGlow    bool      // ramp-aware hotter glow swap: dissolve gradient patchwork with rimless glows where metric.RampMap flags a genuine gradient (needs RegionKinds)
+	// LostDetail is the MIRROR of the false-edge λ: it charges structure the recon ERASED. A
+	// rimless glow laid over detail draws no false edge and is cheap in SSE, so before this term
+	// nothing in the objective could see blur-over-structure. 0 = off.
+	LostDetail  float64
+	Boundary    bool    // boundary-aware radius
+	Backfit     bool    // post-polish back-fitting
+	KneeTol     float64 // auto-shape-count knee tolerance (0 = off / fill budget)
+	KneeFloor   float64 // knee absolute floor (frac of initialErr) so it trips on near-SOLVED flat content
+	ShadePre    bool    // shading pre-pass: claim coherent linear-ramp regions as base+gradient-word stacks
+	SmoothBase  bool    // smooth-region gradient base: claim LARGE smooth regions with jointly-solved base+gradient stacks
+	RegionKinds bool    // region-gated kind selection: rect/tri only where the target has hard structure
+	// SmoothGlowTau/-Prob gate the deep-smooth glow swap riding RegionKinds: hard<Tau cells swap
+	// their forced ellipse for a rimless glow with probability Prob. 0 = the engine default pair.
+	SmoothGlowTau  float64
+	SmoothGlowProb float64
+	// BigGlowTau/-Prob gate the SIZE-conditioned glow swap, which does NOT ride RegionKinds: an
+	// ellipse candidate larger than Tau*min(w,h) becomes a rimless glow with probability Prob.
+	// 0 = off.
+	BigGlowTau      float64
+	BigGlowProb     float64
+	BigGlowAllKinds bool // let the swap eat big rects/triangles too, not just ellipses
+	RampGlow        bool // ramp-aware hotter glow swap: dissolve gradient patchwork with rimless glows where metric.RampMap flags a genuine gradient (needs RegionKinds)
 
 	SaliencyQuota    float64 // reserve this budget fraction for top-detail cells (eyes/faces); 0 = off
 	TermRegionWeight bool    // region-weighted FE/EAGLE polish terms: λ × (1−HardEdgeMap) — strong in smooth zones, ~zero on line-work
@@ -646,6 +677,12 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// patchwork lives. Measured on img_10 photo @native: ΔE 3.25→3.16, p95 −3%, SSIM +0.008
 		// with the swap; the gate itself is inert on structured zones (full pool at hard cells).
 		d.RegionKinds = true
+		// Same raised glow-swap pair as anime, and for the same reason (see the anime case): the
+		// eval-kernel fix cut photo's glow density too (img_10 photo 63 vs the ~117 the old
+		// mis-scoring produced). Measured on img_10 photo, seed 1: 0.30/0.90 is -4.3% SSE at 108
+		// glows, while 0.30/0.80 is +1.0% at 99 — photo prefers the denser pair outright. NB one
+		// image, one seed: anime carries the 3x2 replication, photo rides its direction.
+		// REVERTED 2026-08-03 evening together with anime's — see the anime case.
 		// LOO refit (see the anime case below for the measured rationale) — photo shares it.
 		d.LooRefit = 2
 	case "flat":
@@ -699,6 +736,44 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// CUDA generators (fp_set_kind_gate), wall cost ≈ 0; photo unmeasured (no photo bench
 		// yet) and flat needs its rect-rich pool — both OFF.
 		d.RegionKinds = true
+		// Deep-smooth glow swap, raised from the engine default 0.10/0.80 (2026-08-03). The old
+		// pair was tuned against a MIS-SCORING eval kernel: the warp kernel had no per-pixel-alpha
+		// branch, so a glow candidate was scored as a SOLID ellipse — credited with full coverage,
+		// winning steps it did not deserve, then composited with its real falloff. Fixing the
+		// kernel halved the glow count (img_10 117 -> 64) and the ellipse rims the swap exists to
+		// dissolve came back, which the owner caught by eye immediately. tau 0.30 buys that density
+		// back deliberately and measures BETTER than the old accident: 3 images x 2 seeds vs the
+		// 0.10 pair, 0.30/0.90 is -0.41% SSE mean (better on 4 of 6) at glow density 102-109 —
+		// closest to the 117 the owner had approved — while 0.30/0.80 is the SSE optimum (-1.51%
+		// mean, better on 5 of 6) at a lower density of 84-97. Density is what the eye reads here
+		// and SSE is blind to it, so the eye-matching pair wins; -smooth-glow-tau/-prob override.
+		// REVERTED 2026-08-03 evening to the engine pair (0.10/0.80) — the one the owner had actually
+		// approved by eye. tau 0.30 reaches the glow swap into MODERATELY structured cells, and a glow
+		// there is a half-transparent soft splat: the same failure mode as the size-conditioned swap
+		// below, measured the same way (SSE + density counts, no full-frame eye check), shipped the
+		// same day, and rejected by the owner on the same generation. Both stay reachable by flag.
+		// The SIZE-conditioned glow swap (Options.BigGlowTau/-Prob) was measured here 2026-08-03 and
+		// stays OFF — BUST. Every number said ship it: −3.9% SSE mean on anime, −5.0% on photo,
+		// −6.2% at 600-900px, and the biggest false-edge cut of any variant. The owner's eye on a
+		// full frame said the opposite and was right: swapping the big shapes for rimless glows
+		// sprays half-transparent soft splats over the WHOLE image, which veils contrast, blotches
+		// skin and smears line-work — while false-edge, a Sobel measure, rewards exactly that
+		// (a soft radial blob has almost no gradient energy). Two lessons, both already in the
+		// house style and both re-learned the hard way: judge on the FULL FRAME, never a crop, and
+		// never let a proxy metric stand in for the eye. CLI-reachable via -big-glow-tau for lab work.
+		// Lost-detail term, anime only (see lostdetail.go): charges structure the recon ERASED —
+		// the mirror of FalseEdge, and the one artifact FE/EAGLE/SSE were all blind to (a rimless
+		// glow over detail draws no edge and sits near the local mean). λ=0.2 measured across
+		// img_23/img_10/img_5 × 2 seeds: better on 5 of 6 runs, img_10 −10%, img_5 inert (nothing
+		// to recover there — it has ~no glows). λ=0.35 is unstable (img_10 seed 2 blows up) and
+		// λ≥0.5 makes the polish reject every iterate and ship the greedy input unchanged.
+		// PHOTO IS DELIBERATELY EXCLUDED: measured 57821 → 66154 (+14% worse) on img_10 photo —
+		// photo runs every perceptual λ at 0 by design, and this term is no exception.
+		// REVERTED 2026-08-03 evening, DEFAULT 0: λ=0.2 is an order above every other perceptual term
+		// here (FE 0.012, EAGLE 0.1 region-weighted, SSIM 0.006) and was picked on "5 of 6 runs better
+		// by SSE" alone — no full-frame eye check ever ran on it. It ships in the same build the owner
+		// rejected for dull, blotchy colour. Reachable via -polish-lost-detail; re-tune it only against
+		// full frames the owner has seen, one term at a time.
 		// Smooth-region gradient base (see the photo case for the gate-safety rationale): the
 		// other half of the anime combo above — claims replace the greedy's translucent facet
 		// patchwork in large smooth zones with 2-4 jointly-colour-solved gradient stacks.
@@ -967,7 +1042,7 @@ func resolveGaussian(prep imageio.Prepared, c Choices, w, h, shapes int) Resolve
 		Seed:          c.Seed,
 		TransparentBG: prep.HasTransparency,
 		Gaussian:      true,
-		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0, 0, 0),
+		PolishOpts:    polishOpts(iters, 0, 0.08, false, 0, 0, 0, 0),
 	}
 	return Resolved{
 		Options: opt,
@@ -995,7 +1070,7 @@ func gaussTrainIters(shapes int) int {
 	return it
 }
 
-func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda, eagleLambda float64) engine.PolishOptions {
+func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda, eagleLambda, lostDetailLambda float64) engine.PolishOptions {
 	o := engine.DefaultPolishOptions()
 	if iters > 0 {
 		o.Iters = iters
@@ -1010,6 +1085,7 @@ func polishOpts(iters int, tau0, tau1 float64, ste bool, feLambda, ssimLambda, e
 	o.FalseEdgeLambda = feLambda
 	o.SSIMLambda = ssimLambda
 	o.EagleLambda = eagleLambda
+	o.LostDetailLambda = lostDetailLambda
 	return o
 }
 

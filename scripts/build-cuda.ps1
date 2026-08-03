@@ -1,6 +1,7 @@
 ﻿# build-cuda.ps1 -- compile the CUDA shim into fh6cuda.dll and build fh6paint-cuda.exe.
 # Run from the repo root. Needs: CUDA Toolkit (nvcc) + MSVC Build Tools (cl.exe) + Go.
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\build-cuda.ps1
+param([switch]$Release)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $root) { $root = (Get-Location).Path }
@@ -44,10 +45,24 @@ $bin = Join-Path $root "bin"
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
 # --- compile shim.cu -> bin\fh6cuda.dll (static cudart = self-contained) ---
+# -Release builds FAT: cubins for every consumer architecture this toolkit still supports, plus PTX
+# from the newest so future cards JIT. Without it the DLL is -arch=native — this machine's GPU only,
+# which is what you want while iterating (seconds instead of minutes) and NEVER what you ship.
+# CUDA 13 dropped Maxwell/Pascal/Volta, so a shipped DLL starts at Turing; older NVIDIA cards fall
+# back to the Vulkan backend like AMD/Intel do.
 $dll = Join-Path $bin "fh6cuda.dll"
 $cu  = Join-Path $root "internal\backend\cuda\shim.cu"
-Write-Host "Building $dll ..." -ForegroundColor Cyan
-& $nvcc -O3 -shared --cudart static -arch=native -o $dll $cu
+# [string[]] is load-bearing: PowerShell unwraps a one-element array to a scalar, and `@scalar`
+# then splats the STRING character by character ("Don't know what to do with 'e'").
+[string[]]$archArgs = if ($Release) {
+    @('-gencode=arch=compute_75,code=sm_75',   # Turing   — RTX 20xx, GTX 16xx
+      '-gencode=arch=compute_86,code=sm_86',   # Ampere   — RTX 30xx
+      '-gencode=arch=compute_89,code=sm_89',   # Ada      — RTX 40xx
+      '-gencode=arch=compute_120,code=sm_120', # Blackwell— RTX 50xx
+      '-gencode=arch=compute_120,code=compute_120')
+} else { @('-arch=native') }
+Write-Host "Building $dll ($(if ($Release) { 'FAT — release' } else { 'native — dev' })) ..." -ForegroundColor Cyan
+& $nvcc -O3 -shared --cudart static @archArgs -o $dll $cu
 if ($LASTEXITCODE -ne 0) { throw "nvcc failed ($LASTEXITCODE)" }
 Write-Host "Built bin\fh6cuda.dll" -ForegroundColor Green
 

@@ -12,7 +12,7 @@ layout(std430, binding = 3) readonly  buffer Kc { float kindCDF[]; };
 layout(std430, binding = 4) readonly  buffer Kg { float kindGate[]; };
 layout(std430, binding = 5) readonly  buffer Rg { float rampGlow[]; };
 layout(push_constant) uniform PC {
-    uint seedLo, seedHi; int n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb;
+    uint seedLo, seedHi; int n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow, bigKinds, bigKind; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb;
 } pc;
 
 uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -49,6 +49,8 @@ void main() {
             scand[b + 1] = scx; scand[b + 2] = scy; scand[b + 5] = sth; scand[b + 6] = 0.0;
             if (pc.canvasPad > 0.0) clampExtents(scx, scy, a, bb, sth, float(pc.W), float(pc.H), padPx);
             scand[b + 3] = a; scand[b + 4] = bb;
+            if (pc.bigProb > 0.0 && sqrt(a * bb) > pc.bigTau * min(float(pc.W), float(pc.H)) &&
+                uf(uint(i), ctr) < pc.bigProb) scand[b + 0] = float(pc.bigKind); // see gen.comp: big-shape glow swap
             continue;
         }
         float major = max(srx, sry), minor = min(srx, sry);
@@ -77,26 +79,44 @@ void main() {
         if (fullPool) { float ku = uf(uint(i), ctr) * kindCDF[pc.nKinds - 1];
           for (int kk = 0; kk < pc.nKinds; kk++) if (ku < kindCDF[kk]) { kind = int(kinds[kk] + 0.5); break; } }
         scand[b + 0] = float(kind);
+        float bigThr = pc.bigTau * min(float(pc.W), float(pc.H));
         if (kind == 1) {
             float hw = 1.0 + uf(uint(i), ctr) * (localR - 1.0);
             float u2 = uf(uint(i), ctr);
             float hh = (aspect > 1.0) ? max(0.5, hw / (1.0 + u2 * (aspect - 1.0))) : 1.0 + u2 * (localR - 1.0);
-            scand[b + 1] = jx; scand[b + 2] = jy; scand[b + 3] = hw; scand[b + 4] = hh; scand[b + 5] = theta; scand[b + 6] = 0.0;
-            if (pc.canvasPad > 0.0) { float a = hw, bb = hh; clampExtents(jx, jy, a, bb, theta, float(pc.W), float(pc.H), padPx); scand[b + 3] = a; scand[b + 4] = bb; }
+            scand[b + 1] = jx; scand[b + 2] = jy; scand[b + 5] = theta; scand[b + 6] = 0.0;
+            if (pc.canvasPad > 0.0) clampExtents(jx, jy, hw, hh, theta, float(pc.W), float(pc.H), padPx);
+            scand[b + 3] = hw; scand[b + 4] = hh;
+            if (pc.bigKinds != 0 && pc.bigProb > 0.0 && sqrt(hw * hh) > bigThr &&
+                uf(uint(i), ctr) < pc.bigProb) scand[b + 0] = float(pc.bigKind); // see gen.comp
         } else if (kind == 2) {
             float rr = 4.0 + uf(uint(i), ctr) * (localR - 4.0);
-            scand[b + 1] = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
-            scand[b + 2] = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
-            scand[b + 3] = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
-            scand[b + 4] = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
-            scand[b + 5] = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
-            scand[b + 6] = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            float vx1 = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            float vy1 = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            float vx2 = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            float vy2 = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            float vx3 = clampf2(jx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            float vy3 = clampf2(jy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            scand[b + 1] = vx1; scand[b + 2] = vy1; scand[b + 3] = vx2;
+            scand[b + 4] = vy2; scand[b + 5] = vx3; scand[b + 6] = vy3;
+            float bx0 = min(min(vx1, vx2), vx3), bx1 = max(max(vx1, vx2), vx3);
+            float by0 = min(min(vy1, vy2), vy3), by1 = max(max(vy1, vy2), vy3);
+            float grx = max(2.0, 0.7 * 0.5 * (bx1 - bx0)), gry = max(2.0, 0.7 * 0.5 * (by1 - by0));
+            if (pc.bigKinds != 0 && pc.bigProb > 0.0 && sqrt(grx * gry) > bigThr &&
+                uf(uint(i), ctr) < pc.bigProb) {
+                scand[b + 0] = float(pc.bigKind);
+                scand[b + 1] = (vx1 + vx2 + vx3) / 3.0; scand[b + 2] = (vy1 + vy2 + vy3) / 3.0;
+                scand[b + 3] = grx; scand[b + 4] = gry; scand[b + 5] = 0.0; scand[b + 6] = 0.0;
+            }
         } else {
             float rx = 2.0 + uf(uint(i), ctr) * (localR - 2.0);
             float u2 = uf(uint(i), ctr);
             float ry = (aspect > 1.0) ? max(1.0, rx / (1.0 + u2 * (aspect - 1.0))) : 2.0 + u2 * (localR - 2.0);
-            scand[b + 1] = jx; scand[b + 2] = jy; scand[b + 3] = rx; scand[b + 4] = ry; scand[b + 5] = theta; scand[b + 6] = 0.0;
-            if (pc.canvasPad > 0.0) { float a = rx, bb = ry; clampExtents(jx, jy, a, bb, theta, float(pc.W), float(pc.H), padPx); scand[b + 3] = a; scand[b + 4] = bb; }
+            scand[b + 1] = jx; scand[b + 2] = jy; scand[b + 5] = theta; scand[b + 6] = 0.0;
+            if (pc.canvasPad > 0.0) clampExtents(jx, jy, rx, ry, theta, float(pc.W), float(pc.H), padPx);
+            scand[b + 3] = rx; scand[b + 4] = ry;
+            if (kind == 0 && pc.bigProb > 0.0 && sqrt(rx * ry) > bigThr &&
+                uf(uint(i), ctr) < pc.bigProb) scand[b + 0] = float(pc.bigKind); // see gen.comp: big-shape glow swap
         }
     }
 }

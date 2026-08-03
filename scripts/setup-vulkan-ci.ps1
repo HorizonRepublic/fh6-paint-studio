@@ -23,8 +23,19 @@ function Get-Zip($url, $dest) {
 
 # 1) glslang -> bin\glslangValidator.exe. Newer builds name the binary glslang.exe; either accepts the
 #    -V/--target-env/--vn flags build-vulkan.ps1 uses, so copy whichever is present under that name.
+#    Only the rolling main-tot release carries prebuilt Windows binaries (the numbered releases ship
+#    source only), and its ASSET NAMES change -- glslang-master-windows-Release.zip became
+#    glslang-main-windows-x86_64-release.zip and broke the release build with a bare 404. So resolve
+#    the asset from the release listing by pattern instead of hardcoding the name.
 $gdir = Join-Path $tmp 'glslang'
-Get-Zip 'https://github.com/KhronosGroup/glslang/releases/download/main-tot/glslang-master-windows-Release.zip' $gdir
+$rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/KhronosGroup/glslang/releases/tags/main-tot' -Headers @{
+    'User-Agent' = 'fh6-paint-studio-ci'
+    'Accept'     = 'application/vnd.github+json'
+}
+$asset = $rel.assets | Where-Object { $_.name -match '(?i)windows' -and $_.name -match '(?i)release' -and $_.name -like '*.zip' } |
+    Sort-Object { $_.name.Length } | Select-Object -First 1
+if (-not $asset) { throw "no Windows release zip in the glslang main-tot assets: $($rel.assets.name -join ', ')" }
+Get-Zip $asset.browser_download_url $gdir
 $gexe = Get-ChildItem $gdir -Recurse -Include 'glslangValidator.exe', 'glslang.exe' | Select-Object -First 1
 if (-not $gexe) { throw 'glslang executable not found in the release zip' }
 Copy-Item $gexe.FullName (Join-Path $vk 'bin\glslangValidator.exe') -Force

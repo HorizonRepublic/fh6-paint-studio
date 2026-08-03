@@ -14,6 +14,13 @@
 #include <cuda_fp16.h>
 #include <math.h>
 #include <float.h>
+#include <stdlib.h>
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sched.h>
+#endif
 
 #define DEG2RAD 0.017453292519943295
 #define BLOCK 128
@@ -396,7 +403,10 @@ static float* d_out    = nullptr;
 static float* d_grid   = nullptr;
 static int g_w = 0, g_h = 0, g_gw = 0, g_gh = 0, g_maxCands = 0;
 static int g_sampleBudget = 4000; // progressive-sampling pixel cap (see sampleStep / fp_set_sample_budget)
-static int g_warpEval = 1;        // 1 = evalKernelWarp (warp/candidate, faster); 0 = evalKernel (block, golden fallback)
+static int g_warpEval = 0;        // 0 = evalKernel (block/candidate): the DEFAULT — large early shapes dominate the
+                                  // runtime and want 128 threads each, not 32, so the block kernel is both faster here
+                                  // and the only one carrying the per-pixel-alpha gradient branch. 1 = evalKernelWarp
+                                  // (warp/candidate), opt-in via fp_set_warp_eval for reference A/Bs.
 static int g_gradients = 0;       // 1 = the batch may contain gradient kinds -> force evalKernel (block): only it carries the per-pixel-alpha gradient branch (the warp kernel does not)
 
 // ---- on-device search state (fp_search_random) ----
@@ -1332,6 +1342,21 @@ static double* d_ploss_partial = nullptr;    // per-block partial loss, up to 10
 static float* d_pdcsnap = nullptr;           // tiled backward Pass A: dC-as-seen-by-shape, sized == d_pbelow
 static int  g_pN = 0;
 static long g_pbelowCap = 0;
+
+// SHAPE BINNING. The polish kernels are thread-per-pixel and used to walk the ENTIRE shape list
+// per pixel just to bbox-test it away: at 3000 shapes over an 11.6 MP canvas that is 35 billion
+// rejected tests per pass, and the transparent surround (a third of the canvas at the default
+// pad) pays it in full for nothing. Binning shapes into tiles once per upload lets each pixel walk
+// only the handful whose bbox reaches its tile. The list is built in ascending shape order, so the
+// composite order — and therefore the result — is unchanged; the per-pixel bbox test still runs.
+#define PTILE 32
+static int* d_tileCount = nullptr; // shapes overlapping each tile
+static int* d_tileOff   = nullptr; // prefix sum over d_tileCount, nTiles+1 entries
+static int* d_tileList  = nullptr; // shape indices per tile, ascending
+static int* d_tileTotal = nullptr; // device scalar: total list length
+static long long g_tileListCap = 0;
+static int g_tilesX = 0, g_tilesY = 0, g_nTiles = 0;
+static int g_binned = 0; // 0 = lists unusable this iteration (too large) -> kernels scan all shapes
 static int  g_polishSTE = 0; // straight-through: hard forward coverage, soft surrogate gradient
 static int  g_polishOKLab = 0; // perceptual loss: OKLab colour distance in loss/dcinit/hard (mirrors engine/oklab.go)
 
@@ -1688,17 +1713,56 @@ __global__ void polishGradReduceAll(const double* gpartial, double* pgrad) {
 // or reverse (backward dC), replacing the N sequential per-shape kernel launches with O(1)
 // launches. Mirrors the per-shape kernels above byte-for-byte (incl. gradient kinds). =====
 
+__global__ void tileBinCount(const int* pbbx, int n, int tilesX, int nTiles, int* counts) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    int x0 = (t % tilesX) * PTILE, y0 = (t / tilesX) * PTILE;
+    int x1 = x0 + PTILE - 1, y1 = y0 + PTILE - 1;
+    int c = 0;
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1) continue;
+        c++;
+    }
+    counts[t] = c;
+}
+
+__global__ void tileBinScan(const int* counts, int nTiles, int* offs, int* total) {
+    if (blockIdx.x || threadIdx.x) return; // nTiles is ~10k; a sequential scan here costs microseconds
+    int acc = 0;
+    for (int t = 0; t < nTiles; t++) { offs[t] = acc; acc += counts[t]; }
+    offs[nTiles] = acc;
+    *total = acc;
+}
+
+__global__ void tileBinFill(const int* pbbx, int n, int tilesX, int nTiles, const int* offs, int* list) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    int x0 = (t % tilesX) * PTILE, y0 = (t / tilesX) * PTILE;
+    int x1 = x0 + PTILE - 1, y1 = y0 + PTILE - 1;
+    int w = offs[t];
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1) continue;
+        list[w++] = si;
+    }
+}
+
 // polishForwardTiled — render = base then composite every shape in order (one dispatch).
 __global__ void polishForwardTiled(const float* base, float* render, float* below,
                                    const double* pP, const double* pcol, const int* pkind,
                                    const int* pbbx, const long long* pboff, int n, int W, int H,
-                                   double tau, int ste) {
+                                   double tau, int ste,
+                                   const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < n; si++) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = lo; k < hi; k++) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1731,13 +1795,17 @@ __global__ void polishForwardTiled(const float* base, float* render, float* belo
 // polishHardTiled — HARD-coverage deliverable render (no below snapshot), one dispatch.
 __global__ void polishHardTiled(const float* base, float* render, const double* pP,
                                 const double* pcol, const int* pkind, const int* pbbx,
-                                int n, int W, int H) {
+                                int n, int W, int H,
+                                const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < n; si++) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = lo; k < hi; k++) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1770,13 +1838,17 @@ __global__ void polishHardTiled(const float* base, float* render, const double* 
 // conditions match exactly (else Pass B could read an unwritten dcsnap slot).
 __global__ void polishDCWalk(const float* dC, float* dcsnap, const double* pP, const double* pcol,
                              const int* pkind, const int* pbbx, const long long* pboff, int n,
-                             int W, int H, double tau, int ste) {
+                             int W, int H, double tau, int ste,
+                             const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
-    for (int si = n - 1; si >= 0; si--) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = hi - 1; k >= lo; k--) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1885,9 +1957,139 @@ __global__ void polishBackwardReduce(const float* below, const float* dcsnap, co
     }
 }
 
+// gpuWait parks the calling thread until the queued GPU work is done, WITHOUT burning a core.
+// cudaDeviceSynchronize — and the implicit sync inside every D2H cudaMemcpy — polls on Windows/WDDM
+// even with blocking-sync scheduling (measured: a full core pegged at 100% for a whole generation
+// while the GPU does all the work). A short spin keeps the sub-millisecond waits free, then the core
+// goes back to the OS. Our waits are typically 2-30 ms, so the sleep granularity costs nothing.
+// FH6_CUDA_SPIN=1 restores the driver's own wait.
+static int g_gpuSpin = 0;
+
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+// Sleep(1) is useless here: the default Windows timer granularity is ~15 ms, so sleeping between
+// polls starves the GPU (measured: utilisation fell to 4-29%). A high-resolution waitable timer
+// sleeps in the sub-millisecond range instead, which is short against our 2-30 ms waits. Per thread,
+// so concurrent callers never share one timer; NULL falls back to Sleep(1) on older Windows.
+static __declspec(thread) HANDLE t_gpuTimer = NULL;
+static __declspec(thread) int t_gpuTimerTried = 0;
+
+static void gpuNap(LONGLONG micros) {
+    if (!t_gpuTimerTried) {
+        t_gpuTimerTried = 1;
+        t_gpuTimer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    }
+    if (!t_gpuTimer) { Sleep(1); return; }
+    LARGE_INTEGER due;
+    due.QuadPart = -(micros * 10); // relative, 100 ns units
+    if (!SetWaitableTimer(t_gpuTimer, &due, 0, NULL, NULL, FALSE)) { Sleep(1); return; }
+    WaitForSingleObject(t_gpuTimer, INFINITE);
+}
+#endif
+
+// Each sync point has its own characteristic wait: a greedy candidate batch is hundreds of µs, a
+// polish forward/backward is a large fraction of a second. Polling all of them keeps a core at 100%
+// for the whole run; napping through all of them starves the GPU (measured: utilisation fell to
+// 57%). So gpuWait learns each site's typical wait, sleeps through most of it, and only polls the
+// tail. g_spinUs is the poll window kept in reserve. FH6_CUDA_SPIN=1 hands the wait back to the
+// driver; FH6_CUDA_SPIN_US tunes the window.
+static double g_spinUs = 5000;
+
+enum GpuWaitSite { WAIT_EVAL = 0, WAIT_SEARCH, WAIT_POLISH, WAIT_GRAD, WAIT_READ, WAIT_SITES };
+static double g_waitEma[WAIT_SITES] = {0};
+
+static void gpuWait(int site) {
+    if (g_gpuSpin) { cudaDeviceSynchronize(); return; }
+#ifdef _WIN32
+    LARGE_INTEGER freq, t0, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    const double perUs = (double)freq.QuadPart * 1e-6;
+    const double est = g_waitEma[site];
+    bool overslept = false;
+    for (;;) {
+        if (cudaStreamQuery(0) != cudaErrorNotReady) break;
+        QueryPerformanceCounter(&now);
+        const double elapsed = (double)(now.QuadPart - t0.QuadPart) / perUs;
+        // A nap costs ~500 µs to arm and wake, so it only pays when the wait left to run is much
+        // longer than that. Short waits (the greedy's candidate batches) poll; long ones (a polish
+        // forward or backward) sleep through most of what is left and poll only the tail.
+        const double left = est - elapsed;
+        if (left > g_spinUs) {
+            // Nap a fraction of what is left rather than all of it: a wake costs ~500 µs, but
+            // sleeping right up to the estimated finish overshoots whenever the estimate is high
+            // and that costs more (measured: one long nap saves ~7% CPU and gives back ~3% wall).
+            gpuNap((LONGLONG)(left * 0.6));
+            overslept = true; // provisional — cleared below if the stream was still busy after
+            if (cudaStreamQuery(0) != cudaErrorNotReady) break;
+            overslept = false;
+        } else {
+            YieldProcessor();
+        }
+    }
+    if (overslept) {
+        // Slept past the finish: the measured time is our own sleep, not the GPU's work, so pull
+        // the estimate down instead of feeding the overshoot back in (it would run away).
+        g_waitEma[site] = est * 0.7;
+        return;
+    }
+    QueryPerformanceCounter(&now);
+    const double took = (double)(now.QuadPart - t0.QuadPart) / perUs;
+    g_waitEma[site] = est <= 0 ? took : est * 0.8 + took * 0.2;
+#else
+    while (cudaStreamQuery(0) == cudaErrorNotReady) {
+        sched_yield();
+    }
+#endif
+}
+
+// calibrateSpinWindow measures what a nap actually costs on THIS machine (arming the timer plus
+// the scheduler getting back to us) and sizes the poll window from it. Napping only pays once the
+// wait left clearly exceeds that cost, and the cost is hardware and OS dependent — a fixed constant
+// was measured to be either wasteful (a wide window polls waits it could have slept through) or
+// harmful on a different kernel mix. Measured here: ~0.3-0.5 ms, giving a ~1 ms window.
+static void calibrateSpinWindow() {
+#ifdef _WIN32
+    LARGE_INTEGER freq, a, b;
+    QueryPerformanceFrequency(&freq);
+    const double perUs = (double)freq.QuadPart * 1e-6;
+    double best = 1e9;
+    for (int i = 0; i < 3; i++) {
+        QueryPerformanceCounter(&a);
+        gpuNap(200);
+        QueryPerformanceCounter(&b);
+        const double overhead = (double)(b.QuadPart - a.QuadPart) / perUs - 200;
+        if (overhead > 0 && overhead < best) best = overhead;
+    }
+    if (best < 1e9) {
+        g_spinUs = 2.5 * best;
+        if (g_spinUs < 500) g_spinUs = 500;
+        if (g_spinUs > 5000) g_spinUs = 5000;
+    }
+#endif
+}
+
 // ---- extern C API ----
 
 API int fp_init(const float* target, const float* weight, int w, int h, int maxCands, int gridSize) {
+    // Sync policy, set before the context exists (the first cudaMalloc below creates it). CUDA's
+    // default (cudaDeviceScheduleAuto) SPINS the calling thread while kernels run, so a generation
+    // pegs a full CPU core start to finish even though all the work is on the GPU — on a 4-core
+    // laptop that is a quarter of the machine and a screaming fan. Blocking sync parks the thread
+    // on an interrupt instead. FH6_CUDA_SPIN=1 restores spinning for A/Bs.
+    {
+        const char* spin = getenv("FH6_CUDA_SPIN");
+        g_gpuSpin = (spin && spin[0] == '1') ? 1 : 0;
+        calibrateSpinWindow();
+        if (const char* su = getenv("FH6_CUDA_SPIN_US")) {
+            double v = atof(su); // explicit override wins over the calibration
+            if (v >= 0) g_spinUs = v;
+        }
+
+        cudaSetDeviceFlags(g_gpuSpin ? cudaDeviceScheduleSpin : cudaDeviceScheduleBlockingSync);
+    }
     g_w = w; g_h = h; g_gw = gridSize; g_gh = gridSize; g_maxCands = maxCands;
     size_t npix = (size_t)w * h;
     if (cudaMalloc(&d_target, npix * 4 * sizeof(float)) != cudaSuccess) return 1;
@@ -1910,6 +2112,7 @@ API void fp_eval(const float* cands, int n, float* out) {
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
     else
         evalKernel<<<n, BLOCK>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
+    gpuWait(WAIT_EVAL);
     cudaMemcpy(out, d_out, (size_t)n * 5 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -2448,9 +2651,9 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // Pass 1: score all n candidates (at the CHEAP coarse budget when filtering, else FULL).
     // When filtering, the FP16 variant (ranking-only, never the shipped score) cuts the ALU-bound
     // accumulation ~2x; the FP32 re-eval below picks + scores the winner exactly.
-    if (useCoarse && g_coarseFP16)
+    if (useCoarse && g_coarseFP16 && !g_gradients) // the FP16 filter has no per-pixel-alpha branch either
         evalKernelWarpFP16<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
-    else if (g_warpEval)
+    else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else
         evalKernel<<<n, BLOCK>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2461,7 +2664,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         // paid only the coarse cost.
         coarsePartitionMin<<<kpart, 128>>>(d_adj, n, kpart, d_cselIdx);
         gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
-        if (g_warpEval)
+        if (g_warpEval && !g_gradients)
             evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
         else
             evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
@@ -2474,7 +2677,8 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
-    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+    gpuWait(WAIT_SEARCH);
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 // fp_search_moment runs the on-device MOMENT-seeded search for one shape: fit K covariance-
@@ -2518,9 +2722,9 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     int kpart = g_kpart;
     bool useCoarse = g_coarseSearch && d_scand2 && nGen > 4 * kpart;
     int firstBudget = useCoarse ? g_coarseBudget : g_sampleBudget;
-    if (useCoarse && g_coarseFP16)
+    if (useCoarse && g_coarseFP16 && !g_gradients) // the FP16 filter has no per-pixel-alpha branch either
         evalKernelWarpFP16<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
-    else if (g_warpEval)
+    else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else
         evalKernel<<<nGen, BLOCK>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2528,7 +2732,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     if (useCoarse) {
         coarsePartitionMin<<<kpart, 128>>>(d_adj, nGen, kpart, d_cselIdx);
         gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
-        if (g_warpEval)
+        if (g_warpEval && !g_gradients)
             evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
         else
             evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
@@ -2541,7 +2745,8 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
-    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+    gpuWait(WAIT_SEARCH);
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 // ---- polish DLL API ----
@@ -2559,6 +2764,12 @@ API void fp_polish_setup(const float* base, int n) {
     if (!d_pdC)     cudaMalloc(&d_pdC, npix * 4 * sizeof(float));
     if (!d_ploss)   cudaMalloc(&d_ploss, sizeof(double));
     if (!d_ploss_partial) cudaMalloc(&d_ploss_partial, 1024 * sizeof(double)); // max 1024 loss blocks
+    g_tilesX = (g_w + PTILE - 1) / PTILE;
+    g_tilesY = (g_h + PTILE - 1) / PTILE;
+    g_nTiles = g_tilesX * g_tilesY;
+    if (!d_tileCount) cudaMalloc(&d_tileCount, (size_t)g_nTiles * sizeof(int));
+    if (!d_tileOff)   cudaMalloc(&d_tileOff, ((size_t)g_nTiles + 1) * sizeof(int));
+    if (!d_tileTotal) cudaMalloc(&d_tileTotal, sizeof(int));
     cudaFree(d_pP); cudaFree(d_pcol); cudaFree(d_pkind); cudaFree(d_pbbx); cudaFree(d_pboff); cudaFree(d_pgrad);
     cudaFree(d_pgrad_partial);
     cudaMalloc(&d_pP, (size_t)n * 6 * sizeof(double));
@@ -2569,6 +2780,29 @@ API void fp_polish_setup(const float* base, int n) {
     cudaMalloc(&d_pgrad, (size_t)n * 10 * sizeof(double));
     cudaMalloc(&d_pgrad_partial, (size_t)n * PMAXBLK * 10 * sizeof(double)); // per (shape,block) partial grad
     cudaMemcpy(d_pbase, base, npix * 4 * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+// buildTileBins re-bins the shapes after every upload (the expanded bboxes move with tau). Falls
+// back to the unbinned scan when the lists would not fit the cap — correctness never depends on it.
+static void buildTileBins() {
+    const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
+    g_binned = 0;
+    if (g_nTiles <= 0 || g_pN <= 0) return;
+    if (const char* off = getenv("FH6_NO_TILEBIN")) { if (off[0] == '1') return; } // kill switch: full scan
+    int tblocks = (g_nTiles + 255) / 256;
+    tileBinCount<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileCount);
+    tileBinScan<<<1, 1>>>(d_tileCount, g_nTiles, d_tileOff, d_tileTotal);
+    int total = 0;
+    gpuWait(WAIT_READ);
+    cudaMemcpy(&total, d_tileTotal, sizeof(int), cudaMemcpyDeviceToHost);
+    if (total <= 0 || (long long)total > cap) return;
+    if ((long long)total > g_tileListCap) {
+        cudaFree(d_tileList);
+        if (cudaMalloc(&d_tileList, (size_t)total * sizeof(int)) != cudaSuccess) { d_tileList = nullptr; g_tileListCap = 0; return; }
+        g_tileListCap = total;
+    }
+    tileBinFill<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileOff, d_tileList);
+    g_binned = 1;
 }
 
 API void fp_polish_upload(const double* P, const double* col, const int* kinds,
@@ -2586,6 +2820,7 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
         cudaMalloc(&d_pdcsnap, (size_t)belowTotal * sizeof(float)); // tiled backward Pass A snapshot
         g_pbelowCap = belowTotal;
     }
+    buildTileBins();
 }
 
 // fp_polish_forward — ONE tiled dispatch (thread-per-pixel walks all shapes). The kernel inits
@@ -2595,7 +2830,7 @@ API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
     double tau = tauPtr[0];
     long long npix = (long long)g_w * g_h;
     int blocks = (int)((npix + BLOCK - 1) / BLOCK);
-    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE, d_tileOff, d_tileList, g_tilesX, g_binned);
 }
 
 API void fp_polish_loss(double* out) {
@@ -2607,6 +2842,7 @@ API void fp_polish_loss(double* out) {
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2619,7 +2855,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     (void)bbxHost; // bbx is on-device (d_pbbx)
     long long npix = (long long)g_w * g_h;
     int hblocks = (int)((npix + BLOCK - 1) / BLOCK);
-    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h);
+    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h, d_tileOff, d_tileList, g_tilesX, g_binned);
     int npx = g_w * g_h;
     int blocks = (npx + BLOCK - 1) / BLOCK;
     if (blocks > 1024) blocks = 1024;
@@ -2628,6 +2864,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2671,7 +2908,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda, ssAdjPtr, g_polishSSIMLambda, egAdjPtr, g_polishEagleLambda);
     // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
     int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
-    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE, d_tileOff, d_tileList, g_tilesX, g_binned);
     // Pass B: 2D grid (x=block-in-shape up to PMAXBLK, y=shape) — all shapes' gradients at once.
     dim3 grd(PMAXBLK, g_pN);
     polishBackwardReduce<<<grd, BLOCK>>>(d_pbelow, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, tau, d_pgrad_partial, g_polishSTE);
@@ -2680,14 +2917,16 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
 }
 
 API void fp_polish_read_grad(double* dst) {
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(dst, d_pgrad, (size_t)g_pN * 10 * sizeof(double), cudaMemcpyDeviceToHost);
 }
 
 // fp_polish_sync blocks until all queued polish kernels complete. Used by the host loop
 // to attribute async GPU time to the correct phase (forward/backward) when profiling.
-API void fp_polish_sync() { cudaDeviceSynchronize(); }
+API void fp_polish_sync() { gpuWait(WAIT_POLISH); }
 
 API void fp_polish_read_render(float* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_prender, (size_t)g_w * g_h * 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -2713,6 +2952,7 @@ API void fp_polish_free() {
     d_pP = d_pcol = d_pgrad = d_ploss = nullptr;
     d_pgrad_partial = d_ploss_partial = nullptr; d_pdcsnap = nullptr;
     d_pkind = nullptr; d_pbbx = nullptr; d_pboff = nullptr;
+    cudaFree(d_tileList); d_tileList = nullptr; g_tileListCap = 0; g_binned = 0;
     g_pN = 0; g_pbelowCap = 0;
 }
 
@@ -2730,10 +2970,12 @@ API void fp_apply(const float* cand) {
 
 API void fp_error_grid(float* out) {
     gridKernel<<<g_gw * g_gh, BLOCK>>>(d_target, d_canvas, d_weight, g_w, g_h, g_gw, g_gh, d_grid);
+    gpuWait(WAIT_READ);
     cudaMemcpy(out, d_grid, (size_t)g_gw * g_gh * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 API void fp_read_canvas(float* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_canvas, (size_t)g_w * g_h * 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 

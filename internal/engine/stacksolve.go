@@ -2,6 +2,7 @@ package engine
 
 import (
 	"math"
+	"sync"
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -25,6 +26,22 @@ import (
 // overpaints most of a claim's spill (claims sit deepest in the z-stack) but not all of it — an
 // uncharged spill let a claim paint arbitrary colours outside its region (metamer stacks whose base
 // only makes sense combined) and ship visible ghosts where the greedy ran out of budget.
+// stackCacheCap bounds the per-call φ cache (in float64s, ~16 MB) so a full-resolution solve over a
+// huge region falls back to recomputing instead of holding tens of megabytes per concurrent solve.
+const stackCacheCap = 1 << 21
+
+type stackScratch struct {
+	idx  []int32
+	phiC []float64
+	phis []float64 // n entries per sample, flat
+}
+
+func (s *stackScratch) reset() {
+	s.idx, s.phiC, s.phis = s.idx[:0], s.phiC[:0], s.phis[:0]
+}
+
+var stackScratchPool = sync.Pool{New: func() any { return new(stackScratch) }}
+
 func solveStack(canvas, target, weight []float32, w, h int, layers []model.Candidate, sampleBudget int, sel []bool, spillFrac float64) ([]model.RGBA, float64, bool) {
 	n := len(layers)
 	if n == 0 {
@@ -60,10 +77,16 @@ func solveStack(canvas, target, weight []float32, w, h int, layers []model.Candi
 
 	covs := make([]float64, n)
 	phi := make([]float64, n)
+	prep := make([]raster.Prepared, n)
+	alpha := make([]float64, n)
+	for k, l := range layers {
+		prep[k] = raster.Prep(l.Kind, l.P)
+		alpha[k] = float64(l.Color.A)
+	}
 	phiAt := func(x, y int) (float64, bool) {
 		covered := false
-		for k, l := range layers {
-			c := raster.Coverage(l.Kind, l.P, x, y) * float64(l.Color.A)
+		for k := range prep {
+			c := prep[k].Coverage(x, y) * alpha[k]
 			covs[k] = c
 			if c > 0 {
 				covered = true
@@ -76,6 +99,17 @@ func solveStack(canvas, target, weight []float32, w, h int, layers []model.Candi
 		}
 		return suf, covered
 	}
+
+	// The ΔSSE pass below needs the same φ as the normal-equation pass, and each φ costs one
+	// raster.Coverage per layer — the dominant cost of both. Keep them from the first pass instead
+	// of recomputing (same values, same order, so the result is unchanged). Skipped when the
+	// footprint is large enough that the cache would outweigh the saving.
+	sc := stackScratchPool.Get().(*stackScratch)
+	defer stackScratchPool.Put(sc)
+	sc.reset()
+	rows := (yMax-yMin)/step + 1
+	cols := (xMax-xMin)/step + 1
+	cache := rows*cols*n <= stackCacheCap
 
 	m := make([][]float64, n)
 	for i := range m {
@@ -96,6 +130,11 @@ func solveStack(canvas, target, weight []float32, w, h int, layers []model.Candi
 			if !covered {
 				continue
 			}
+			if cache {
+				sc.idx = append(sc.idx, int32(idx))
+				sc.phiC = append(sc.phiC, phiC)
+				sc.phis = append(sc.phis, phi...)
+			}
 			p := idx * 4
 			for i := 0; i < n; i++ {
 				wi := wgt * phi[i]
@@ -113,63 +152,77 @@ func solveStack(canvas, target, weight []float32, w, h int, layers []model.Candi
 			m[i][j] = m[j][i]
 		}
 	}
-	cols, ok := solveSPD3(m, rhs, n)
+	solved, ok := solveSPD3(m, rhs, n)
 	if !ok {
 		return nil, 0, false
 	}
 	out := make([]model.RGBA, n)
 	for k := range out {
 		out[k] = model.RGBA{
-			R: float32(clamp01f(cols[0][k])), G: float32(clamp01f(cols[1][k])),
-			B: float32(clamp01f(cols[2][k])), A: layers[k].Color.A,
+			R: float32(clamp01f(solved[0][k])), G: float32(clamp01f(solved[1][k])),
+			B: float32(clamp01f(solved[2][k])), A: layers[k].Color.A,
 		}
 	}
 
 	// ΔSSE with the clamped colours; strided like the solve (scaled by step² below), exact at
 	// sampleBudget<=0. Gates re-measure the accepted stack with an exact call before applying.
 	var delta float64
-	for y := yMin; y <= yMax; y += step {
-		for x := xMin; x <= xMax; x += step {
-			idx := y*w + x
+	accum := func(idx int, wgt, phiC float64, ph []float64) {
+		p := idx * 4
+		var before, after float64
+		for c := 0; c < 3; c++ {
+			s, t := float64(canvas[p+c]), float64(target[p+c])
+			o := phiC * s
+			for k := 0; k < n; k++ {
+				var cc float64
+				switch c {
+				case 0:
+					cc = float64(out[k].R)
+				case 1:
+					cc = float64(out[k].G)
+				default:
+					cc = float64(out[k].B)
+				}
+				o += ph[k] * cc
+			}
+			before += (s - t) * (s - t)
+			after += (o - t) * (o - t)
+		}
+		sA, tA := float64(canvas[p+3]), float64(target[p+3])
+		oA := phiC * sA
+		for k := 0; k < n; k++ {
+			oA += ph[k]
+		}
+		before += (sA - tA) * (sA - tA)
+		after += (oA - tA) * (oA - tA)
+		delta += wgt * (after - before)
+	}
+	if cache {
+		for s := range sc.idx {
+			idx := int(sc.idx[s])
 			wgt := float64(weight[idx])
 			if sel != nil && !sel[idx] {
 				wgt *= spillFrac
 			}
-			if wgt <= 0 {
-				continue
-			}
-			phiC, covered := phiAt(x, y)
-			if !covered {
-				continue
-			}
-			p := idx * 4
-			var before, after float64
-			for c := 0; c < 3; c++ {
-				s, t := float64(canvas[p+c]), float64(target[p+c])
-				o := phiC * s
-				for k := 0; k < n; k++ {
-					var cc float64
-					switch c {
-					case 0:
-						cc = float64(out[k].R)
-					case 1:
-						cc = float64(out[k].G)
-					default:
-						cc = float64(out[k].B)
-					}
-					o += phi[k] * cc
+			accum(idx, wgt, sc.phiC[s], sc.phis[s*n:s*n+n])
+		}
+	} else {
+		for y := yMin; y <= yMax; y += step {
+			for x := xMin; x <= xMax; x += step {
+				idx := y*w + x
+				wgt := float64(weight[idx])
+				if sel != nil && !sel[idx] {
+					wgt *= spillFrac
 				}
-				before += (s - t) * (s - t)
-				after += (o - t) * (o - t)
+				if wgt <= 0 {
+					continue
+				}
+				phiC, covered := phiAt(x, y)
+				if !covered {
+					continue
+				}
+				accum(idx, wgt, phiC, phi)
 			}
-			sA, tA := float64(canvas[p+3]), float64(target[p+3])
-			oA := phiC * sA
-			for k := 0; k < n; k++ {
-				oA += phi[k]
-			}
-			before += (sA - tA) * (sA - tA)
-			after += (oA - tA) * (oA - tA)
-			delta += wgt * (after - before)
 		}
 	}
 	return out, delta * float64(step*step), true

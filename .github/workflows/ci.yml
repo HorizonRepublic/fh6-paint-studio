@@ -23,28 +23,37 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go test ./... -count=1
-      - name: Build (CPU)
+      # Backend-tagged code is NOT covered by the untagged vet/test above (the engine, runner and
+      # backend tests all sit behind build tags), so vet it explicitly. Runners have no GPU and no
+      # shim DLL, so the tagged TESTS cannot run here — vet + build is the honest ceiling on CI, and
+      # the real gate is `go test -tags vulkan ./internal/backend/vulkan` on a machine with a GPU.
+      - name: Vet (Vulkan-tagged)
+        run: go vet -tags vulkan ./...
+      - name: Build (no backend)
         run: |
           go build ./cmd/studio
           go build ./cmd/fh6paint
-      # CUDA-tagged build needs NO toolkit/DLL: the GPU backend is loaded via syscall at runtime, so
-      # this only verifies the cuda-tagged Go compiles. (The real DLL is built in release.yml.)
-      - name: Build (CUDA-tagged)
+      # Vulkan is the shipped backend. The shim loads via syscall at runtime, so this verifies the
+      # vulkan-tagged Go compiles; the real fh6vk.dll is built in release-build.yml.
+      - name: Build (Vulkan-tagged)
+        run: |
+          go build -tags vulkan ./cmd/studio
+          go build -tags vulkan ./cmd/fh6paint
+      # CUDA is kept in the tree as an unmaintained fallback (owner decision 2026-08-03). It is not
+      # shipped and not benchmarked, but it must still COMPILE — both on its own and in the allgpu
+      # build that offers both backends — or the fallback silently rots.
+      - name: Build (CUDA + allgpu, unmaintained fallback)
         run: |
           go build -tags cuda ./cmd/studio
           go build -tags cuda ./cmd/fh6paint
-      # allgpu = CUDA + Vulkan auto-select + the in-app engine picker. Like the cuda build, both shims
-      # load via syscall at runtime, so this only verifies the allgpu-tagged Go compiles (no toolchains).
-      - name: Build (allgpu-tagged)
-        run: |
           go build -tags allgpu ./cmd/studio
           go build -tags allgpu ./cmd/fh6paint
-      # The studio half of the release build (version resource + ldflags), no CUDA toolkit needed.
+      # The studio half of the release build (version resource + ldflags), no GPU toolchain needed.
       - name: Release smoke (version resource + studio exe)
         shell: pwsh
         run: |
           ./scripts/gen-winres.ps1 -Version 0.0.0-ci
-          go build -tags cuda -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.0.0-ci" -o bin/fh6-paint-studio.exe ./cmd/studio
+          go build -tags vulkan -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.0.0-ci" -o bin/fh6-paint-studio.exe ./cmd/studio
           $vi = (Get-Item bin/fh6-paint-studio.exe).VersionInfo
           if ($vi.CompanyName -ne 'Horizon Republic') { throw "version resource missing: CompanyName='$($vi.CompanyName)'" }
           Write-Host "release smoke OK: $($vi.ProductName) $($vi.FileVersion) ($($vi.CompanyName))"
