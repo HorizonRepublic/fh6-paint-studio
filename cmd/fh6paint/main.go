@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -131,6 +132,14 @@ func main() {
 	unsafeShapes := flag.Bool("unsafe-shapes", false, "DEBUG: skip the FH6 3000-shape ceiling clamp. The output is NOT injectable — for over-provision experiments (generate >3000, prune to budget offline).")
 	perceptualLuma := flag.Bool("perceptual-luma", false, "EXPERIMENT (default off): compute WeightMapV2's luma in sRGB space so its darkness/highlight pivots land correctly in the linear pipeline. A/B only Р Р†Р вЂљРІР‚Сњ validate by eye end-to-end (REVIEW M4).")
 	flag.Parse()
+
+	if p := os.Getenv("FH6_CPUPROFILE"); p != "" {
+		f, err := os.Create(p)
+		if err == nil {
+			pprof.StartCPUProfile(f)
+			defer pprof.StopCPUProfile()
+		}
+	}
 
 	model.LinearLight = *linear
 	metric.PerceptualLuma = *perceptualLuma
@@ -668,6 +677,9 @@ func main() {
 			if n%25 == 0 {
 				applog.Printf("  progress: %d/%d shapes, error %.1f (%.1fs)", n, fillBudget, e, time.Since(start).Seconds())
 			}
+		},
+		Status: func(stage string) {
+			applog.Printf("  stage: %s (%.1fs)", stage, time.Since(start).Seconds())
 		},
 	}
 	res := engine.RunBest(be, o, *bestOf)

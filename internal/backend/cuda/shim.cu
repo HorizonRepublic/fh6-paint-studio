@@ -14,6 +14,13 @@
 #include <cuda_fp16.h>
 #include <math.h>
 #include <float.h>
+#include <stdlib.h>
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sched.h>
+#endif
 
 #define DEG2RAD 0.017453292519943295
 #define BLOCK 128
@@ -1885,9 +1892,109 @@ __global__ void polishBackwardReduce(const float* below, const float* dcsnap, co
     }
 }
 
+// gpuWait parks the calling thread until the queued GPU work is done, WITHOUT burning a core.
+// cudaDeviceSynchronize — and the implicit sync inside every D2H cudaMemcpy — polls on Windows/WDDM
+// even with blocking-sync scheduling (measured: a full core pegged at 100% for a whole generation
+// while the GPU does all the work). A short spin keeps the sub-millisecond waits free, then the core
+// goes back to the OS. Our waits are typically 2-30 ms, so the sleep granularity costs nothing.
+// FH6_CUDA_SPIN=1 restores the driver's own wait.
+static int g_gpuSpin = 0;
+
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+// Sleep(1) is useless here: the default Windows timer granularity is ~15 ms, so sleeping between
+// polls starves the GPU (measured: utilisation fell to 4-29%). A high-resolution waitable timer
+// sleeps in the sub-millisecond range instead, which is short against our 2-30 ms waits. Per thread,
+// so concurrent callers never share one timer; NULL falls back to Sleep(1) on older Windows.
+static __declspec(thread) HANDLE t_gpuTimer = NULL;
+static __declspec(thread) int t_gpuTimerTried = 0;
+
+static void gpuNap(LONGLONG micros) {
+    if (!t_gpuTimerTried) {
+        t_gpuTimerTried = 1;
+        t_gpuTimer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    }
+    if (!t_gpuTimer) { Sleep(1); return; }
+    LARGE_INTEGER due;
+    due.QuadPart = -(micros * 10); // relative, 100 ns units
+    if (!SetWaitableTimer(t_gpuTimer, &due, 0, NULL, NULL, FALSE)) { Sleep(1); return; }
+    WaitForSingleObject(t_gpuTimer, INFINITE);
+}
+#endif
+
+// Each sync point has its own characteristic wait: a greedy candidate batch is hundreds of µs, a
+// polish forward/backward is a large fraction of a second. Polling all of them keeps a core at 100%
+// for the whole run; napping through all of them starves the GPU (measured: utilisation fell to
+// 57%). So gpuWait learns each site's typical wait, sleeps through most of it, and only polls the
+// tail. g_spinUs is the poll window kept in reserve. FH6_CUDA_SPIN=1 hands the wait back to the
+// driver; FH6_CUDA_SPIN_US tunes the window.
+static double g_spinUs = 5000;
+
+enum GpuWaitSite { WAIT_EVAL = 0, WAIT_SEARCH, WAIT_POLISH, WAIT_READ, WAIT_SITES };
+static double g_waitEma[WAIT_SITES] = {0};
+
+static void gpuWait(int site) {
+    if (g_gpuSpin) { cudaDeviceSynchronize(); return; }
+#ifdef _WIN32
+    LARGE_INTEGER freq, t0, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    const double perUs = (double)freq.QuadPart * 1e-6;
+    const double est = g_waitEma[site];
+    bool overslept = false;
+    for (;;) {
+        if (cudaStreamQuery(0) != cudaErrorNotReady) break;
+        QueryPerformanceCounter(&now);
+        const double elapsed = (double)(now.QuadPart - t0.QuadPart) / perUs;
+        // A nap costs ~500 µs to arm and wake, so it only pays when the wait left to run is much
+        // longer than that. Short waits (the greedy's candidate batches) poll; long ones (a polish
+        // forward or backward) sleep through most of what is left and poll only the tail.
+        const double left = est - elapsed;
+        if (left > g_spinUs) {
+            gpuNap((LONGLONG)(left * 0.6));
+            overslept = true; // provisional — cleared below if the stream was still busy after
+            if (cudaStreamQuery(0) != cudaErrorNotReady) break;
+            overslept = false;
+        } else {
+            YieldProcessor();
+        }
+    }
+    if (overslept) {
+        // Slept past the finish: the measured time is our own sleep, not the GPU's work, so pull
+        // the estimate down instead of feeding the overshoot back in (it would run away).
+        g_waitEma[site] = est * 0.7;
+        return;
+    }
+    QueryPerformanceCounter(&now);
+    const double took = (double)(now.QuadPart - t0.QuadPart) / perUs;
+    g_waitEma[site] = est <= 0 ? took : est * 0.8 + took * 0.2;
+#else
+    while (cudaStreamQuery(0) == cudaErrorNotReady) {
+        sched_yield();
+    }
+#endif
+}
+
 // ---- extern C API ----
 
 API int fp_init(const float* target, const float* weight, int w, int h, int maxCands, int gridSize) {
+    // Sync policy, set before the context exists (the first cudaMalloc below creates it). CUDA's
+    // default (cudaDeviceScheduleAuto) SPINS the calling thread while kernels run, so a generation
+    // pegs a full CPU core start to finish even though all the work is on the GPU — on a 4-core
+    // laptop that is a quarter of the machine and a screaming fan. Blocking sync parks the thread
+    // on an interrupt instead. FH6_CUDA_SPIN=1 restores spinning for A/Bs.
+    {
+        const char* spin = getenv("FH6_CUDA_SPIN");
+        g_gpuSpin = (spin && spin[0] == '1') ? 1 : 0;
+        if (const char* su = getenv("FH6_CUDA_SPIN_US")) {
+            double v = atof(su);
+            if (v >= 0) g_spinUs = v;
+        }
+
+        cudaSetDeviceFlags(g_gpuSpin ? cudaDeviceScheduleSpin : cudaDeviceScheduleBlockingSync);
+    }
     g_w = w; g_h = h; g_gw = gridSize; g_gh = gridSize; g_maxCands = maxCands;
     size_t npix = (size_t)w * h;
     if (cudaMalloc(&d_target, npix * 4 * sizeof(float)) != cudaSuccess) return 1;
@@ -1910,6 +2017,7 @@ API void fp_eval(const float* cands, int n, float* out) {
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
     else
         evalKernel<<<n, BLOCK>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
+    gpuWait(WAIT_EVAL);
     cudaMemcpy(out, d_out, (size_t)n * 5 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -2474,7 +2582,8 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
-    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+    gpuWait(WAIT_SEARCH);
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 // fp_search_moment runs the on-device MOMENT-seeded search for one shape: fit K covariance-
@@ -2541,7 +2650,8 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
-    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+    gpuWait(WAIT_SEARCH);
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 // ---- polish DLL API ----
@@ -2607,6 +2717,7 @@ API void fp_polish_loss(double* out) {
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
+    gpuWait(WAIT_READ);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2628,6 +2739,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
+    gpuWait(WAIT_READ);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2680,14 +2792,16 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
 }
 
 API void fp_polish_read_grad(double* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_pgrad, (size_t)g_pN * 10 * sizeof(double), cudaMemcpyDeviceToHost);
 }
 
 // fp_polish_sync blocks until all queued polish kernels complete. Used by the host loop
 // to attribute async GPU time to the correct phase (forward/backward) when profiling.
-API void fp_polish_sync() { cudaDeviceSynchronize(); }
+API void fp_polish_sync() { gpuWait(WAIT_POLISH); }
 
 API void fp_polish_read_render(float* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_prender, (size_t)g_w * g_h * 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -2730,10 +2844,12 @@ API void fp_apply(const float* cand) {
 
 API void fp_error_grid(float* out) {
     gridKernel<<<g_gw * g_gh, BLOCK>>>(d_target, d_canvas, d_weight, g_w, g_h, g_gw, g_gh, d_grid);
+    gpuWait(WAIT_READ);
     cudaMemcpy(out, d_grid, (size_t)g_gw * g_gh * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 API void fp_read_canvas(float* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_canvas, (size_t)g_w * g_h * 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 

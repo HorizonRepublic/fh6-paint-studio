@@ -181,6 +181,26 @@ func looFitContrib(shapes []model.Shape, target, weight []float32, w, h int) []f
 		x0, y0, x1, y1 := raster.BBox(k, p, w, h)
 		gs[i] = geom{kind: k, p: p, col: col, bbox: [4]int{x0, y0, x1, y1}}
 	}
+	// Tile index over the stack. The composite at a pixel only involves shapes whose bbox contains
+	// that pixel, but the per-shape overlap list is everything intersecting the WHOLE bbox — for a
+	// background-sized shape that is the entire stack, re-tested at every sampled pixel. Bucketing
+	// by tile keeps the inner loop at the handful that actually reach the pixel; the composited set
+	// and its z-order are unchanged (tile lists are built in shape order), so the result is identical.
+	const looTile = 64
+	tw, th := (w+looTile-1)/looTile, (h+looTile-1)/looTile
+	tiles := make([][]int32, tw*th)
+	for j := range gs {
+		b := gs[j].bbox
+		if b[2] < b[0] || b[3] < b[1] {
+			continue
+		}
+		for ty := b[1] / looTile; ty <= b[3]/looTile; ty++ {
+			row := ty * tw
+			for tx := b[0] / looTile; tx <= b[2]/looTile; tx++ {
+				tiles[row+tx] = append(tiles[row+tx], int32(j))
+			}
+		}
+	}
 	fit := make([]float64, n)
 	var wg sync.WaitGroup
 	jobs := make(chan int, runtime.NumCPU()*2)
@@ -190,16 +210,8 @@ func looFitContrib(shapes []model.Shape, target, weight []float32, w, h int) []f
 			defer wg.Done()
 			for i := range jobs {
 				b := gs[i].bbox
-				if b[2] < b[0] || b[3] < b[1] {
+				if b[2] < b[0] || b[3] < b[1] || gs[i].col[3] <= 0 {
 					continue
-				}
-				var overlaps []int
-				for j := range gs {
-					ob := gs[j].bbox
-					if ob[0] > b[2] || ob[2] < b[0] || ob[1] > b[3] || ob[3] < b[1] {
-						continue
-					}
-					overlaps = append(overlaps, j)
 				}
 				area := (b[2] - b[0] + 1) * (b[3] - b[1] + 1)
 				step := 1
@@ -210,18 +222,19 @@ func looFitContrib(shapes []model.Shape, target, weight []float32, w, h int) []f
 				}
 				var d float64
 				for y := b[1]; y <= b[3]; y += step {
+					trow := (y / looTile) * tw
 					for x := b[0]; x <= b[2]; x += step {
 						// Where shape i itself has no coverage, removing it changes nothing (the
 						// with/without composites process the identical shape set), so without−full = 0
 						// exactly — skip the whole overlap composite. A big cut for shapes whose footprint
 						// is much smaller than their bbox (triangles, rotated/thin ellipses); provably
 						// quality-neutral (the skipped pixels contribute 0 to the LOO delta).
-						if gs[i].col[3] <= 0 || raster.Coverage(gs[i].kind, gs[i].p, x, y) <= 0 {
+						if raster.Coverage(gs[i].kind, gs[i].p, x, y) <= 0 {
 							continue
 						}
 						var fr, fg, fb, wr, wgc, wb float32
-						for _, j := range overlaps {
-							g := &gs[j]
+						for _, jj := range tiles[trow+x/looTile] {
+							g := &gs[jj]
 							if x < g.bbox[0] || x > g.bbox[2] || y < g.bbox[1] || y > g.bbox[3] {
 								continue
 							}
@@ -233,7 +246,7 @@ func looFitContrib(shapes []model.Shape, target, weight []float32, w, h int) []f
 							fr = fr*inv + g.col[0]*a
 							fg = fg*inv + g.col[1]*a
 							fb = fb*inv + g.col[2]*a
-							if j != i {
+							if int(jj) != i {
 								wr = wr*inv + g.col[0]*a
 								wgc = wgc*inv + g.col[1]*a
 								wb = wb*inv + g.col[2]*a
