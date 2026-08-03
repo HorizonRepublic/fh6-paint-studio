@@ -88,9 +88,11 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		// ADAPTIVELY: space frames at >= measured-cost / previewBudget, floored at minInterval — i.e.
 		// the preview may consume at most ~previewBudget of wall time, automatically backing off to a
 		// lower fps when each frame is expensive. Progress (cheap counters) still fires every shape, so
-		// the bar/error/sparkline stay fully live; only the IMAGE refresh adapts.
+		// the bar/error/sparkline stay fully live; only the IMAGE refresh adapts. The budget came down
+		// from 12% once the sRGB encode got ~17x cheaper: at 8% a frame still lands about as often as
+		// it used to, and the generation keeps the difference.
 		const minInterval = 40 * time.Millisecond
-		const previewBudget = 0.12 // preview costs at most ~12% of run time
+		const previewBudget = 0.08 // preview costs at most ~8% of run time
 		start := time.Now()
 		var lastFrame time.Time
 		var frameCost time.Duration
