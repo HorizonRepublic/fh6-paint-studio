@@ -4,9 +4,10 @@
 // in the backward shader. The polish golden-diff allows 1.5% rel, which absorbs this —
 // the same float32-hot-path / double-final recipe the CUDA backend passes with.
 //
-// Kinds handled by the polish: 0=ellipse 1=rectangle 2=triangle (optGeo), 3=line
-// (non-optGeo: hard inside, colour/alpha only). Gradient kinds (glow/disk) are not in
-// the default pipeline and are out of Phase 3 scope.
+// Kinds handled by the polish: 0=ellipse 1=rectangle 2=triangle (optGeo, trainable geometry),
+// 3=line (hard inside, colour/alpha only), 4=glow and 5=disk (per-pixel radial alpha; the glow
+// carries an analytic geometry gradient, the disk's geometry is frozen — same split as the CUDA
+// shim and engine/polish.go).
 
 #ifndef POLISH_COMMON_GLSL
 #define POLISH_COMMON_GLSL
@@ -46,6 +47,55 @@ bool insideShape(int kind, float P[6], int x, int y) {
 }
 
 bool optGeoKind(int kind) { return kind == 0 || kind == 1 || kind == 2; }
+
+// ---- radial-gradient coverage (mirrors raster.FalloffGlow/FalloffDisk, shim.cu gradFalloff) ----
+#define PGRAD_GLOW_E 0.0820849986238988
+bool isGradKind(int kind) { return kind == 4 || kind == 5; }
+
+float gradFalloff(int kind, float t2) {
+    if (t2 >= 1.0) return 0.0;
+    if (kind == 4) {
+        float g = (exp(-2.5 * t2) - float(PGRAD_GLOW_E)) / (1.0 - float(PGRAD_GLOW_E));
+        return 0.89 * g;
+    }
+    float t = sqrt(t2);
+    if (t <= 0.40) return 1.0;
+    float u = (t - 0.40) * (1.0 / 0.60);
+    return 1.0 - (3.0 * u * u - 2.0 * u * u * u);
+}
+
+float gradCovP(int kind, float P[6], int x, int y) {
+    float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+    float th = P[4] * PDEG2RAD, c = cos(th), sn = sin(th);
+    float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
+    float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
+}
+
+// gaussianCovGrad: KindGlow coverage AND its gradient wrt [cx,cy,rx,ry,thetaDeg]. Disk and any
+// other kind return coverage only with a zero gradient (geometry frozen). Mirrors the FD-verified
+// raster.GaussianCovGrad and shim.cu gaussianCovGradD.
+float gaussianCovGrad(int kind, float P[6], int x, int y, out float g[6]) {
+    for (int i = 0; i < 6; i++) g[i] = 0.0;
+    if (kind != 4) return gradCovP(kind, P, x, y);
+    float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+    float th = P[4] * PDEG2RAD, c = cos(th), sn = sin(th);
+    float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
+    float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    float u = xr * xr / (rx * rx) + yr * yr / (ry * ry);
+    if (u >= 1.0) return 0.0;
+    float norm = 1.0 / (1.0 - float(PGRAD_GLOW_E));
+    float cov = 0.89 * norm * (exp(-2.5 * u) - float(PGRAD_GLOW_E));
+    float dcov = 0.89 * norm * (-2.5 * exp(-2.5 * u));
+    float dudxr = 2.0 * xr / (rx * rx);
+    float dudyr = 2.0 * yr / (ry * ry);
+    g[0] = dcov * (dudxr * (-c) + dudyr * (sn));
+    g[1] = dcov * (dudxr * (-sn) + dudyr * (-c));
+    if (P[2] > 1.0) g[2] = dcov * (-2.0 * xr * xr / (rx * rx * rx));
+    if (P[3] > 1.0) g[3] = dcov * (-2.0 * yr * yr / (ry * ry * ry));
+    g[4] = dcov * (2.0 * PDEG2RAD * xr * yr * (1.0 / (rx * rx) - 1.0 / (ry * ry)));
+    return cov;
+}
 
 // ellipseSDFGrad: signed distance (negative inside) + gradient wrt P[0..4] in g[0..4].
 float ellipseSDFG(float P[6], float px, float py, out float g[6]) {

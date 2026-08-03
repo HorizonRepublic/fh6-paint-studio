@@ -38,7 +38,9 @@ void main() {
         int kind = Kbuf[si];
         float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
         float cov;
-        if (optGeoKind(kind)) {
+        if (isGradKind(kind)) {
+            cov = gradCovP(kind, P, x, y);
+        } else if (optGeoKind(kind)) {
             float g[6];
             float sdf = sdfGradKind(kind, P, float(x) + 0.5, float(y) + 0.5, g);
             cov = (pc.ste != 0) ? (sdf <= 0.0 ? 1.0 : 0.0) : sigmoidCov(sdf, pc.tau);

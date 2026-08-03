@@ -111,6 +111,11 @@ func TestGoldenDiffPolish(t *testing.T) {
 		mk(model.KindRectangle, [6]float32{10, 12, 6, 8, 10, 0}, 0.1, 0.7, 0.2, 0.6),
 		mk(model.KindTriangle, [6]float32{5, 5, 26, 8, 12, 26}, 0.2, 0.3, 0.9, 0.9),
 		mk(model.KindEllipse, [6]float32{30, 20, 7, 7, 0, 0}, 0.9, 0.9, 0.1, 0.5),
+		// The native gradient primitives: a glow trains its geometry through the analytic
+		// gaussian gradient, a disk composites softly with its geometry frozen. Without them in
+		// the stack the polish golden-diff cannot see a backend that ignores the falloff.
+		mk(model.KindGlow, [6]float32{16, 18, 9, 6, 20, 0}, 0.3, 0.6, 0.8, 0.8),
+		mk(model.KindDisk, [6]float32{24, 10, 6, 8, 0, 0}, 0.7, 0.4, 0.2, 0.6),
 	}
 	bg := model.RGBA{R: 0.4, G: 0.4, B: 0.4}
 	tau := 1.5

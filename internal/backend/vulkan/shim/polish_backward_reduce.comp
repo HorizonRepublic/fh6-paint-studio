@@ -47,7 +47,16 @@ void main() {
         float covEff = 0.0, dcovdsdf = 0.0;
         float sdfg[6]; for (int k = 0; k < 6; k++) sdfg[k] = 0.0;
         bool geoActive = false;
-        if (opt) {
+        if (isGradKind(kind)) {
+            float gg[6];
+            float cov = gaussianCovGrad(kind, P, x, y, gg);
+            covEff = cov;
+            if (kind == 4) { // the glow trains its geometry; the disk's is frozen
+                for (int k = 0; k < 6; k++) sdfg[k] = gg[k];
+                dcovdsdf = 1.0;
+                geoActive = cov > 1e-9;
+            }
+        } else if (opt) {
             float g[6];
             float sdf = sdfGradKind(kind, P, float(x) + 0.5, float(y) + 0.5, g);
             float covS = sigmoidCov(sdf, pc.tau);

@@ -32,8 +32,15 @@ void main() {
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         int kind = Kbuf[si];
         float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
-        if (!insideShape(kind, P, x, y)) continue;
-        float a = clamp(float(Cbuf[si * 4 + 3]), 0.0, 1.0), ia = 1.0 - a;
+        float a = clamp(float(Cbuf[si * 4 + 3]), 0.0, 1.0);
+        if (isGradKind(kind)) { // per-pixel falloff, exactly as the deliverable render composites it
+            float cov = gradCovP(kind, P, x, y);
+            if (cov <= 0.0) continue;
+            a *= cov;
+        } else if (!insideShape(kind, P, x, y)) {
+            continue;
+        }
+        float ia = 1.0 - a;
         float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]);
         ar = ar * ia + R * a; ag = ag * ia + G * a; ab = ab * ia + B * a; aa = aa * ia + a;
     }

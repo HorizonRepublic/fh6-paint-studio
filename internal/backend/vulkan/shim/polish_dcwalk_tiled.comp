@@ -35,7 +35,12 @@ void main() {
         int kind = Kbuf[si];
         float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
         float covEff = 0.0; bool geoActive = false;
-        if (optGeoKind(kind)) {
+        if (isGradKind(kind)) {
+            float gg[6];
+            float cov = gaussianCovGrad(kind, P, x, y, gg); // same cov source as Pass B
+            covEff = cov;
+            if (kind == 4) geoActive = cov > 1e-9;
+        } else if (optGeoKind(kind)) {
             float g[6];
             float sdf = sdfGradKind(kind, P, float(x) + 0.5, float(y) + 0.5, g);
             float covS = sigmoidCov(sdf, pc.tau);
