@@ -178,7 +178,9 @@ func momentPool(rng *rand.Rand, cx, cy, rx, ry, theta, maxR float32, kinds []mod
 		th := theta + randRange(rng, -15, 15)
 		jx := clampF(cx+randRange(rng, -jit, jit), 0, w-1)
 		jy := clampF(cy+randRange(rng, -jit, jit), 0, h-1)
-		out = append(out, randomShapeOfKind(rng, kg.pick(rng, jx, jy, kinds, kindCDF), jx, jy, localR, w, h, th, alpha, aspect))
+		c := randomShapeOfKind(rng, kg.pick(rng, jx, jy, kinds, kindCDF), jx, jy, localR, w, h, th, alpha, aspect)
+		kg.bigGlowSwap(rng, &c)
+		out = append(out, c)
 	}
 	return out
 }

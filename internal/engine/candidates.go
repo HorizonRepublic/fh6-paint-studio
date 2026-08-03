@@ -146,7 +146,9 @@ func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []flo
 	if allowAlpha {
 		alpha = randRange(r, alphaMin, 1)
 	}
-	return randomShapeOfKind(r, kg.pick(r, x, y, kinds, kindCDF), x, y, maxR, float32(w), float32(h), theta, alpha, aspectMax)
+	c := randomShapeOfKind(r, kg.pick(r, x, y, kinds, kindCDF), x, y, maxR, float32(w), float32(h), theta, alpha, aspectMax)
+	kg.bigGlowSwap(r, &c)
+	return c
 }
 
 // buildKindCDF returns a cumulative-weight table over kinds for weighted random

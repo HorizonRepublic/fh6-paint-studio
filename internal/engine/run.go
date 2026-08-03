@@ -191,6 +191,13 @@ func newRun(be backend.Backend, opt Options) *run {
 		gs.SetGradients(gradEvalSearch)
 	}
 
+	// Eval-kernel choice. Set UNCONDITIONALLY: this used to be left to the DLL's own default, which
+	// only the CLI ever overrode — so the studio silently ran a different (slower, and gradient-blind)
+	// kernel than every CLI benchmark. Never let a backend's internal default decide engine behaviour.
+	if we, ok := be.(interface{ SetWarpEval(bool) }); ok {
+		we.SetWarpEval(opt.WarpEval)
+	}
+
 	genTarget := opt.StopAt
 	if opt.Overdraw > 1 && !allowAlpha {
 		// Over-generate + contribution-prune is an opaque-only path: the contribution
@@ -245,10 +252,21 @@ func newRun(be backend.Backend, opt Options) *run {
 	// DLL, or force host gating with OnDeviceSearch off).
 	var kg *kindGate
 	if opt.RegionKinds {
-		kg = &kindGate{hard: metric.HardEdgeMap(be.Target(), w, h), w: w, h: h}
+		glowTau, glowProb := resolveSmoothGlow(opt.SmoothGlowTau, opt.SmoothGlowProb)
+		kg = &kindGate{hard: metric.HardEdgeMap(be.Target(), w, h), w: w, h: h, tau: glowTau, prob: glowProb}
 		if opt.RampGlow {
 			kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
 		}
+	}
+	// The size-conditioned glow swap does not need the hardness map, so it gets a gate of its own
+	// when region-kinds is off (kindGate.pick falls straight through when hard is nil).
+	bigTau, bigProb := resolveBigGlow(opt)
+	if bigTau > 0 && bigProb > 0 {
+		if kg == nil {
+			kg = &kindGate{w: w, h: h}
+		}
+		kg.bigTau, kg.bigProb, kg.bigAllKinds = float32(bigTau), float32(bigProb), opt.BigGlowAllKinds
+		kg.bigKind = bigGlowKind(opt)
 	}
 
 	// On-device search: if requested and the backend supports it, each shape's
@@ -290,9 +308,9 @@ func newRun(be backend.Backend, opt Options) *run {
 		if gs, ok2 := be.(interface{ SetGlowSwap(tau, prob float32) bool }); ok2 {
 			tau, prob := float32(0), float32(0)
 			if kg != nil {
-				tau, prob = smoothGlowTau, smoothGlowProb
+				tau, prob = kg.tau, kg.prob
 			}
-			if !gs.SetGlowSwap(tau, prob) && kg != nil && smoothGlowProb > 0 {
+			if !gs.SetGlowSwap(tau, prob) && kg != nil && prob > 0 {
 				applog.Printf("region-kinds: device lacks fp_set_glow_swap — glow swap disabled on-device (rebuild the DLL)")
 			}
 		}
@@ -308,6 +326,17 @@ func newRun(be backend.Backend, opt Options) *run {
 			} else {
 				_ = rg.SetRampGlow(nil, 0, 0, 0)
 			}
+		}
+	}
+	// Size-conditioned glow swap: independent of the hardness gate, so it is wired outside the block
+	// above and ALWAYS pushed (0/0 clears a pooled backend's previous run).
+	if bg, ok := be.(deviceBigGlower); ok {
+		tau, prob := float32(0), float32(0)
+		if bigTau > 0 && bigProb > 0 {
+			tau, prob = float32(bigTau), float32(bigProb)
+		}
+		if !bg.SetBigGlow(tau, prob, opt.BigGlowAllKinds, int32(bigGlowKind(opt))) && prob > 0 {
+			applog.Printf("big-glow: device lacks fp_set_big_glow — size-conditioned swap disabled on-device (rebuild the DLL)")
 		}
 	}
 	// Analytic-alpha grid: eval re-solves the optimal color per grid alpha and keeps the ΔSSE-min

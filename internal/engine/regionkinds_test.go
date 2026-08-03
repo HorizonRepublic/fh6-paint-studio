@@ -19,7 +19,8 @@ func TestKindGateForcesEllipseInSmoothRegions(t *testing.T) {
 	kinds := []model.ShapeKind{model.KindTriangle, model.KindRectangle}
 
 	flat := make([]float32, w*h) // hard = 0: DEEP-smooth — forced ellipse or the rimless glow swap
-	kgSmooth := &kindGate{hard: flat, w: w, h: h}
+	glowTau, glowProb := resolveSmoothGlow(0, 0)
+	kgSmooth := &kindGate{hard: flat, w: w, h: h, tau: glowTau, prob: glowProb}
 	sawGlow := false
 	for _, c := range RandomShapes(rng, w, h, 100, kinds, nil, s, 0, nil, false, 1, 0, nil, kgSmooth) {
 		switch c.Kind {
@@ -30,15 +31,15 @@ func TestKindGateForcesEllipseInSmoothRegions(t *testing.T) {
 			t.Fatalf("smooth region produced kind %v, want ellipse/glow", c.Kind)
 		}
 	}
-	if smoothGlowProb > 0 && !sawGlow {
-		t.Fatalf("deep-smooth region should swap some ellipses for glows (prob=%.2f)", smoothGlowProb)
+	if glowProb > 0 && !sawGlow {
+		t.Fatalf("deep-smooth region should swap some ellipses for glows (prob=%.2f)", glowProb)
 	}
 
 	ones := make([]float32, w*h)
 	for i := range ones {
 		ones[i] = 1
 	}
-	kgHard := &kindGate{hard: ones, w: w, h: h}
+	kgHard := &kindGate{hard: ones, w: w, h: h, tau: glowTau, prob: glowProb}
 	sawTri, sawRect := false, false
 	for _, c := range RandomShapes(rng, w, h, 200, kinds, nil, s, 0, nil, false, 1, 0, nil, kgHard) {
 		switch c.Kind {
