@@ -77,10 +77,16 @@ func solveStack(canvas, target, weight []float32, w, h int, layers []model.Candi
 
 	covs := make([]float64, n)
 	phi := make([]float64, n)
+	prep := make([]raster.Prepared, n)
+	alpha := make([]float64, n)
+	for k, l := range layers {
+		prep[k] = raster.Prep(l.Kind, l.P)
+		alpha[k] = float64(l.Color.A)
+	}
 	phiAt := func(x, y int) (float64, bool) {
 		covered := false
-		for k, l := range layers {
-			c := raster.Coverage(l.Kind, l.P, x, y) * float64(l.Color.A)
+		for k := range prep {
+			c := prep[k].Coverage(x, y) * alpha[k]
 			covs[k] = c
 			if c > 0 {
 				covered = true

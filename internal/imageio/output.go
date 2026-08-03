@@ -140,6 +140,7 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 			continue
 		}
 		isGrad := raster.IsGradient(kind)
+		prep := raster.Prep(kind, p)
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, W, H)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
@@ -147,12 +148,12 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 				// the in-game render; hard kinds use binary coverage (aEff = a, unchanged).
 				aEff := a
 				if isGrad {
-					cov := float32(raster.Coverage(kind, p, x, y))
+					cov := float32(prep.Coverage(x, y))
 					if cov <= 0 {
 						continue
 					}
 					aEff = a * cov
-				} else if !raster.Inside(kind, p, x, y) {
+				} else if !prep.Inside(x, y) {
 					continue
 				}
 				ia := 1 - aEff
@@ -235,6 +236,7 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 	cg := model.SRGBToLinear(float32(s.Color[1]) / 255)
 	cb := model.SRGBToLinear(float32(s.Color[2]) / 255)
 	isGrad := raster.IsGradient(kind)
+	prep := raster.Prep(kind, p)
 	xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
 	// Clamp the write window to img's bounds (which may be a sub-rectangle of the full w×h canvas) and
 	// index via PixOffset, so this also composites into a small sprite covering just the shape's region.
@@ -255,12 +257,12 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 		for x := xMin; x <= xMax; x++ {
 			aEff := a
 			if isGrad {
-				cov := float32(raster.Coverage(kind, p, x, y))
+				cov := float32(prep.Coverage(x, y))
 				if cov <= 0 {
 					continue
 				}
 				aEff = a * cov
-			} else if !raster.Inside(kind, p, x, y) {
+			} else if !prep.Inside(x, y) {
 				continue
 			}
 			q := img.PixOffset(x, y)
