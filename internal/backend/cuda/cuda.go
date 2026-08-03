@@ -68,6 +68,7 @@ type CUDA struct {
 	procPolSTE     *windows.Proc // optional: fp_set_polish_ste (straight-through coverage)
 	procPolOKLab   *windows.Proc // optional: fp_set_polish_oklab (perceptual OKLab polish loss)
 	procPolFE      *windows.Proc // optional: fp_set_polish_false_edge (false-edge additive polish loss term)
+	procPolLD      *windows.Proc // optional: fp_set_polish_lostdetail — NOT in the CUDA shim (unmaintained backend); always nil, so the term reports inactive
 	procPolSSIM    *windows.Proc // optional: fp_set_polish_ssim (SSIM additive polish loss term)
 	procPolEagle   *windows.Proc // optional: fp_set_polish_eagle (EAGLE additive polish loss term)
 	procTermW      *windows.Proc // optional: fp_set_term_weight (region-weighted FE/EAGLE per-pixel map)
@@ -170,6 +171,7 @@ func New(target, weight []float32, w, h, gridSize int) (*CUDA, error) {
 	g.procPolSTE, _ = dll.FindProc("fp_set_polish_ste")
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge")
+	g.procPolLD, _ = dll.FindProc("fp_set_polish_lostdetail")
 	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")
 	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")
 	g.procTermW, _ = dll.FindProc("fp_set_term_weight")
@@ -629,6 +631,19 @@ func (g *CUDA) PolishSetFalseEdge(lambda float64) bool {
 		return false
 	}
 	g.procPolFE.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetLostDetail would set the lost-detail λ (the false-edge mirror, engine/lostdetail.go).
+// The CUDA shim has no such export — the term was added after CUDA became the unmaintained
+// fallback (owner decision 2026-08-03), and it lives only in the Vulkan shim. Always reporting
+// false is the honest answer: the engine then logs the term as INACTIVE instead of silently
+// optimising without it.
+func (g *CUDA) PolishSetLostDetail(lambda float64) bool {
+	if g.procPolLD == nil {
+		return false
+	}
+	g.procPolLD.Call(uintptr(unsafe.Pointer(&lambda)))
 	return true
 }
 

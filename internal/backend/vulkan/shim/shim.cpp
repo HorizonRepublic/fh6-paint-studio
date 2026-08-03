@@ -103,8 +103,8 @@ struct ApplyPC { int32_t kind; float p0, p1, p2, p3, p4, p5; float cr, cg, cb, c
 struct GridPC  { int32_t W, H, gw, gh; };
 
 // ---- on-device random search (fp_search_random) ----
-struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow;
-                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb; };
+struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind;
+                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb; };
 struct PrepPC { int32_t n, compact, shapeCount, W, H; };
 struct ArgPC  { int32_t n; };
 
@@ -116,13 +116,15 @@ Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_
 int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0, g_hasGate = 0, g_hasRampGlow = 0;
 float g_glowTau = 0.f, g_glowProb = 0.f; // deep-smooth glow swap (fp_set_glow_swap)
 float g_rampGlowThresh = 0.f, g_rampGlowTau = 0.f, g_rampGlowProb = 0.f; // hotter glow swap in gradient zones (fp_set_ramp_glow)
+float g_bigGlowTau = 0.f, g_bigGlowProb = 0.f;                          // size-conditioned glow swap (fp_set_big_glow)
+int   g_bigGlowKinds = 0, g_bigGlowKind = 4;                            // ... which source kinds it eats, and what it emits (4 glow / 5 disk)
 int   g_alphaGridN = 0;                  // analytic-alpha grid size (fp_set_alpha_grid), 0 = off
 float g_alphaGrid[6] = {};               // grid values (eval epilogue picks the ΔSSE-min alpha)
 bool g_searchSetsDirty = true;
 
 // ---- on-device moment-seeded search (fp_search_moment) ----
 struct MomSeedPC { uint32_t seedLo, seedHi; int32_t K, gw, gh, W, H, hasBound; float maxR, boundPad, boundMix; };
-struct GenMomPC  { uint32_t seedLo, seedHi; int32_t n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb; };
+struct GenMomPC  { uint32_t seedLo, seedHi; int32_t n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow, bigKinds, bigKind; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb; };
 VkDescriptorSetLayout g_msDSL = VK_NULL_HANDLE, g_gmDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_msPL = VK_NULL_HANDLE, g_gmPL = VK_NULL_HANDLE;
 VkPipeline            g_msPipe = VK_NULL_HANDLE, g_gmPipe = VK_NULL_HANDLE;
@@ -131,7 +133,7 @@ Buf g_seeds;
 int g_momentCap = 0;
 
 // ---- joint-polish state (built lazily by fp_polish_setup, freed by fp_polish_free) ----
-struct PolishPC { int32_t shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int32_t oklab; float feLambda; float ssimLambda; float eagleLambda; };
+struct PolishPC { int32_t shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int32_t oklab; float feLambda; float ssimLambda; float eagleLambda; float ldLambda; };
 const int PLOSS_GROUPS = 64; // loss reduction workgroups (host sums the partials)
 
 VkDescriptorSetLayout g_pDSL = VK_NULL_HANDLE;
@@ -146,8 +148,10 @@ VkDeviceSize g_belowCap = 0;
 // ---- false-edge additive polish term (mirrors engine/falseedge.go + shim.cu): its own small
 // DSL (0=src4 1=targetLuma 2=reconLuma 3=dir 4=adj 5=partials) with two sets — setT computes the
 // fixed target-luma plane once at set-lambda, setR runs per evaluation on the current render. ----
-struct FePC { int32_t w, h; float feLambda; int32_t hasTW; };
+struct FePC { int32_t w, h; float feLambda; int32_t hasTW; float ldLambda; };
 double g_pfelambda = 0.0;
+// Lost-detail lambda (lostdetail.go): rides the FE passes, see fe_dir.comp.
+double g_pldlambda = 0.0;
 Buf g_feTL, g_feRL, g_feDir, g_feAdj, g_feParts;
 VkDescriptorSetLayout g_feDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_fePL  = VK_NULL_HANDLE;
@@ -309,6 +313,7 @@ void polishTeardown() {
     if (g_fePL)    { vkDestroyPipelineLayout(g_device, g_fePL, nullptr); g_fePL = VK_NULL_HANDLE; }
     if (g_feDSL)   { vkDestroyDescriptorSetLayout(g_device, g_feDSL, nullptr); g_feDSL = VK_NULL_HANDLE; }
     g_pfelambda = 0.0;
+    g_pldlambda = 0.0;
     destroyBuf(g_ssTL); destroyBuf(g_ssRL); destroyBuf(g_ssH); destroyBuf(g_ssMY);
     destroyBuf(g_ssG); destroyBuf(g_ssHG); destroyBuf(g_ssAdj); destroyBuf(g_ssParts);
     if (g_ssLumaP) { vkDestroyPipeline(g_device, g_ssLumaP, nullptr); g_ssLumaP = VK_NULL_HANDLE; }
@@ -364,7 +369,7 @@ void teardown() {
     if (g_gmPL) { vkDestroyPipelineLayout(g_device, g_gmPL, nullptr); g_gmPL = VK_NULL_HANDLE; }
     if (g_msDSL) { vkDestroyDescriptorSetLayout(g_device, g_msDSL, nullptr); g_msDSL = VK_NULL_HANDLE; }
     if (g_gmDSL) { vkDestroyDescriptorSetLayout(g_device, g_gmDSL, nullptr); g_gmDSL = VK_NULL_HANDLE; }
-    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_glowTau = 0.f; g_glowProb = 0.f; g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; g_alphaGridN = 0; g_searchSetsDirty = true; g_momentCap = 0;
+    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_glowTau = 0.f; g_glowProb = 0.f; g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; g_bigGlowTau = g_bigGlowProb = 0.f; g_bigGlowKinds = 0; g_bigGlowKind = 4; g_alphaGridN = 0; g_searchSetsDirty = true; g_momentCap = 0;
     if (g_evalPL)    { vkDestroyPipelineLayout(g_device, g_evalPL, nullptr);  g_evalPL = VK_NULL_HANDLE; }
     if (g_applyPL)   { vkDestroyPipelineLayout(g_device, g_applyPL, nullptr); g_applyPL = VK_NULL_HANDLE; }
     if (g_descPool)  { vkDestroyDescriptorPool(g_device, g_descPool, nullptr); g_descPool = VK_NULL_HANDLE; g_evalSet = g_applySet = VK_NULL_HANDLE; }
@@ -700,7 +705,7 @@ void writeFEDescriptors() {
 
 // cmdFEPasses records luma(render)+dir(+adj when forBackward) into the OPEN command buffer.
 void cmdFEPasses(bool forBackward) {
-    FePC fpc{ g_w, g_h, (float)g_pfelambda, g_hasTermW };
+    FePC fpc{ g_w, g_h, (float)g_pfelambda, g_hasTermW, (float)g_pldlambda };
     uint32_t pixGroups = (uint32_t)(((size_t)g_w * g_h + 255) / 256);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_feLumaP);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_fePL, 0, 1, &g_feSetR, 0, nullptr);
@@ -1158,10 +1163,10 @@ double computeLoss() {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pLoss);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
-    PolishPC pc{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, 0.0f, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda};
+    PolishPC pc{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, 0.0f, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda, (float)g_pldlambda};
     vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, PLOSS_GROUPS, 1, 1);
-    if (g_pfelambda > 0.0) {
+    if (g_pfelambda > 0.0 || g_pldlambda > 0.0) {
         cmdBarrierRW();
         cmdFEPasses(false); // luma(render) + dir -> g_feParts (λ·FE added host-side below)
     }
@@ -1179,11 +1184,13 @@ double computeLoss() {
     double s = 0.0;
     const double* pp = (const double*)g_ppartials.map;
     for (int i = 0; i < PLOSS_GROUPS; i++) s += pp[i];
-    if (g_pfelambda > 0.0) {
+    if (g_pfelambda > 0.0 || g_pldlambda > 0.0) {
+        // fe_dir emits the partials ALREADY lambda-weighted (it carries two different lambdas),
+        // so this must not scale again.
         double f = 0.0;
         const double* fp = (const double*)g_feParts.map;
         for (int i = 0; i < FE_GROUPS; i++) f += fp[i];
-        s += g_pfelambda * f;
+        s += f;
     }
     if (g_psslambda > 0.0) {
         double f = 0.0;
@@ -1501,6 +1508,21 @@ API void fp_set_ramp_glow(const float* ramp, const float* params) {
     g_rampGlowProb = params[2];
 }
 
+// fp_set_big_glow sets the SIZE-conditioned glow swap (params = {tau, prob, kinds}): a candidate
+// whose size exceeds tau*min(W,H) becomes a rimless glow with probability prob. Independent of the
+// hardness gate — a large shape is approximating broad shading whatever the surrounding structure,
+// and its rim is the long low-contrast contour the eye reads as a standout oval. kinds 0 = ellipses
+// only (their wire params already ARE a glow's), 1 = rects and triangles too (a rect is a free
+// rewrite; a triangle is re-emitted as the glow inscribed in its vertex box). prob 0 disables.
+API void fp_set_big_glow(const float* params) {
+    if (!params) { g_bigGlowTau = 0.f; g_bigGlowProb = 0.f; g_bigGlowKinds = 0; g_bigGlowKind = 4; return; }
+    g_bigGlowTau = params[0];
+    g_bigGlowProb = params[1];
+    g_bigGlowKinds = (int)params[2];
+    g_bigGlowKind = (int)params[3];
+    if (g_bigGlowKind != 4 && g_bigGlowKind != 5) g_bigGlowKind = 4;
+}
+
 // fp_search_random: generate n candidates on-device (seeded RNG + error-grid CDF + kind
 // weighting), score them, apply the compactness penalty, and argmin — all in one submit,
 // returning the single best candidate in out_best[12]. ip/fp carry the scalars (the syscall
@@ -1526,8 +1548,8 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // 1. generate
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPL, 0, 1, &g_genSet, 0, nullptr);
-    GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound, g_hasGate, g_hasRampGlow,
-              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb};
+    GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound, g_hasGate, g_hasRampGlow, g_bigGlowKinds, g_bigGlowKind,
+              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb, g_bigGlowTau, g_bigGlowProb};
     vkCmdPushConstants(g_cmd, g_genPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
     cmdBarrierRW();
@@ -1587,7 +1609,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     cmdBarrierRW();
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_gmPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_gmPL, 0, 1, &g_gmSet, 0, nullptr);
-    GenMomPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), nGen, perSeed, K, nKinds, allowAlpha, g_w, g_h, g_hasGate, g_hasRampGlow, alphaMin, canvasPad, g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb};
+    GenMomPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), nGen, perSeed, K, nKinds, allowAlpha, g_w, g_h, g_hasGate, g_hasRampGlow, g_bigGlowKinds, g_bigGlowKind, alphaMin, canvasPad, g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb, g_bigGlowTau, g_bigGlowProb};
     vkCmdPushConstants(g_cmd, g_gmPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((nGen + 255) / 256), 1, 1);
     cmdBarrierRW();
@@ -1625,10 +1647,10 @@ API void fp_set_sample_budget(int n) { g_sampleBudget = (n < 1) ? 4000 : n; }
 
 API int fp_last_error() { int e = g_lastError; g_lastError = 0; return e; }
 
-// fp_set_gradients tells fp_eval the batch may contain the native gradient kinds (KindGlow/
-// KindDisk), which carry a per-pixel alpha. Off, they score as flat ellipses — the same split the
-// CUDA shim has between its warp (hard) and block (gradient) eval kernels, kept so the on-device
-// search behaves identically on both backends.
+// fp_set_gradients is accepted for interface parity but does not gate anything here: the eval
+// shader always scores the native gradient kinds (KindGlow/KindDisk) with their per-pixel alpha,
+// exactly as CUDA's block eval kernel does. On CUDA the flag still picks the kernel — only the
+// block one carries that branch — so setting it on both backends leaves them in agreement.
 API void fp_set_gradients(int on) { g_gradOn = on ? 1 : 0; }
 
 // ===================== joint-polish API (mirrors shim.cu fp_polish_*) =====================
@@ -1704,9 +1726,11 @@ API void fp_set_term_weight(const float* hostW) {
 // fp_set_polish_false_edge sets the false-edge λ (pointer: the Go syscall path keeps doubles out
 // of XMM) and prepares the FE planes + the fixed target-luma plane. λ<=0 disables the term.
 // Call AFTER fp_polish_setup (the FE descriptors reference the polish render buffer).
-API void fp_set_polish_false_edge(const double* lambdaPtr) {
-    g_pfelambda = lambdaPtr[0];
-    if (g_pfelambda <= 0.0 || !g_device || g_pn < 1) return;
+// ensureFEPlanes builds the shared false-edge / lost-detail planes and (re)computes the fixed
+// target-luma plane. Both terms ride the same passes (see fe_dir.comp), so either setter can be
+// the one that brings the resources up — and the second must not rebuild them.
+static void ensureFEPlanes() {
+    if (!g_device || g_pn < 1) return;
     size_t npix = (size_t)g_w * g_h;
     if (g_feDSL == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; return; }
     if (!ensureTermW()) { g_lastError = 2012; return; }
@@ -1724,7 +1748,7 @@ API void fp_set_polish_false_edge(const double* lambdaPtr) {
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
-    FePC fpc{ g_w, g_h, (float)g_pfelambda, g_hasTermW };
+    FePC fpc{ g_w, g_h, (float)g_pfelambda, g_hasTermW, (float)g_pldlambda };
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_feLumaP);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_fePL, 0, 1, &g_feSetT, 0, nullptr);
     vkCmdPushConstants(g_cmd, g_fePL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fpc), &fpc);
@@ -1732,6 +1756,21 @@ API void fp_set_polish_false_edge(const double* lambdaPtr) {
     flushBarrier();
     vkEndCommandBuffer(g_cmd);
     submitWait();
+}
+
+API void fp_set_polish_false_edge(const double* lambdaPtr) {
+    g_pfelambda = lambdaPtr[0];
+    if (g_pfelambda <= 0.0) return;
+    ensureFEPlanes();
+}
+
+// fp_set_polish_lostdetail sets the lost-detail λ — the MIRROR of the false edge: it charges
+// structure the recon ERASED (see lostdetail.go / fe_dir.comp). Shares the FE planes and passes;
+// λ<=0 disables. Call AFTER fp_polish_setup, like the other term setters.
+API void fp_set_polish_lostdetail(const double* lambdaPtr) {
+    g_pldlambda = lambdaPtr[0];
+    if (g_pldlambda <= 0.0) return;
+    ensureFEPlanes();
 }
 
 // fp_set_polish_ssim sets the SSIM λ (pointer ABI like the FE setter) and prepares the
@@ -1917,13 +1956,13 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
     // False-edge + SSIM adjoint planes first, feeding the dcinit dC seed below.
-    if (g_pfelambda > 0.0) cmdFEPasses(true);
+    if (g_pfelambda > 0.0 || g_pldlambda > 0.0) cmdFEPasses(true);
     if (g_psslambda > 0.0) cmdSSIMPasses(true);
     if (g_peglambda > 0.0) cmdEaglePasses(true);
     // dC = 2*weight*(render-target) — full image, shared polish DSL
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pDcinit);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
-    PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda};
+    PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda, (float)g_pldlambda};
     vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcd), &pcd);
     vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
     cmdBarrierRW();

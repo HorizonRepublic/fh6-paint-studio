@@ -1,0 +1,42 @@
+#version 450
+// coarse_min.comp — coarse-to-fine filter, pass 1 of 2. Splits the scored candidate pool into
+// `parts` contiguous partitions and keeps each partition's argmin, so `parts` survivors go on to
+// be re-scored at the FULL sample budget. The bulk of the pool therefore pays only the cheap
+// coarse budget, while the winner is still chosen by a full-budget score — a uniform budget cut
+// would instead mis-pick on low-resolution noise. One workgroup per partition.
+// Mirrors shim.cu coarsePartitionMin.
+
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly  buffer Ad { float adj[]; };
+layout(std430, binding = 1) writeonly buffer Se { int   selIdx[]; };
+layout(push_constant) uniform PC { int n; int parts; } pc;
+
+const float REJECTED = 3.4028235e38;
+shared float sv[128];
+shared int si[128];
+
+void main() {
+    int b = int(gl_WorkGroupID.x);
+    if (b >= pc.parts) return;
+    // int32 is enough: the host clamps n to 65535 and parts to 8192, so b*n stays under 2^30.
+    int lo = (b * pc.n) / pc.parts;
+    int hi = ((b + 1) * pc.n) / pc.parts;
+    uint t = gl_LocalInvocationID.x;
+    float bv = REJECTED; int bi = -1;
+    for (int i = lo + int(t); i < hi; i += 128) {
+        float v = adj[i];
+        if (v < bv || (v == bv && bi >= 0 && i < bi)) { bv = v; bi = i; }
+    }
+    sv[t] = bv; si[t] = bi;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1) {
+        if (t < s) {
+            float ov = sv[t + s]; int oi = si[t + s];
+            if (ov < sv[t] || (ov == sv[t] && oi >= 0 && (si[t] < 0 || oi < si[t]))) { sv[t] = ov; si[t] = oi; }
+        }
+        barrier();
+    }
+    // An all-rejected partition still contributes its first candidate: the re-score decides, and a
+    // -1 here would gather garbage. Matches the CUDA fallback.
+    if (t == 0u) selIdx[b] = (si[0] < 0 && lo < hi) ? lo : si[0];
+}

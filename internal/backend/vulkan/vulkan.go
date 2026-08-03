@@ -70,7 +70,7 @@ type Vulkan struct {
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
 	procGradients, procSetMasks,
-	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
+	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolLD, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procBigGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
 
@@ -130,6 +130,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	}
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
+	g.procPolLD, _ = dll.FindProc("fp_set_polish_lostdetail") // optional: lost-detail additive polish term
 	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")     // optional: SSIM additive polish term
 	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")   // optional: EAGLE additive polish term
 	g.procKindGate, _ = dll.FindProc("fp_set_kind_gate")      // optional: region-kinds per-pixel gate
@@ -137,6 +138,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procSetMasks, _ = dll.FindProc("fp_set_masks")          // optional: dictionary-word coverage atlas
 	g.procGlowSwap, _ = dll.FindProc("fp_set_glow_swap")      // optional: deep-smooth glow swap
 	g.procRampGlow, _ = dll.FindProc("fp_set_ramp_glow")      // optional: ramp-aware hotter glow swap
+	g.procBigGlow, _ = dll.FindProc("fp_set_big_glow")        // optional: size-conditioned glow swap
 	g.procAlphaGrid, _ = dll.FindProc("fp_set_alpha_grid")    // optional: analytic-alpha grid in the eval epilogue
 	g.procTermW, _ = dll.FindProc("fp_set_term_weight")       // optional: region-weighted FE/EAGLE map
 	if err != nil {
@@ -321,6 +323,19 @@ func (g *Vulkan) PolishSetFalseEdge(lambda float64) bool {
 	return true
 }
 
+// PolishSetLostDetail sets the lost-detail additive polish loss λ — the MIRROR of the false edge
+// (structure the recon ERASED rather than invented; see engine/lostdetail.go). Same contract as
+// PolishSetFalseEdge: folded into loss, hard loss and the dC seed; λ<=0 disables; call AFTER
+// PolishSetup. Reports whether the DLL exports it — an older shim silently has no such term, so the
+// engine must treat false as "the term is NOT active" rather than assume it applied.
+func (g *Vulkan) PolishSetLostDetail(lambda float64) bool {
+	if g.procPolLD == nil {
+		return false
+	}
+	g.procPolLD.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
 // PolishSetSSIM sets the SSIM additive polish loss λ on the device — same contract as
 // PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
 func (g *Vulkan) PolishSetSSIM(lambda float64) bool {
@@ -450,6 +465,22 @@ func (g *Vulkan) SetRampGlow(ramp []float32, thresh, tau, prob float32) bool {
 	p := [3]float32{thresh, tau, prob}
 	g.procRampGlow.Call(fptr(ramp), fptr(p[:]))
 	runtime.KeepAlive(ramp)
+	runtime.KeepAlive(p[:])
+	return true
+}
+
+// SetBigGlow sets the size-conditioned glow swap: a candidate larger than tau*min(w,h) becomes a
+// rimless glow with probability prob, independent of the hardness gate. allKinds extends it from
+// ellipses to rects and triangles. prob 0 disables; false = the DLL lacks the export (older build).
+func (g *Vulkan) SetBigGlow(tau, prob float32, allKinds bool, kind int32) bool {
+	if g.procBigGlow == nil {
+		return false
+	}
+	p := [4]float32{tau, prob, 0, float32(kind)}
+	if allKinds {
+		p[2] = 1
+	}
+	g.procBigGlow.Call(fptr(p[:]))
 	runtime.KeepAlive(p[:])
 	return true
 }

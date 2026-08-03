@@ -23,7 +23,8 @@ layout(std430, binding = 6) readonly  buffer MM     { int   maskMeta[]; };
 layout(push_constant) uniform PC {
     int n; int W; int H; int sampleBudget;
     int agN; float ag0; float ag1; float ag2; float ag3; float ag4; float ag5;
-    int gradOn; // 1 = score the radial gradients with their per-pixel alpha (fp_set_gradients)
+    int gradOn; // reserved (fp_set_gradients): the gradient kinds are ALWAYS scored with their
+                // per-pixel alpha here, matching CUDA's block eval kernel. Kept for layout parity.
 } pc;
 
 const int   NACC     = 19;
@@ -155,7 +156,7 @@ void main() {
             int cols = (xMax - xMin) / step + 1;
             int rows = (yMax - yMin) / step + 1;
             int total = cols * rows;
-            if (isGradKind(kind) && pc.gradOn != 0) {
+            if (isGradKind(kind)) {
                 // Per-pixel alpha a(x)=A*cov. The accumulator slots differ from the hard path:
                 // L0=sum(w a^2) L1=n L2=n_transparent | L3-5=sum(w a r) | L6-8=sum(w a^2 s) |
                 // L9-11=sum(w a r s) | L12-14=sum(w a^2 s^2) | L15=alpha dSSE | L16=spill.
@@ -215,7 +216,7 @@ void main() {
     if (a < 1e-3LF) a = 1e-3LF;
     if (a > 1.0LF) a = 1.0LF;
     double W_ = double(sh[0]), nn = double(sh[1]), nt = double(sh[2]);
-    if (isGradKind(kind) && pc.gradOn != 0) {
+    if (isGradKind(kind)) {
         // Gradient epilogue: the per-pixel alpha makes the optimal colour a weighted ratio and the
         // dSSE a quadratic in it. Mirrors the CUDA gradient branch term for term.
         double saa = W_;

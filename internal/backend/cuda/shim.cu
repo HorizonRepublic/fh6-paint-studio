@@ -403,7 +403,10 @@ static float* d_out    = nullptr;
 static float* d_grid   = nullptr;
 static int g_w = 0, g_h = 0, g_gw = 0, g_gh = 0, g_maxCands = 0;
 static int g_sampleBudget = 4000; // progressive-sampling pixel cap (see sampleStep / fp_set_sample_budget)
-static int g_warpEval = 1;        // 1 = evalKernelWarp (warp/candidate, faster); 0 = evalKernel (block, golden fallback)
+static int g_warpEval = 0;        // 0 = evalKernel (block/candidate): the DEFAULT — large early shapes dominate the
+                                  // runtime and want 128 threads each, not 32, so the block kernel is both faster here
+                                  // and the only one carrying the per-pixel-alpha gradient branch. 1 = evalKernelWarp
+                                  // (warp/candidate), opt-in via fp_set_warp_eval for reference A/Bs.
 static int g_gradients = 0;       // 1 = the batch may contain gradient kinds -> force evalKernel (block): only it carries the per-pixel-alpha gradient branch (the warp kernel does not)
 
 // ---- on-device search state (fp_search_random) ----
@@ -2648,7 +2651,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // Pass 1: score all n candidates (at the CHEAP coarse budget when filtering, else FULL).
     // When filtering, the FP16 variant (ranking-only, never the shipped score) cuts the ALU-bound
     // accumulation ~2x; the FP32 re-eval below picks + scores the winner exactly.
-    if (useCoarse && g_coarseFP16)
+    if (useCoarse && g_coarseFP16 && !g_gradients) // the FP16 filter has no per-pixel-alpha branch either
         evalKernelWarpFP16<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2719,7 +2722,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     int kpart = g_kpart;
     bool useCoarse = g_coarseSearch && d_scand2 && nGen > 4 * kpart;
     int firstBudget = useCoarse ? g_coarseBudget : g_sampleBudget;
-    if (useCoarse && g_coarseFP16)
+    if (useCoarse && g_coarseFP16 && !g_gradients) // the FP16 filter has no per-pixel-alpha branch either
         evalKernelWarpFP16<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);

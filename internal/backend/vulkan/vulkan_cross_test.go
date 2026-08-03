@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"fh6-paint-studio/internal/backend/cuda"
-	"fh6-paint-studio/internal/model"
 )
 
 // TestGoldenDiffEvaluate asserts the Vulkan Evaluate matches the CUDA golden reference (scores +
@@ -245,22 +244,6 @@ func TestGoldenDiffErrorGrid(t *testing.T) {
 	}
 }
 
-// randGradCands generates the NATIVE FH6 gradient primitives — a glow and a disk have a per-pixel
-// alpha (a radial falloff), not the binary coverage the hard kinds have.
-func randGradCands(rng *rand.Rand, w, h, n int) []model.Candidate {
-	kinds := []model.ShapeKind{model.KindGlow, model.KindDisk}
-	out := make([]model.Candidate, n)
-	for i := range out {
-		out[i] = model.Candidate{
-			Kind: kinds[rng.Intn(len(kinds))],
-			P: [6]float32{rng.Float32() * float32(w), rng.Float32() * float32(h),
-				2 + rng.Float32()*float32(w)/3, 2 + rng.Float32()*float32(h)/3, rng.Float32() * 180, 0},
-			Color: model.RGBA{R: rng.Float32(), G: rng.Float32(), B: rng.Float32(), A: 0.2 + rng.Float32()*0.8},
-		}
-	}
-	return out
-}
-
 // TestGoldenDiffEvaluateGradientKinds is the gate the earlier cross-diff was missing: it only ever
 // fed ellipse/rect/triangle/line, so a backend that cannot score a glow or a disk passed it while
 // silently dropping the primitives several shipped presets depend on.
@@ -366,11 +349,13 @@ func TestGoldenDiffApplyGradientKind(t *testing.T) {
 	}
 }
 
-// TestGoldenDiffEvaluateGradientKindsHardPath covers the path the greedy actually takes: with the
-// gradient flag OFF a glow is scored as a flat ellipse (CUDA's warp kernel has no per-pixel-alpha
-// branch), and the glow-swap emits exactly such candidates into the on-device search. Both
-// backends must agree there too, or the two pick different shapes.
-func TestGoldenDiffEvaluateGradientKindsHardPath(t *testing.T) {
+// TestGoldenDiffEvaluateGradientKindsFlagOff covers the path the greedy actually takes: the
+// glow-swap emits gradient candidates into the on-device search with SetGradients OFF, because the
+// flag only picks CUDA's eval kernel — it is not a licence to score a glow as a flat ellipse. Both
+// backends must score them with their per-pixel alpha there, and identically to the flag-on scores,
+// or the two backends pick different shapes from the same batch (they silently did until 2026-08-03,
+// when the Vulkan shader gated its gradient branch on the flag and CUDA's did not).
+func TestGoldenDiffEvaluateGradientKindsFlagOff(t *testing.T) {
 	rng := rand.New(rand.NewSource(13))
 	w, h := 37, 29
 	target, weight := makeTarget(rng, w, h, false)
@@ -416,31 +401,35 @@ func TestGoldenDiffEvaluateGradientKindsHardPath(t *testing.T) {
 			}
 		}
 	}
-}
 
-// randMaskCands places dictionary words — the bank primitives the smooth-base stacks, the shade
-// pre-pass and the glyph passes are built from.
-func randMaskCands(t *testing.T, rng *rand.Rand, w, h, n int) []model.Candidate {
-	t.Helper()
-	var kinds []model.ShapeKind
-	for _, word := range []uint16{2204, 2202, 2219, 2220} {
-		if k, ok := model.MaskKind(word); ok {
-			kinds = append(kinds, k)
+	// Cross-backend agreement alone would be satisfied by both being wrong together, which is how
+	// this hid: flipping the flag must not move a gradient score on either backend.
+	ref.SetGradients(true)
+	gpu.SetGradients(true)
+	ron, _ := ref.Evaluate(cands)
+	gon, err := gpu.Evaluate(cands)
+	if err != nil {
+		t.Fatalf("vulkan Evaluate (flag on): %v", err)
+	}
+	for i := range cands {
+		if (rc[i].Score == rejected) != (ron[i].Score == rejected) {
+			t.Fatalf("cand %d (kind %v): cuda reject flipped with the gradient flag", i, cands[i].Kind)
+		}
+		if (gc[i].Score == rejected) != (gon[i].Score == rejected) {
+			t.Fatalf("cand %d (kind %v): vulkan reject flipped with the gradient flag", i, cands[i].Kind)
+		}
+		if rc[i].Score == rejected {
+			continue
+		}
+		if !closeRel(rc[i].Score, ron[i].Score, 2e-3, 1e-2) {
+			t.Fatalf("cand %d (kind %v): cuda score moved with the gradient flag: off=%.5f on=%.5f",
+				i, cands[i].Kind, rc[i].Score, ron[i].Score)
+		}
+		if !closeRel(gc[i].Score, gon[i].Score, 2e-3, 1e-2) {
+			t.Fatalf("cand %d (kind %v): vulkan score moved with the gradient flag: off=%.5f on=%.5f",
+				i, cands[i].Kind, gc[i].Score, gon[i].Score)
 		}
 	}
-	if len(kinds) == 0 {
-		t.Skip("no bank words compiled in")
-	}
-	out := make([]model.Candidate, n)
-	for i := range out {
-		out[i] = model.Candidate{
-			Kind: kinds[rng.Intn(len(kinds))],
-			P: [6]float32{rng.Float32() * float32(w), rng.Float32() * float32(h),
-				6 + rng.Float32()*float32(w)/2, 6 + rng.Float32()*float32(h)/2, rng.Float32() * 180, 0},
-			Color: model.RGBA{R: rng.Float32(), G: rng.Float32(), B: rng.Float32(), A: 0.3 + rng.Float32()*0.7},
-		}
-	}
-	return out
 }
 
 // TestGoldenDiffMaskWords: a bank word carries its coverage in an atlas on the device. Vulkan used
