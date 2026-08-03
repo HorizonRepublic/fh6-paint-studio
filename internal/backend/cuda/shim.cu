@@ -2650,7 +2650,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // accumulation ~2x; the FP32 re-eval below picks + scores the winner exactly.
     if (useCoarse && g_coarseFP16)
         evalKernelWarpFP16<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
-    else if (g_warpEval)
+    else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else
         evalKernel<<<n, BLOCK>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2661,7 +2661,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         // paid only the coarse cost.
         coarsePartitionMin<<<kpart, 128>>>(d_adj, n, kpart, d_cselIdx);
         gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
-        if (g_warpEval)
+        if (g_warpEval && !g_gradients)
             evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
         else
             evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
@@ -2721,7 +2721,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     int firstBudget = useCoarse ? g_coarseBudget : g_sampleBudget;
     if (useCoarse && g_coarseFP16)
         evalKernelWarpFP16<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
-    else if (g_warpEval)
+    else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else
         evalKernel<<<nGen, BLOCK>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2729,7 +2729,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     if (useCoarse) {
         coarsePartitionMin<<<kpart, 128>>>(d_adj, nGen, kpart, d_cselIdx);
         gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
-        if (g_warpEval)
+        if (g_warpEval && !g_gradients)
             evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
         else
             evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);

@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"math/rand"
+	"os"
 	"time"
 
 	"fh6-paint-studio/internal/applog"
@@ -10,6 +11,10 @@ import (
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 )
+
+// gradEvalSearch (FH6_GRAD_EVAL=1) scores the radial-gradient candidates with their true
+// per-pixel alpha during the greedy search instead of as solid ellipses.
+var gradEvalSearch = os.Getenv("FH6_GRAD_EVAL") == "1"
 
 // run carries the working state of a single greedy reconstruction across its phases
 // (setup -> greedy -> post-process -> refine). Threading the ~30 live values through free
@@ -177,11 +182,13 @@ func newRun(be backend.Backend, opt Options) *run {
 		cs.SetCoarseFP16(opt.CoarseFP16)
 	}
 
-	// The greedy is hard-only, so keep the backend on its FAST hard-eval path (warp kernel). The
-	// gradient coalesce post-pass flips this on for its own gradient evals. Set unconditionally so a
-	// reused backend never carries stale gradient state into a fresh hard run.
+	// The greedy runs on the FAST hard-eval path (warp kernel). That path has no per-pixel-alpha
+	// branch, so a glow-swapped candidate is SCORED as a solid ellipse and then COMPOSITED with its
+	// radial falloff — the search ranks it by a shape it will not place. FH6_GRAD_EVAL=1 scores
+	// those candidates honestly instead, at the cost of the slower block kernel for every batch.
+	// Experiment: measure quality against the wall-time it costs before defaulting either way.
 	if gs, ok := be.(gradientEvaluator); ok {
-		gs.SetGradients(false)
+		gs.SetGradients(gradEvalSearch)
 	}
 
 	genTarget := opt.StopAt
