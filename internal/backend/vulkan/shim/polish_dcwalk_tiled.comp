@@ -16,7 +16,9 @@ layout(std430, binding = 3) readonly  buffer Db { float  dC[]; };      // dcinit
 layout(std430, binding = 5) writeonly buffer Sb { float  dcsnap[]; };
 layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
 layout(std430, binding = 8) readonly  buffer Ob { int    boff[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+layout(std430, binding = 9) readonly  buffer Tb { int    tileOff[]; };
+layout(std430, binding = 10) readonly buffer Lb { int    tileList[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; } pc;
 #include "polish_common.glsl"
 
 void main() {
@@ -24,7 +26,10 @@ void main() {
     if (idx >= pc.w * pc.h) return;
     int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
     float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
-    for (int si = pc.n - 1; si >= 0; si--) {
+    int lo = 0, hi = pc.n;
+    if (pc.binned != 0) { int t = (y / pc.tile) * pc.tilesX + (x / pc.tile); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int ti = hi - 1; ti >= lo; ti--) {
+        int si = (pc.binned != 0) ? tileList[ti] : ti;
         int bx0 = bbx[si * 4], by0 = bbx[si * 4 + 1], bx1 = bbx[si * 4 + 2], by1 = bbx[si * 4 + 3];
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         int kind = Kbuf[si];

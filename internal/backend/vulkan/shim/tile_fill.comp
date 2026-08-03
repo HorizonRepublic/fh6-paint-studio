@@ -1,0 +1,21 @@
+#version 450
+// tile_fill.comp — shape binning, pass 3: write each tile's shape indices at its scanned offset.
+// Ascending shape order, so the composite order the polish walks is unchanged.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Xb { int bbx[]; };
+layout(std430, binding = 2) readonly  buffer Ob { int offs[]; };
+layout(std430, binding = 3) writeonly buffer Lb { int list[]; };
+layout(push_constant) uniform PC { int n, tilesX, nTiles, tile; } pc;
+
+void main() {
+    int t = int(gl_GlobalInvocationID.x);
+    if (t >= pc.nTiles) return;
+    int x0 = (t % pc.tilesX) * pc.tile, y0 = (t / pc.tilesX) * pc.tile;
+    int x1 = x0 + pc.tile - 1, y1 = y0 + pc.tile - 1;
+    int w = offs[t];
+    for (int si = 0; si < pc.n; si++) {
+        if (bbx[si * 4 + 2] < x0 || bbx[si * 4] > x1 || bbx[si * 4 + 3] < y0 || bbx[si * 4 + 1] > y1) continue;
+        list[w++] = si;
+    }
+}

@@ -28,6 +28,9 @@
 #include "polish_forward_tiled.spv.h" // pt_forward_spv (one-dispatch tiled forward)
 #include "polish_hard_tiled.spv.h"    // pt_hard_spv    (one-dispatch tiled hard)
 #include "polish_dcwalk_tiled.spv.h"    // pt_dcwalk_spv  (tiled backward Pass A: dC reverse walk)
+#include "tile_count.spv.h"           // tb_count_spv   (shape binning: count per tile)
+#include "tile_scan.spv.h"            // tb_scan_spv    (shape binning: prefix sum)
+#include "tile_fill.spv.h"            // tb_fill_spv    (shape binning: fill per-tile lists)
 #include "polish_backward_reduce.spv.h" // pt_breduce_spv (tiled backward Pass B: per-shape reduce)
 #include "polish_dcinit.spv.h"   // p_dcinit_spv
 #include "polish_loss.spv.h"     // p_loss_spv
@@ -185,7 +188,21 @@ const int SSWIN = 8;
 // ---- tiled polish forward/hard: ONE dispatch, no barriers (its own DSL/PL/pool/set so it
 // never touches the shared 10-binding per-shape polish set). 8 bindings:
 // 0=P 1=col 2=kinds 3=render 4=below 5=bbx 6=boff 7=base. bbx/boff live on-device. ----
-struct TiledPC { int32_t n, w, h, ste; float tau; };
+struct TiledPC { int32_t n, w, h, ste; float tau; int32_t tilesX, tile, binned; };
+// SHAPE BINNING (mirrors the CUDA shim). The polish passes are thread-per-pixel and would
+// otherwise walk the whole shape list at every pixel just to bbox-test it away. Binning once per
+// upload leaves each pixel with the handful that can reach its tile; the list is ascending, so the
+// composite order is untouched. Cap exceeded -> binned=0 and the shaders fall back to a full scan.
+#define PTILE 32
+struct TilePC { int32_t n, tilesX, nTiles, tile; };
+VkDescriptorSetLayout g_tbDSL = VK_NULL_HANDLE;
+VkPipelineLayout      g_tbPL  = VK_NULL_HANDLE;
+VkPipeline g_tbCount = VK_NULL_HANDLE, g_tbScan = VK_NULL_HANDLE, g_tbFill = VK_NULL_HANDLE;
+VkDescriptorPool g_tbPool = VK_NULL_HANDLE;
+VkDescriptorSet  g_tbSet  = VK_NULL_HANDLE;
+Buf g_tileCount, g_tileOff, g_tileList;
+int g_tilesX = 0, g_tilesY = 0, g_nTiles = 0, g_binned = 0;
+VkDeviceSize g_tileListCap = 0;
 VkDescriptorSetLayout g_ptDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_ptPL  = VK_NULL_HANDLE;
 VkPipeline g_ptFwd = VK_NULL_HANDLE, g_ptHard = VK_NULL_HANDLE;
@@ -252,6 +269,14 @@ VkShaderModule loadShader(const unsigned int* code, size_t bytes) {
 void polishTeardown() {
     if (g_device) vkDeviceWaitIdle(g_device);
     destroyBuf(g_pbase); destroyBuf(g_prender); destroyBuf(g_pbelow); destroyBuf(g_pdC);
+    destroyBuf(g_tileCount); destroyBuf(g_tileOff); destroyBuf(g_tileList);
+    g_tileListCap = 0; g_binned = 0; g_nTiles = 0;
+    if (g_tbCount) { vkDestroyPipeline(g_device, g_tbCount, nullptr); g_tbCount = VK_NULL_HANDLE; }
+    if (g_tbScan)  { vkDestroyPipeline(g_device, g_tbScan, nullptr);  g_tbScan = VK_NULL_HANDLE; }
+    if (g_tbFill)  { vkDestroyPipeline(g_device, g_tbFill, nullptr);  g_tbFill = VK_NULL_HANDLE; }
+    if (g_tbPool)  { vkDestroyDescriptorPool(g_device, g_tbPool, nullptr); g_tbPool = VK_NULL_HANDLE; g_tbSet = VK_NULL_HANDLE; }
+    if (g_tbPL)    { vkDestroyPipelineLayout(g_device, g_tbPL, nullptr); g_tbPL = VK_NULL_HANDLE; }
+    if (g_tbDSL)   { vkDestroyDescriptorSetLayout(g_device, g_tbDSL, nullptr); g_tbDSL = VK_NULL_HANDLE; }
     destroyBuf(g_pP); destroyBuf(g_pcol); destroyBuf(g_pkinds); destroyBuf(g_ppgrad); destroyBuf(g_ppartials);
     if (g_pDcinit) { vkDestroyPipeline(g_device, g_pDcinit, nullptr); g_pDcinit = VK_NULL_HANDLE; }
     if (g_pLoss)   { vkDestroyPipeline(g_device, g_pLoss, nullptr);   g_pLoss = VK_NULL_HANDLE; }
@@ -941,17 +966,68 @@ API void fp_set_polish_eagle(const double* lambdaPtr) {
     submitWait();
 }
 
-// buildTiledForward: dedicated 8-binding DSL + pipeline layout (TiledPC push) + pool + set
-// for the one-dispatch tiled forward/hard. Fully separate from the per-shape polish DSL so
-// the two paths never share descriptor/push state (the trap the first tiling attempt hit).
-bool buildTiledForward() {
-    VkDescriptorSetLayoutBinding bs[8];
-    for (uint32_t i = 0; i < 8; i++) {
+// buildTileBinner: 4-binding DSL (bbx, counts, offs, list) + the three binning pipelines.
+bool buildTileBinner() {
+    VkDescriptorSetLayoutBinding bs[4];
+    for (uint32_t i = 0; i < 4; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 8; dci.pBindings = bs;
+    dci.bindingCount = 4; dci.pBindings = bs;
+    if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_tbDSL) != VK_SUCCESS) return false;
+    VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TilePC)};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1; plci.pSetLayouts = &g_tbDSL; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pr;
+    if (vkCreatePipelineLayout(g_device, &plci, nullptr, &g_tbPL) != VK_SUCCESS) return false;
+    auto mk = [](const unsigned int* spv, size_t bytes, VkPipeline& pipe) -> bool {
+        VkShaderModule sm = loadShader(spv, bytes);
+        if (!sm) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = sm; ci.stage.pName = "main";
+        ci.layout = g_tbPL;
+        VkResult r = vkCreateComputePipelines(g_device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe);
+        vkDestroyShaderModule(g_device, sm, nullptr);
+        return r == VK_SUCCESS;
+    };
+    if (!mk(tb_count_spv, sizeof(tb_count_spv), g_tbCount)) return false;
+    if (!mk(tb_scan_spv, sizeof(tb_scan_spv), g_tbScan)) return false;
+    if (!mk(tb_fill_spv, sizeof(tb_fill_spv), g_tbFill)) return false;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_tbPool) != VK_SUCCESS) return false;
+    VkDescriptorSetAllocateInfo a{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    a.descriptorPool = g_tbPool; a.descriptorSetCount = 1; a.pSetLayouts = &g_tbDSL;
+    return vkAllocateDescriptorSets(g_device, &a, &g_tbSet) == VK_SUCCESS;
+}
+
+void writeTileBinnerDescriptors() {
+    if (g_tbSet == VK_NULL_HANDLE) return;
+    VkBuffer bufs[4] = { g_pbbxBuf.buf, g_tileCount.buf, g_tileOff.buf, g_tileList.buf };
+    VkDeviceSize sizes[4] = { g_pbbxBuf.size, g_tileCount.size, g_tileOff.size, g_tileList.size };
+    VkWriteDescriptorSet w[4]; VkDescriptorBufferInfo bi[4];
+    for (uint32_t i = 0; i < 4; i++) {
+        bi[i] = {bufs[i], 0, sizes[i]};
+        w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[i].dstSet = g_tbSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(g_device, 4, w, 0, nullptr);
+}
+
+// buildTiledForward: dedicated 8-binding DSL + pipeline layout (TiledPC push) + pool + set
+// for the one-dispatch tiled forward/hard. Fully separate from the per-shape polish DSL so
+// the two paths never share descriptor/push state (the trap the first tiling attempt hit).
+bool buildTiledForward() {
+    VkDescriptorSetLayoutBinding bs[10];
+    for (uint32_t i = 0; i < 10; i++) {
+        bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dci.bindingCount = 10; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_ptDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TiledPC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -970,7 +1046,7 @@ bool buildTiledForward() {
     };
     if (!mk(pt_forward_spv, sizeof(pt_forward_spv), g_ptFwd)) return false;
     if (!mk(pt_hard_spv, sizeof(pt_hard_spv), g_ptHard)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_ptPool) != VK_SUCCESS) return false;
@@ -983,30 +1059,30 @@ bool buildTiledForward() {
 // is (re)allocated, since its handle changes.
 void writeTiledForwardDescriptors() {
     if (g_ptSet == VK_NULL_HANDLE) return;
-    VkBuffer bufs[8] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_prender.buf, g_pbelow.buf,
-                         g_pbbxBuf.buf, g_pboffBuf.buf, g_pbase.buf };
-    VkDeviceSize sizes[8] = { g_pP.size, g_pcol.size, g_pkinds.size, g_prender.size, g_pbelow.size,
-                              g_pbbxBuf.size, g_pboffBuf.size, g_pbase.size };
-    VkWriteDescriptorSet w[8]; VkDescriptorBufferInfo bi[8];
-    for (uint32_t i = 0; i < 8; i++) {
+    VkBuffer bufs[10] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_prender.buf, g_pbelow.buf,
+                         g_pbbxBuf.buf, g_pboffBuf.buf, g_pbase.buf, g_tileOff.buf, g_tileList.buf };
+    VkDeviceSize sizes[10] = { g_pP.size, g_pcol.size, g_pkinds.size, g_prender.size, g_pbelow.size,
+                              g_pbbxBuf.size, g_pboffBuf.size, g_pbase.size, g_tileOff.size, g_tileList.size };
+    VkWriteDescriptorSet w[10]; VkDescriptorBufferInfo bi[10];
+    for (uint32_t i = 0; i < 10; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_ptSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 8, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 10, w, 0, nullptr);
 }
 
 // buildBackwardTiled: dedicated 9-binding DSL + pipeline layout (TiledPC push) + pool + set
 // for the two-pass barrier-free backward (Pass A dC walk + Pass B per-shape reduce).
 bool buildBackwardTiled() {
-    VkDescriptorSetLayoutBinding bs[9];
-    for (uint32_t i = 0; i < 9; i++) {
+    VkDescriptorSetLayoutBinding bs[11];
+    for (uint32_t i = 0; i < 11; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 9; dci.pBindings = bs;
+    dci.bindingCount = 11; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_pbDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TiledPC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1025,7 +1101,7 @@ bool buildBackwardTiled() {
     };
     if (!mk(pt_dcwalk_spv, sizeof(pt_dcwalk_spv), g_pbWalk)) return false;
     if (!mk(pt_breduce_spv, sizeof(pt_breduce_spv), g_pbReduce)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_pbPool) != VK_SUCCESS) return false;
@@ -1034,22 +1110,24 @@ bool buildBackwardTiled() {
     return vkAllocateDescriptorSets(g_device, &a, &g_pbSet) == VK_SUCCESS;
 }
 
-// writeBackwardDescriptors binds the 9 backward buffers. Re-called when g_pbelow/g_pdcsnap
-// are (re)allocated (their handles change).
+// writeBackwardDescriptors binds the 11 backward buffers (9 plus the two binning lists).
+// Re-called when g_pbelow/g_pdcsnap/g_tileList are (re)allocated (their handles change).
 void writeBackwardDescriptors() {
     if (g_pbSet == VK_NULL_HANDLE) return;
-    VkBuffer bufs[9] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_pdC.buf, g_pbelow.buf,
-                         g_pdcsnap.buf, g_ppgrad.buf, g_pbbxBuf.buf, g_pboffBuf.buf };
-    VkDeviceSize sizes[9] = { g_pP.size, g_pcol.size, g_pkinds.size, g_pdC.size, g_pbelow.size,
-                              g_pdcsnap.size, g_ppgrad.size, g_pbbxBuf.size, g_pboffBuf.size };
-    VkWriteDescriptorSet w[9]; VkDescriptorBufferInfo bi[9];
-    for (uint32_t i = 0; i < 9; i++) {
+    VkBuffer bufs[11] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_pdC.buf, g_pbelow.buf,
+                         g_pdcsnap.buf, g_ppgrad.buf, g_pbbxBuf.buf, g_pboffBuf.buf,
+                         g_tileOff.buf, g_tileList.buf };
+    VkDeviceSize sizes[11] = { g_pP.size, g_pcol.size, g_pkinds.size, g_pdC.size, g_pbelow.size,
+                              g_pdcsnap.size, g_ppgrad.size, g_pbbxBuf.size, g_pboffBuf.size,
+                              g_tileOff.size, g_tileList.size };
+    VkWriteDescriptorSet w[11]; VkDescriptorBufferInfo bi[11];
+    for (uint32_t i = 0; i < 11; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_pbSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 9, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 11, w, 0, nullptr);
 }
 
 // ensureStaging grows the shared staging buffer if a transfer needs more than its size.
@@ -1503,6 +1581,7 @@ API void fp_polish_setup(const float* base, int n) {
     if (!g_device || n < 1) { g_lastError = 2001; return; }
     g_pn = n;
     if (!buildPolishPipelines()) { g_lastError = 2002; polishTeardown(); return; }
+    if (!buildTileBinner()) { g_lastError = 2013; polishTeardown(); return; }
     if (!buildTiledForward()) { g_lastError = 2004; polishTeardown(); return; }
     if (!buildBackwardTiled()) { g_lastError = 2005; polishTeardown(); return; }
     size_t npix = (size_t)g_w * g_h;
@@ -1525,6 +1604,14 @@ API void fp_polish_setup(const float* base, int n) {
            && createBufEx(npix * 8, S, dl, false, g_feAdj)  // dcinit binding 10 must be valid even with feLambda=0
            && createBufEx(npix * 8, S, dl, false, g_ssAdj)  // dcinit binding 11, same contract
            && createBufEx(npix * 8, S, dl, false, g_egAdj); // dcinit binding 12 (EAGLE), same contract
+    g_tilesX = (g_w + PTILE - 1) / PTILE;
+    g_tilesY = (g_h + PTILE - 1) / PTILE;
+    g_nTiles = g_tilesX * g_tilesY;
+    g_binned = 0;
+    g_tileListCap = 0;
+    ok = ok && createBufEx((size_t)g_nTiles * 4, S, dl, false, g_tileCount)
+            && createBufEx(((size_t)g_nTiles + 1) * 4, SDS, dl, false, g_tileOff)
+            && createBufEx(16, S, dl, false, g_tileList); // grown on demand by buildTileBins
     if (!ok) { g_lastError = 2003; polishTeardown(); return; }
     g_belowCap = 16;
     ensureStaging(npix * 16);
@@ -1532,6 +1619,7 @@ API void fp_polish_setup(const float* base, int n) {
     copyBuf(g_staging.buf, g_pbase.buf, npix * 16);
     memset(g_ppgrad.map, 0, (size_t)n * 10 * 8);
     writePolishDescriptors();
+    writeTileBinnerDescriptors();
     writeTiledForwardDescriptors();
     writeBackwardDescriptors();
 }
@@ -1634,6 +1722,57 @@ API void fp_set_polish_ssim(const double* lambdaPtr) {
     submitWait();
 }
 
+// buildTileBins re-bins the shapes after every upload (the expanded bboxes move with tau):
+// count per tile -> prefix sum -> fill. The total comes back through the staging buffer so the
+// list can be grown; if it would exceed the cap, binned stays 0 and the polish shaders fall back
+// to scanning the whole stack, so correctness never depends on the bin.
+void buildTileBins() {
+    g_binned = 0;
+    if (!g_device || g_pn < 1 || g_nTiles < 1) return;
+    if (const char* off = getenv("FH6_NO_TILEBIN")) { if (off[0] == '1') return; } // kill switch: full scan
+    TilePC pc{ g_pn, g_tilesX, g_nTiles, PTILE };
+    uint32_t groups = (uint32_t)((g_nTiles + 255) / 256);
+    vkResetCommandBuffer(g_cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_cmd, &bi);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbPL, 0, 1, &g_tbSet, 0, nullptr);
+    vkCmdPushConstants(g_cmd, g_tbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbCount);
+    vkCmdDispatch(g_cmd, groups, 1, 1);
+    cmdBarrierRW();
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbScan);
+    vkCmdDispatch(g_cmd, 1, 1, 1);
+    flushBarrier();
+    vkEndCommandBuffer(g_cmd);
+    submitWait();
+
+    ensureStaging(((size_t)g_nTiles + 1) * 4);
+    copyBuf(g_tileOff.buf, g_staging.buf, ((size_t)g_nTiles + 1) * 4);
+    int total = ((const int*)g_staging.map)[g_nTiles];
+    const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
+    if (total <= 0 || (long long)total > cap) return;
+    if ((VkDeviceSize)total * 4 > g_tileListCap) {
+        destroyBuf(g_tileList);
+        if (!createBufEx((VkDeviceSize)total * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_tileList)) { g_tileListCap = 0; return; }
+        g_tileListCap = (VkDeviceSize)total * 4;
+        writeTileBinnerDescriptors();
+        writeTiledForwardDescriptors();
+        writeBackwardDescriptors();
+    }
+    vkResetCommandBuffer(g_cmd, 0);
+    vkBeginCommandBuffer(g_cmd, &bi);
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbFill);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbPL, 0, 1, &g_tbSet, 0, nullptr);
+    vkCmdPushConstants(g_cmd, g_tbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(g_cmd, groups, 1, 1);
+    flushBarrier();
+    vkEndCommandBuffer(g_cmd);
+    submitWait();
+    g_binned = 1;
+}
+
 API void fp_polish_upload(const double* P, const double* col, const int* kinds,
                           const int* bbx, const long long* boff, long long belowTotal) {
     if (!g_device || g_pn < 1) return;
@@ -1661,6 +1800,7 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
     for (int i = 0; i < g_pn; i++) boff32[i] = (int32_t)boff[i];
     size_t szO = (size_t)g_pn * 4;
     memcpy(g_staging.map, boff32.data(), szO); copyBuf(g_staging.buf, g_pboffBuf.buf, szO);
+    buildTileBins();
 }
 
 // fp_polish_forward — ONE tiled dispatch (thread-per-pixel walks all shapes in order). No
@@ -1674,7 +1814,7 @@ API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptFwd);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptPL, 0, 1, &g_ptSet, 0, nullptr);
-    TiledPC pc{ g_pn, g_w, g_h, g_pste, (float)*tauPtr };
+    TiledPC pc{ g_pn, g_w, g_h, g_pste, (float)*tauPtr, g_tilesX, PTILE, g_binned };
     vkCmdPushConstants(g_cmd, g_ptPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
     flushBarrier();
@@ -1698,7 +1838,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptHard);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptPL, 0, 1, &g_ptSet, 0, nullptr);
-    TiledPC pc{ g_pn, g_w, g_h, g_pste, 0.0f };
+    TiledPC pc{ g_pn, g_w, g_h, g_pste, 0.0f, g_tilesX, PTILE, g_binned };
     vkCmdPushConstants(g_cmd, g_ptPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
     flushBarrier();
@@ -1731,7 +1871,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
     cmdBarrierRW();
     // Pass A: per-pixel reverse dC walk -> dcsnap (one dispatch, no per-shape barriers)
-    TiledPC tpc{ g_pn, g_w, g_h, g_pste, (float)tau };
+    TiledPC tpc{ g_pn, g_w, g_h, g_pste, (float)tau, g_tilesX, PTILE, g_binned };
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbWalk);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
     vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);

@@ -2785,6 +2785,7 @@ static void buildTileBins() {
     const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
     g_binned = 0;
     if (g_nTiles <= 0 || g_pN <= 0) return;
+    if (const char* off = getenv("FH6_NO_TILEBIN")) { if (off[0] == '1') return; } // kill switch: full scan
     int tblocks = (g_nTiles + 255) / 256;
     tileBinCount<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileCount);
     tileBinScan<<<1, 1>>>(d_tileCount, g_nTiles, d_tileOff, d_tileTotal);

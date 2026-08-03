@@ -16,7 +16,9 @@ layout(std430, binding = 4) writeonly buffer Bb { float  belowb[]; };
 layout(std430, binding = 5) readonly  buffer Xb { int    bbx[]; };   // n*4: xMin,yMin,xMax,yMax
 layout(std430, binding = 6) readonly  buffer Ob { int    boff[]; };  // n: below float-offset
 layout(std430, binding = 7) readonly  buffer Ab { float  base[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+layout(std430, binding = 8) readonly  buffer Tb { int    tileOff[]; };  // binning: per-tile list bounds
+layout(std430, binding = 9) readonly  buffer Lb { int    tileList[]; }; // binning: shape indices, ascending
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; } pc;
 #include "polish_common.glsl"
 
 void main() {
@@ -24,7 +26,10 @@ void main() {
     if (idx >= pc.w * pc.h) return;
     int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < pc.n; si++) {
+    int lo = 0, hi = pc.n;
+    if (pc.binned != 0) { int t = (y / pc.tile) * pc.tilesX + (x / pc.tile); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int ti = lo; ti < hi; ti++) {
+        int si = (pc.binned != 0) ? tileList[ti] : ti;
         int bx0 = bbx[si * 4], by0 = bbx[si * 4 + 1], bx1 = bbx[si * 4 + 2], by1 = bbx[si * 4 + 3];
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         int bw = bx1 - bx0 + 1;
