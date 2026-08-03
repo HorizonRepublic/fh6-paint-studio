@@ -28,7 +28,7 @@ import (
 const (
 	candStride = 11
 	resStride  = 5
-	maxCands   = 16384 // device scratch capacity; Evaluate chunks if exceeded
+	maxCands   = 65536 // device scratch capacity; Evaluate chunks if exceeded (each chunk is a launch plus a sync, so a bigger one is fewer round-trips for ~4 MB more device scratch)
 )
 
 // CUDA is the GPU-backed Backend. It owns no device memory directly — the DLL

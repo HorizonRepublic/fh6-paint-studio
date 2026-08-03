@@ -194,14 +194,8 @@ func readCanvas(be backend.Backend, w, h int) *image.NRGBA {
 // sRGB-encoded before display — otherwise linear values shown as raw bytes look dark/colour-shifted
 // (e.g. yellow->orange). EncodeForDisplay is a no-op in sRGB mode and never mutates the input.
 func floatToNRGBA(buf []float32, w, h int) *image.NRGBA {
-	buf = imageio.EncodeForDisplay(buf)
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for i := 0; i < w*h; i++ {
-		img.Pix[i*4+0] = u8(buf[i*4+0])
-		img.Pix[i*4+1] = u8(buf[i*4+1])
-		img.Pix[i*4+2] = u8(buf[i*4+2])
-		img.Pix[i*4+3] = u8(buf[i*4+3])
-	}
+	imageio.EncodeDisplayBytes(buf, img.Pix)
 	return img
 }
 

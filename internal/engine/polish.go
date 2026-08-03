@@ -13,6 +13,18 @@ import (
 // polishDebug (FH6_POLISH_DEBUG=1) traces the best-hard trajectory during the refinement loop.
 var polishDebug = os.Getenv("FH6_POLISH_DEBUG") != ""
 
+// polishPhaseTiming (FH6_POLISH_PHASES=1) splits the polish wall time across forward/backward in
+// Timings.PolishPhases. It costs a device sync per phase per iteration — the work has to finish
+// before the gradient readback anyway, so the total does not change, but each extra sync is another
+// wait the host has to sit through. Off by default: the split is a profiling detail.
+var polishPhaseTiming = os.Getenv("FH6_POLISH_PHASES") != ""
+
+func phaseSync(accel PolishAccel) {
+	if polishPhaseTiming {
+		accel.PolishSync()
+	}
+}
+
 // Joint differentiable "polish" pass — breaks the greedy plateau that pure greedy
 // placement cannot. After greedy placement, ALL shapes are refined together by
 // gradient descent on a SOFT-rasterized render vs the target, so shapes co-adapt
@@ -491,7 +503,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		// Kernel launches are async; sync inside the tick so the GPU time is attributed to
 		// forward/backward (not hidden in the next sync). Net overhead ~0 — the work must
 		// complete before readgrad anyway; the sync just moves the wait into the timer.
-		tick(&tFwd, func() { accel.PolishForward(tau, hBBX); accel.PolishSync() })
+		tick(&tFwd, func() { accel.PolishForward(tau, hBBX); phaseSync(accel) })
 		if prevRd != nil && time.Since(lastPrev) >= opt.previewInterval() {
 			lastPrev = time.Now()
 			prevRd.PolishReadRender(prevBuf)
@@ -505,7 +517,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		if last {
 			tick(&tLoss, func() { post = accel.PolishLoss() })
 		}
-		tick(&tBwd, func() { accel.PolishBackward(tau, hBBX); accel.PolishSync() })
+		tick(&tBwd, func() { accel.PolishBackward(tau, hBBX); phaseSync(accel) })
 		tick(&tGrad, func() {
 			accel.PolishReadGrad(hGrad)
 			for i := range ps {
@@ -571,7 +583,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	for it := 0; it < fineCap; it++ {
 		last := it == fineCap-1
 		tick(&tUpload, func() { upload(fineTau, false) })
-		tick(&tFwd, func() { accel.PolishForward(fineTau, hBBX); accel.PolishSync() })
+		tick(&tFwd, func() { accel.PolishForward(fineTau, hBBX); phaseSync(accel) })
 		if prevRd != nil && time.Since(lastPrev) >= opt.previewInterval() {
 			lastPrev = time.Now()
 			prevRd.PolishReadRender(prevBuf)
@@ -585,7 +597,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 				okSetter.PolishSetOKLab(true) // perceptual gradient for the fine step only
 			}
 			accel.PolishBackward(fineTau, hBBX)
-			accel.PolishSync()
+			phaseSync(accel)
 			if okSetter != nil {
 				okSetter.PolishSetOKLab(false) // loss/hard calls below stay on the gate's SSE metric
 			}

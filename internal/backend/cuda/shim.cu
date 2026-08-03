@@ -1932,7 +1932,7 @@ static void gpuNap(LONGLONG micros) {
 // driver; FH6_CUDA_SPIN_US tunes the window.
 static double g_spinUs = 5000;
 
-enum GpuWaitSite { WAIT_EVAL = 0, WAIT_SEARCH, WAIT_POLISH, WAIT_READ, WAIT_SITES };
+enum GpuWaitSite { WAIT_EVAL = 0, WAIT_SEARCH, WAIT_POLISH, WAIT_GRAD, WAIT_READ, WAIT_SITES };
 static double g_waitEma[WAIT_SITES] = {0};
 
 static void gpuWait(int site) {
@@ -2717,7 +2717,7 @@ API void fp_polish_loss(double* out) {
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
-    gpuWait(WAIT_READ);
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2739,7 +2739,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
     if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
-    gpuWait(WAIT_READ);
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2792,7 +2792,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
 }
 
 API void fp_polish_read_grad(double* dst) {
-    gpuWait(WAIT_READ);
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(dst, d_pgrad, (size_t)g_pN * 10 * sizeof(double), cudaMemcpyDeviceToHost);
 }
 
