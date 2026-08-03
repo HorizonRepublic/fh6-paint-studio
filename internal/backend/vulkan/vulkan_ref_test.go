@@ -33,6 +33,11 @@ func evalAgainstRef(t *testing.T, w, h int, cands []model.Candidate, seed int64,
 		t.Skipf("vulkan unavailable: %v", err)
 	}
 	defer gpu.Close()
+	// Score the per-pixel-alpha kinds HONESTLY here. That is not the shipped default: the search
+	// deliberately scores a gradient as a solid shape, which over-credits its coverage but lands
+	// the greedy in a measurably better basin (see eval.comp). This test is about the SHADER MATH,
+	// so it asks for the honest branch explicitly; the tuned default is a separate decision.
+	gpu.SetGradients(true)
 
 	canvas := make([]float32, w*h*4)
 	for i := range canvas {
