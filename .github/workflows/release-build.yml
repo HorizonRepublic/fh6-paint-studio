@@ -101,15 +101,34 @@ jobs:
       # (push -> release-please -> this reusable workflow); manual dispatch and PR dry-runs never
       # touch Nexus, so re-attaching GitHub assets can't create a duplicate Nexus version. Runs last,
       # after the GitHub release is already populated, so a Nexus hiccup never blocks the release.
-      - name: Nexus version string
+      - name: Nexus version string and changelog
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_nexus)
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $v = '${{ inputs.tag }}'.TrimStart('v')
           "NEXUS_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # beta.10 of the action can POST the release notes to the mod's changelog endpoint, so the
+          # notes land ON Nexus instead of only as a link out to GitHub. It needs mod_id alongside
+          # changelog and REJECTS one without the other, so both stay empty unless NEXUS_MOD_ID is
+          # configured -- publishing must never fail over a nice-to-have. Set the repository variable
+          # to the numeric mod id (v3/games/:domain/mods/:game_scoped_id -> .id) to turn it on.
+          $modId = '${{ vars.NEXUS_MOD_ID }}'
+          $notes = ''
+          if ($modId) {
+            $notes = (gh release view '${{ inputs.tag }}' --json body --jq .body) -join "`n"
+            if (-not $notes) { $modId = '' } # nothing to say -> skip the endpoint rather than post an empty entry
+          }
+          "NEXUS_MOD_ID=$modId" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Multi-line values need the delimiter form; the marker is one the notes cannot contain.
+          $eof = "NEXUSNOTES_$([guid]::NewGuid().ToString('N'))"
+          "NEXUS_CHANGELOG<<$eof" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $notes | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $eof | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Publish to Nexus Mods
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_nexus)
-        uses: Nexus-Mods/upload-action@v1.0.0-beta.9
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.10
         with:
           api_key: ${{ secrets.NEXUS_API_KEY }}
           file_id: "7536650"
@@ -117,6 +136,11 @@ jobs:
           version: ${{ env.NEXUS_VERSION }}
           display_name: ${{ env.NEXUS_VERSION }}
           description: "Changelog: https://github.com/HorizonRepublic/fh6-paint-studio/releases/tag/${{ inputs.tag }}"
+          mod_id: ${{ env.NEXUS_MOD_ID }}
+          changelog: ${{ env.NEXUS_CHANGELOG }}
+          # Keep the mod page's version in step with the file that was just published, so the Nexus
+          # header stops lagging a release behind.
+          update_mod_version: true
           archive_existing_version: true
           # Standalone .exe tool, not a mod-manager mod: make the new file the primary download and
           # hide the Vortex/mod-manager download button so users always grab the manual archive.
