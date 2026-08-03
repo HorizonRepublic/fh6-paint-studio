@@ -340,6 +340,8 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	if len(shapes) <= 1 {
 		return PolishResult{Shapes: shapes}
 	}
+	tCall := time.Now()
+	var tSetup, tPre, tMain, tFine time.Duration
 	base := make([]float32, w*h*4)
 	if !transparent {
 		for i := 0; i < w*h; i++ {
@@ -444,6 +446,8 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		accel.PolishUpload(hP, hCol, hKind, hBBX, hOff, off)
 	}
 
+	tSetup = time.Since(tCall)
+	tPreStart := time.Now()
 	upload(opt.Tau0, false)
 	accel.PolishForward(opt.Tau0, hBBX)
 	pre := accel.PolishLoss()
@@ -475,7 +479,9 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	doneIters := opt.Iters // actual iterations run (plateau early-stop may cut it short)
 
 	var post float64
+	tPre = time.Since(tPreStart)
 	var tUpload, tFwd, tLoss, tBwd, tGrad, tAdam, tHard time.Duration
+	tMainStart := time.Now()
 	// Per-phase timing is always on (the time.Now overhead is negligible vs the kernels) so
 	// every run reports where the polish wall-time goes (standing "profile every snapshot").
 	tick := func(d *time.Duration, f func()) {
@@ -568,6 +574,8 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	// input itself) harvests the small colour/alpha and sub-pixel geometry wins the hard render
 	// still allows; on winning runs it squeezes a little further. Best-hard tracking continues
 	// throughout, so the phase can never lose ground.
+	tMain = time.Since(tMainStart)
+	tFineStart := time.Now()
 	restoreParams(ps, bestP)
 	for i := range ps {
 		ps[i].m, ps[i].v = [10]float64{}, [10]float64{}
@@ -643,8 +651,14 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 			chunkBest = bestHard
 		}
 	}
+	tFine = time.Since(tFineStart)
 	doneIters += fineDone
 	restoreParams(ps, bestP)
+	if polishPhaseTiming {
+		applog.Printf("polish-account: total=%.1fs setup=%.1fs pre=%.1fs main=%.1fs fine=%.1fs | ticked upload=%.1f fwd=%.1f loss=%.1f bwd=%.1f grad=%.1f adam=%.1f hard=%.1f",
+			time.Since(tCall).Seconds(), tSetup.Seconds(), tPre.Seconds(), tMain.Seconds(), tFine.Seconds(),
+			tUpload.Seconds(), tFwd.Seconds(), tLoss.Seconds(), tBwd.Seconds(), tGrad.Seconds(), tAdam.Seconds(), tHard.Seconds())
+	}
 
 	out := make([]model.Shape, 0, len(shapes))
 	out = append(out, cloneShape(shapes[0])) // clone, not alias: recolorVisible mutates opaque shapes in place; on a polish-discard the caller's input bg must stay untouched

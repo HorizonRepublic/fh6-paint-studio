@@ -247,7 +247,9 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	if tm != nil {
 		tm.Polish += time.Since(t0)
 		tm.PolishPre, tm.PolishPost = pr.PreLoss, pr.PostLoss
-		tm.PolishPhases = pr.Phases
+		for i := range pr.Phases { // accumulate: Timings.Polish sums every call, so the split must too
+			tm.PolishPhases[i] += pr.Phases[i]
+		}
 		tm.PolishIters = pr.Iters
 	}
 	if postErr <= finalErr {
