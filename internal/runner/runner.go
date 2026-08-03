@@ -10,6 +10,7 @@ import (
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/pixel"
 	"fh6-paint-studio/internal/preset"
 )
 
@@ -45,6 +46,22 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			target = prep.Pixels
 		}
 
+		// PIXEL-ART mode: exact reproduction, no engine and no backend (see internal/pixel). The
+		// count is defined by the art; a budget overflow surfaces as a friendly Failed message.
+		if r.PixelArt {
+			pres, perr := pixel.Generate(target, w, h, preset.MaxShapes)
+			if perr != nil {
+				onEvent(Failed{Err: perr})
+				return
+			}
+			onEvent(Log{Line: fmt.Sprintf("pixel: grid %dx%d (step %d), %d colors -> %d rects",
+				pres.GridW, pres.GridH, pres.GridStep, pres.Colors, pres.RectCount)})
+			res := engine.Result{Shapes: pres.Shapes}
+			onEvent(Progress{Shapes: pres.RectCount, Total: pres.RectCount, Elapsed: 0})
+			onEvent(Done{Result: res, Canvas: renderInGame(res.Shapes, true, w, h), Backend: "Pixel"})
+			return
+		}
+
 		be, name, err := newBackend(target, r.Weight, w, h, r.Grid)
 		if err != nil {
 			onEvent(Failed{Err: err})
@@ -71,9 +88,11 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		// ADAPTIVELY: space frames at >= measured-cost / previewBudget, floored at minInterval — i.e.
 		// the preview may consume at most ~previewBudget of wall time, automatically backing off to a
 		// lower fps when each frame is expensive. Progress (cheap counters) still fires every shape, so
-		// the bar/error/sparkline stay fully live; only the IMAGE refresh adapts.
+		// the bar/error/sparkline stay fully live; only the IMAGE refresh adapts. The budget came down
+		// from 12% once the sRGB encode got ~17x cheaper: at 8% a frame still lands about as often as
+		// it used to, and the generation keeps the difference.
 		const minInterval = 40 * time.Millisecond
-		const previewBudget = 0.12 // preview costs at most ~12% of run time
+		const previewBudget = 0.08 // preview costs at most ~8% of run time
 		start := time.Now()
 		var lastFrame time.Time
 		var frameCost time.Duration
@@ -137,6 +156,8 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			}
 			onEvent(Log{Line: fmt.Sprintf("Gaussian mode: training %d glow splats over %d iters (smooth/gradient content)…", opt.StopAt, gTotal)})
 			res = engine.GenerateGaussian(be, opt)
+		} else if r.BestOf > 1 {
+			res = engine.RunBest(be, opt, r.BestOf)
 		} else {
 			res = engine.Run(be, opt)
 		}
@@ -175,14 +196,8 @@ func readCanvas(be backend.Backend, w, h int) *image.NRGBA {
 // sRGB-encoded before display — otherwise linear values shown as raw bytes look dark/colour-shifted
 // (e.g. yellow->orange). EncodeForDisplay is a no-op in sRGB mode and never mutates the input.
 func floatToNRGBA(buf []float32, w, h int) *image.NRGBA {
-	buf = imageio.EncodeForDisplay(buf)
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for i := 0; i < w*h; i++ {
-		img.Pix[i*4+0] = u8(buf[i*4+0])
-		img.Pix[i*4+1] = u8(buf[i*4+1])
-		img.Pix[i*4+2] = u8(buf[i*4+2])
-		img.Pix[i*4+3] = u8(buf[i*4+3])
-	}
+	imageio.EncodeDisplayBytes(buf, img.Pix)
 	return img
 }
 

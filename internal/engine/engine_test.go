@@ -1,10 +1,11 @@
+//go:build cuda
+
 package engine
 
 import (
 	"math"
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -100,7 +101,7 @@ func TestRunReducesErrorAndProducesShapes(t *testing.T) {
 			target[p+3] = 1
 		}
 	}
-	be := cpu.New(target, w, h, 8)
+	be := newTestBackend(t, target, w, h, 8)
 	res := Run(be, Options{Width: w, Height: h, Background: bgFromTarget(target, w, h), StopAt: 40, RandomSamples: 200, MutatedSamples: 100, Seed: 1})
 	if len(res.Shapes) < 2 {
 		t.Fatalf("got %d shapes, want >=2 (background + ellipses)", len(res.Shapes))
@@ -112,8 +113,8 @@ func TestRunReducesErrorAndProducesShapes(t *testing.T) {
 
 // renderHardErr renders shapes through the CPU backend (the WYSIWYG hard raster) and returns
 // the unweighted SSE vs target — the same measurement applyPolish's accept gate uses.
-func renderHardErr(shapes []model.Shape, target []float32, w, h int, bg model.RGBA) float64 {
-	be := cpu.New(target, w, h, 8)
+func renderHardErr(t *testing.T, shapes []model.Shape, target []float32, w, h int, bg model.RGBA) float64 {
+	be := newTestBackend(t, target, w, h, 8)
 	init := backgroundCanvas(bg, w, h)
 	_ = be.Reset(init)
 	for _, s := range shapes[1:] {
@@ -163,7 +164,7 @@ func TestPolishTightInputImproves(t *testing.T) {
 		}
 	}
 
-	inErr := renderHardErr(shapes, target, w, h, bg)
+	inErr := renderHardErr(t, shapes, target, w, h, bg)
 	if inErr <= 0 {
 		t.Fatal("test setup broken: input already perfect")
 	}
@@ -172,7 +173,7 @@ func TestPolishTightInputImproves(t *testing.T) {
 		LRPos: 0.5, LRRad: 0.5, LRAng: 0.5, LRColor: 0.01, LRAlpha: 0.01,
 		GradClip: 8, STE: true,
 	})
-	outErr := renderHardErr(pr.Shapes, target, w, h, bg)
+	outErr := renderHardErr(t, pr.Shapes, target, w, h, bg)
 	if outErr >= inErr*0.7 {
 		t.Fatalf("polish failed to harvest the recoverable colour error on a tight input: in=%.1f out=%.1f (want < 70%%)", inErr, outErr)
 	}

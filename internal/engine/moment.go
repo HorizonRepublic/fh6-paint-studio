@@ -145,7 +145,7 @@ func momentSeedFromGrid(grid []float32, gw, gh, imgW, imgH int, px, py, radiusPx
 // the seed already localises the search to the residual blob instead of brute-forcing
 // toward it; the hill-climb mutate then refines the winner. maxR caps the seed/locals.
 func momentPool(rng *rand.Rand, cx, cy, rx, ry, theta, maxR float32, kinds []model.ShapeKind,
-	kindCDF []float32, count int, w, h float32, allowAlpha bool, alphaMin float32) []model.Candidate {
+	kindCDF []float32, count int, w, h float32, allowAlpha bool, alphaMin float32, kg *kindGate) []model.Candidate {
 	if count < 1 {
 		count = 1
 	}
@@ -178,7 +178,9 @@ func momentPool(rng *rand.Rand, cx, cy, rx, ry, theta, maxR float32, kinds []mod
 		th := theta + randRange(rng, -15, 15)
 		jx := clampF(cx+randRange(rng, -jit, jit), 0, w-1)
 		jy := clampF(cy+randRange(rng, -jit, jit), 0, h-1)
-		out = append(out, randomShapeOfKind(rng, pickKind(rng, kinds, kindCDF), jx, jy, localR, w, h, th, alpha, aspect))
+		c := randomShapeOfKind(rng, kg.pick(rng, jx, jy, kinds, kindCDF), jx, jy, localR, w, h, th, alpha, aspect)
+		kg.bigGlowSwap(rng, &c)
+		out = append(out, c)
 	}
 	return out
 }

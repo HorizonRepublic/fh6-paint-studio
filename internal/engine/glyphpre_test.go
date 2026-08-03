@@ -1,9 +1,10 @@
+//go:build cuda
+
 package engine
 
 import (
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -51,7 +52,7 @@ func TestGlyphPrepassClaimsAStamp(t *testing.T) {
 			}
 		}
 
-		be := cpu.New(target, w, h, 8)
+		be := newTestBackend(t, target, w, h, 8)
 		GlyphPrepassDemandStart()
 		Run(be, Options{Width: w, Height: h, StopAt: 6, Seed: 5, GlyphPrepass: true, MaxNoImprove: 8})
 		_, window, _, _, claimed, iouBest, _ := GlyphPrepassDemandReport()

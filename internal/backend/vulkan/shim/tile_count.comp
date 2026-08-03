@@ -1,0 +1,23 @@
+#version 450
+// tile_count.comp — shape binning, pass 1. One thread per TILE counts the shapes whose bbox
+// reaches it. The polish kernels are thread-per-pixel and would otherwise walk the whole stack
+// at every pixel just to bbox-test it away; binning once per upload leaves each pixel with only
+// the shapes that can actually cover it. Mirrors tileBinCount in the CUDA shim.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Xb { int bbx[]; };    // n*4: xMin,yMin,xMax,yMax
+layout(std430, binding = 1) writeonly buffer Cb { int counts[]; };
+layout(push_constant) uniform PC { int n, tilesX, nTiles, tile; } pc;
+
+void main() {
+    int t = int(gl_GlobalInvocationID.x);
+    if (t >= pc.nTiles) return;
+    int x0 = (t % pc.tilesX) * pc.tile, y0 = (t / pc.tilesX) * pc.tile;
+    int x1 = x0 + pc.tile - 1, y1 = y0 + pc.tile - 1;
+    int c = 0;
+    for (int si = 0; si < pc.n; si++) {
+        if (bbx[si * 4 + 2] < x0 || bbx[si * 4] > x1 || bbx[si * 4 + 3] < y0 || bbx[si * 4 + 1] > y1) continue;
+        c++;
+    }
+    counts[t] = c;
+}

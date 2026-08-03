@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Formen im Bild halten",
   "advanced.mono": "Einzelfarbe (Logo / Decal)",
   "advanced.economy": "Sparmodus (langsamer, besser bei kleinem Budget)",
+  "advanced.best_of": "Bester von N Läufen",
 
   "shapes.used": "Verwendete Formen",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · Fotografien",
   "mode.gaussian_title": "Weiches Leuchten",
   "mode.gaussian_subtitle": "gaussian · weiche Verläufe",
+  "mode.pixel_title": "Pixel-Art",
+  "mode.pixel_subtitle": "pixel · exakte Sprite-Kopie",
   "mode.saved_presets": "GESPEICHERTE PRESETS",
   "mode.saved_preset": "gespeichertes Preset",
   "mode.ink_badge": "Tusche",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "Standardmäßig AN. Generiert gegen einen transparenten Rand, sodass der Überlauf-Malus jede Form zwingt, INNERHALB des Bildes zu bleiben — keine Kreise oder Rechtecke, die über den Rand hinausquellen (das schlimmste In-Game-Artefakt). Die Rekonstruktion wird danach auf die Originalgröße zurückgerechnet, sodass die Vorschau sauber ist. Nur für das Alt-Verhalten ausschalten.",
   "hint.mono": "Für ein FLACHES einfarbiges Marken-Logo oder Decal. Zwingt jede Form auf EINE Vollfarbe (automatisch aus dem Logo erkannt) auf einem sauberen Ausschnitt, sodass es keine grauen Antialiasing-Kantenformen und keinen Hintergrundkasten gibt — nur die klare einfarbige Silhouette. Passt zu einem niedrigen Formen-Budget. Für normale mehrfarbige Bilder AUS lassen.",
   "hint.economy": "Standardmäßig AUS. Bei wenigen Formen (≲1500) passt dies die Formen gemeinsam an — es passt ALLE während des Aufbaus immer wieder zusammen neu an, für ein saubereres Ergebnis mit weniger Formen. Der Haken: Es ist VIEL langsamer (es poliert den gesamten Satz wiederholt neu), also schalte es nur ein, wenn du maximale Qualität bei knappem Budget willst und die Wartezeit nicht stört. Keine Wirkung bei Logo/Flach oder über ~1500 Formen.",
+  "hint.best_of": "Standard 1 (ein Durchlauf). N>1 startet die GESAMTE Generierung N-mal mit verschiedenen Zufalls-Seeds und behält das beste Ergebnis — die Streuung zwischen Läufen liegt bei ~6 %, so gewinnt man Extra-Qualität für die N-fache Zeit. Die Läufe sind unabhängig (kein Mischen); der Fortschrittsbalken beginnt bei jedem Versuch neu. 2–3 ist der beste Kompromiss.",
   "hint.gaussian": "Der Weiches-Leuchten-Modus trainiert Leucht-Splats gemeinsam — Greedy-Optionen gelten nicht. Detail = Anzahl der Leuchtpunkte; mehr Leuchtpunkte + das automatische Training liefern ein näheres (aber stets glattes) Ergebnis. Am besten für GLATTE / Verlaufs- / malerische Bilder — es kann keine scharfen Feindetails rendern, nutze also Zeichnung/Foto/Logo für scharfe oder Cel-Inhalte. Langsamer als die anderen (es trainiert; der Balken zeigt den Trainingsfortschritt).",
+  "hint.pixel": "Der Pixel-Art-Modus reproduziert die Grafik EXAKT — er erkennt das Pixelraster und baut jede Farbfläche aus massiven Rechtecken pixelgenau nach. Engine-Einstellungen gelten nicht: die Grafik selbst bestimmt die Formanzahl (ein 32×32-Sprite sind typischerweise 100–300 Formen). Braucht die Grafik mehr als 3000 Rechtecke, stoppt die Generierung mit der benötigten Anzahl — auf ein Sprite zuschneiden oder die Palette vereinfachen. Am besten mit sauberen PNG-Exporten (kein Glätten/JPEG).",
   "hint.polish": "Verfeinert alle Formen gemeinsam nach dem Greedy-Aufbau. An = glatter, bessere Farbanpassung; aus = schneller, aber roher und facettierter.\n\nBeeinflusst: Zeit und Qualität.",
   "hint.polish_iters": "Wie viele Politur-Verfeinerungsschritte. Mehr = nähere Anpassung und glattere Verläufe, aber langsamer; Früh-Stopp kürzt den Schwanz. Leer = die abgestimmte Anzahl des Presets. Bei flacher Kunst hängt die abgestimmte Anzahl von der Palette ab.\n\nBeeinflusst: Zeit und Qualität.",
   "hint.edge_softness": "Weichheit der polierten Kanten. Niedriger = schärfere, härtere Kanten; höher = weichere, sanftere Übergänge.\n\nBeeinflusst: Qualität.",

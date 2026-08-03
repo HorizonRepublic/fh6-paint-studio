@@ -11,10 +11,12 @@ layout(std430, binding = 2) readonly  buffer Kc { float kindCDF[]; };
 layout(std430, binding = 3) readonly  buffer Gc { float gridCDF[]; };
 layout(std430, binding = 4) readonly  buffer Or { float orient[]; };
 layout(std430, binding = 5) readonly  buffer Bd { float boundDist[]; };
+layout(std430, binding = 6) readonly  buffer Kg { float kindGate[]; };
+layout(std430, binding = 7) readonly  buffer Rg { float rampGlow[]; };
 layout(push_constant) uniform PC {
     uint seedLo, seedHi;
-    int n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound;
-    float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad;
+    int n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind;
+    float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb;
 } pc;
 
 uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -79,8 +81,22 @@ void main() {
         }
         float alpha = 1.0;
         if (pc.allowAlpha != 0) alpha = pc.alphaMin + (1.0 - pc.alphaMin) * uf(uint(i), ctr);
+        // region-gated kinds (engine kindGate.pick / shim.cu genKernel): the full pool only
+        // with probability gate[centre], else ellipse (kind 0).
         int kind = int(kinds[pc.nKinds - 1] + 0.5);
-        {
+        bool fullPool = true;
+        if (pc.hasGate != 0) {
+            int gidx = int(cy) * pc.W + int(cx);
+            if (gidx >= 0 && gidx < pc.W * pc.H && uf(uint(i), ctr) >= kindGate[gidx]) {
+                kind = 0; fullPool = false;
+                // deep-smooth glow swap: a rimless glow where the target has no structure at all;
+                // HOTTER (rampTau/rampProb) in genuine gradient zones (rampGlow[gidx] > rampThresh).
+                float effTau = pc.glowTau, effProb = pc.glowProb;
+                if (pc.hasRampGlow != 0 && rampGlow[gidx] > pc.rampThresh) { effTau = pc.rampTau; effProb = pc.rampProb; }
+                if (kindGate[gidx] < effTau && uf(uint(i), ctr) < effProb) kind = 4;
+            }
+        }
+        if (fullPool) {
             float ku = uf(uint(i), ctr) * kindCDF[pc.nKinds - 1];
             for (int k = 0; k < pc.nKinds; k++) {
                 if (ku < kindCDF[k]) { kind = int(kinds[k] + 0.5); break; }
@@ -89,26 +105,54 @@ void main() {
         scand[base + 0] = float(kind);
         scand[base + 7] = 0.0; scand[base + 8] = 0.0; scand[base + 9] = 0.0; scand[base + 10] = alpha;
         float padPx = pc.canvasPad * min(float(pc.W), float(pc.H));
+        float bigThr = pc.bigTau * min(float(pc.W), float(pc.H));
         if (kind == 1) {
             float hw = 1.0 + uf(uint(i), ctr) * (emaxR - 1.0);
             float u2 = uf(uint(i), ctr);
             float hh = (pc.aspectMax > 1.0) ? max(0.5, hw / (1.0 + u2 * (pc.aspectMax - 1.0))) : 1.0 + u2 * (emaxR - 1.0);
-            scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 3] = hw; scand[base + 4] = hh; scand[base + 5] = theta; scand[base + 6] = 0.0;
-            if (pc.canvasPad > 0.0) { float a = hw, b = hh; clampExtents(cx, cy, a, b, theta, float(pc.W), float(pc.H), padPx); scand[base + 3] = a; scand[base + 4] = b; }
+            scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 5] = theta; scand[base + 6] = 0.0;
+            if (pc.canvasPad > 0.0) clampExtents(cx, cy, hw, hh, theta, float(pc.W), float(pc.H), padPx);
+            scand[base + 3] = hw; scand[base + 4] = hh;
+            // A rect's wire params ARE the glow's (cx, cy, half-extents, theta), so the swap is a
+            // kind rewrite; see the ellipse branch for why size alone decides it.
+            if (pc.bigKinds != 0 && pc.bigProb > 0.0 && sqrt(hw * hh) > bigThr &&
+                uf(uint(i), ctr) < pc.bigProb) scand[base + 0] = float(pc.bigKind);
         } else if (kind == 2) {
             float rr = 4.0 + uf(uint(i), ctr) * (emaxR - 4.0);
-            scand[base + 1] = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
-            scand[base + 2] = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
-            scand[base + 3] = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
-            scand[base + 4] = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
-            scand[base + 5] = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
-            scand[base + 6] = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            float vx1 = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            float vy1 = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            float vx2 = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            float vy2 = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            float vx3 = clampf2(cx + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.W - 1));
+            float vy3 = clampf2(cy + (-rr + 2.0 * rr * uf(uint(i), ctr)), 0.0, float(pc.H - 1));
+            scand[base + 1] = vx1; scand[base + 2] = vy1; scand[base + 3] = vx2;
+            scand[base + 4] = vy2; scand[base + 5] = vx3; scand[base + 6] = vy3;
+            // A triangle has no glow-compatible parameterisation, so the swap re-emits the candidate
+            // as the glow inscribed in its vertex box (0.7 of the half-extents ~ matches the covered
+            // area). A big triangle's straight rims are the same contour artifact as a big ellipse's.
+            float bx0 = min(min(vx1, vx2), vx3), bx1 = max(max(vx1, vx2), vx3);
+            float by0 = min(min(vy1, vy2), vy3), by1 = max(max(vy1, vy2), vy3);
+            float grx = max(2.0, 0.7 * 0.5 * (bx1 - bx0)), gry = max(2.0, 0.7 * 0.5 * (by1 - by0));
+            if (pc.bigKinds != 0 && pc.bigProb > 0.0 && sqrt(grx * gry) > bigThr &&
+                uf(uint(i), ctr) < pc.bigProb) {
+                scand[base + 0] = float(pc.bigKind);
+                scand[base + 1] = (vx1 + vx2 + vx3) / 3.0; scand[base + 2] = (vy1 + vy2 + vy3) / 3.0;
+                scand[base + 3] = grx; scand[base + 4] = gry; scand[base + 5] = 0.0; scand[base + 6] = 0.0;
+            }
         } else {
             float rx = 2.0 + uf(uint(i), ctr) * (emaxR - 2.0);
             float u2 = uf(uint(i), ctr);
             float ry = (pc.aspectMax > 1.0) ? max(1.0, rx / (1.0 + u2 * (pc.aspectMax - 1.0))) : 2.0 + u2 * (emaxR - 2.0);
-            scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 3] = rx; scand[base + 4] = ry; scand[base + 5] = theta; scand[base + 6] = 0.0;
-            if (pc.canvasPad > 0.0) { float a = rx, b = ry; clampExtents(cx, cy, a, b, theta, float(pc.W), float(pc.H), padPx); scand[base + 3] = a; scand[base + 4] = b; }
+            scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 5] = theta; scand[base + 6] = 0.0;
+            if (pc.canvasPad > 0.0) clampExtents(cx, cy, rx, ry, theta, float(pc.W), float(pc.H), padPx);
+            scand[base + 3] = rx; scand[base + 4] = ry;
+            // BIG-SHAPE glow swap (fp_set_big_glow): a LARGE ellipse is approximating broad shading,
+            // and its rim is a long low-contrast closed contour the eye reads as an oval even where
+            // Sobel-based false-edge barely charges it. The hardness gate above cannot catch this —
+            // it asks whether the region has structure, not whether THIS shape is big enough for its
+            // rim to become a contour. A glow carries the same footprint with no rim at all.
+            if (kind == 0 && pc.bigProb > 0.0 && sqrt(rx * ry) > bigThr &&
+                uf(uint(i), ctr) < pc.bigProb) scand[base + 0] = float(pc.bigKind);
         }
     }
 }

@@ -1,5 +1,10 @@
-# build-cuda-fat.ps1 -- RELEASE build: compile fh6cuda.dll as a MULTI-ARCH fat binary so it runs
-# on a broad range of NVIDIA GPUs (not just the build box's RTX 5080). For distribution / OSS.
+# build-cuda-fat.ps1 -- SUPERSEDED (2026-08-03). CUDA is no longer shipped: the release is Vulkan
+# only, so nothing calls this any more. `build-cuda.ps1 -Release` produces the same fat DLL against
+# the INSTALLED toolkit and is the one to maintain; this script exists solely because it targets a
+# PORTABLE toolkit dir (-Toolkit), which the old CI needed. Delete it once that is definitely moot.
+#
+# Fat build: compile fh6cuda.dll as a MULTI-ARCH binary so it runs on a broad range of NVIDIA GPUs
+# (not just the build box's RTX 5080).
 #
 # Uses a PORTABLE CUDA 12.8 toolkit (no admin install). CUDA 13.x dropped Pascal/Maxwell, but 12.8
 # spans sm_61 (Pascal GTX 10xx) .. sm_120 (Blackwell RTX 50xx). Build the portable toolkit from the

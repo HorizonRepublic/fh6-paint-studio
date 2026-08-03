@@ -32,6 +32,7 @@ var builtinCards = []presetCard{
 	{"flat", "mode.flat_title", "mode.flat_subtitle", false},
 	{"photo", "mode.photo_title", "mode.photo_subtitle", false},
 	{"gaussian", "mode.gaussian_title", "mode.gaussian_subtitle", false},
+	{"pixel", "mode.pixel_title", "mode.pixel_subtitle", false},
 }
 
 // presetCardsSection renders step 1: the built-in preset cards, then a "Saved presets" group if the user

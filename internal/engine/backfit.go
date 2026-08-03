@@ -24,6 +24,7 @@ type greedyEnv struct {
 	kindWeights []float32
 	kindCDF     []float32
 	orient      []float32
+	kg          *kindGate
 	devSearch   randomSearcher
 	allowAlpha  bool
 	alphaMin    float32
@@ -67,7 +68,7 @@ func (g *greedyEnv) searchOne(sampler *ErrorSampler, grid []float32, gw, gh, sha
 	}
 	if g.devSearch == nil {
 		t0 = time.Now()
-		cands := RandomShapes(g.rng, g.w, g.h, g.randomN, g.kinds, g.kindWeights, sampler, progress, g.orient, g.allowAlpha, g.alphaMin, g.aspectMax, nil)
+		cands := RandomShapes(g.rng, g.w, g.h, g.randomN, g.kinds, g.kindWeights, sampler, progress, g.orient, g.allowAlpha, g.alphaMin, g.aspectMax, nil, g.kg)
 		clampCandidatesToCanvas(cands, float32(g.w), float32(g.h), g.canvasPad)
 		if g.tm != nil {
 			g.tm.Generate += time.Since(t0)

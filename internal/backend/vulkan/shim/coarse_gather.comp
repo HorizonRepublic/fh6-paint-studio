@@ -1,0 +1,18 @@
+#version 450
+// coarse_gather.comp — coarse-to-fine filter, pass 2 of 2. Copies the survivors' 11-float
+// candidate records into a compact buffer so the full-budget re-score dispatches over k
+// candidates instead of n. Mirrors shim.cu gatherSubset.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly  buffer Sc { float scand[]; };
+layout(std430, binding = 1) readonly  buffer Se { int   selIdx[]; };
+layout(std430, binding = 2) writeonly buffer S2 { float scand2[]; };
+layout(push_constant) uniform PC { int k; } pc;
+
+void main() {
+    int j = int(gl_GlobalInvocationID.x);
+    if (j >= pc.k) return;
+    int idx = selIdx[j];
+    if (idx < 0) idx = 0;
+    for (int t = 0; t < 11; t++) scand2[j * 11 + t] = scand[idx * 11 + t];
+}

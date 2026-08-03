@@ -1,4 +1,4 @@
-// shim.cu — CUDA backend for Forza Painter, compiled by nvcc (+MSVC host) into
+﻿// shim.cu — CUDA backend for Forza Painter, compiled by nvcc (+MSVC host) into
 // forzacuda.dll. The Go side loads the DLL and calls these extern "C" functions
 // via syscall (no cgo), so the Go build stays pure (CGO_ENABLED=0).
 //
@@ -14,6 +14,13 @@
 #include <cuda_fp16.h>
 #include <math.h>
 #include <float.h>
+#include <stdlib.h>
+#include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sched.h>
+#endif
 
 #define DEG2RAD 0.017453292519943295
 #define BLOCK 128
@@ -396,7 +403,10 @@ static float* d_out    = nullptr;
 static float* d_grid   = nullptr;
 static int g_w = 0, g_h = 0, g_gw = 0, g_gh = 0, g_maxCands = 0;
 static int g_sampleBudget = 4000; // progressive-sampling pixel cap (see sampleStep / fp_set_sample_budget)
-static int g_warpEval = 1;        // 1 = evalKernelWarp (warp/candidate, faster); 0 = evalKernel (block, golden fallback)
+static int g_warpEval = 0;        // 0 = evalKernel (block/candidate): the DEFAULT — large early shapes dominate the
+                                  // runtime and want 128 threads each, not 32, so the block kernel is both faster here
+                                  // and the only one carrying the per-pixel-alpha gradient branch. 1 = evalKernelWarp
+                                  // (warp/candidate), opt-in via fp_set_warp_eval for reference A/Bs.
 static int g_gradients = 0;       // 1 = the batch may contain gradient kinds -> force evalKernel (block): only it carries the per-pixel-alpha gradient branch (the warp kernel does not)
 
 // ---- on-device search state (fp_search_random) ----
@@ -409,6 +419,12 @@ static float* d_boundDist = nullptr; // distance-to-boundary (px), len w*h, uplo
 static float* d_gridcdf = nullptr; // cumulative error grid, len gw*gh, per-shape H2D
 static float* d_kinds   = nullptr; // kind ids as float, len nKinds
 static float* d_kindcdf = nullptr; // cumulative kind weights, len nKinds
+static float* d_kindGate = nullptr; // optional per-pixel region-kinds gate (hard-structure map), len W*H
+static float g_glowTau = 0.f, g_glowProb = 0.f; // deep-smooth glow swap (fp_set_glow_swap): cells with hard<tau swap the forced ellipse for a RIMLESS glow with this probability
+static float* d_rampGlow = nullptr; // optional per-pixel smooth-gradient map (metric.RampMap, fp_set_ramp_glow), len W*H
+static float g_rampGlowThresh = 0.f, g_rampGlowTau = 0.f, g_rampGlowProb = 0.f; // where rampGlow[centre] > thresh the glow swap runs HOTTER (tau/prob) — genuine gradient zones only
+__constant__ float c_alphaGrid[8];   // analytic-alpha grid (fp_set_alpha_grid): eval re-solves color per grid alpha, keeps the ΔSSE-min pair
+__constant__ int   c_alphaGridN = 0; // 0 = off (the candidate's sampled alpha passes through unchanged)
 static float* d_scand   = nullptr; // search candidate scratch (g_searchCap*11)
 static float* d_sout    = nullptr; // search eval results   (g_searchCap*5)
 static float* d_adj     = nullptr; // selection-adjusted score (g_searchCap)
@@ -437,6 +453,54 @@ static int*   d_cselIdx = nullptr; // partition-winner indices (MAXKPART)
 static float* d_scand2  = nullptr; // gathered survivor geometry (MAXKPART*11)
 static float* d_sout2   = nullptr; // survivor full-budget eval  (MAXKPART*5)
 static float* d_adj2    = nullptr; // survivor selection score   (MAXKPART)
+
+// hardEpilogue is the shared final ΔSSE math of the three hard-path eval kernels (block/warp/fp16),
+// lifted out verbatim. The accumulated sums are alpha-INDEPENDENT, so with the analytic-alpha grid
+// set (fp_set_alpha_grid) each grid alpha is re-solved for its optimal color in pure epilogue math
+// (no extra memory traffic) and the (alpha, color) pair with the lowest ΔSSE wins. Grid off keeps
+// the historical single-alpha path bit-identical (candidate alpha scored + passed through raw).
+__device__ void hardEpilogue(const float* L, double a, float rawA, int step, float* o5) {
+    double W_ = L[0], nn = L[1], nt = L[2];
+    if (nn < 1 || W_ <= 0) { o5[0] = REJECTED; return; }
+    if (nt > 0 && nt > 1.5 * nn) { o5[0] = REJECTED; return; }
+    double sTR = L[3], sTG = L[4], sTB = L[5], sTA = L[6];
+    double sCR = L[7], sCG = L[8], sCB = L[9], sCA = L[10];
+    double sCR2 = L[11], sCG2 = L[12], sCB2 = L[13], sCA2 = L[14];
+    double sTCR = L[15], sTCG = L[16], sTCB = L[17], sTCA = L[18];
+    double invW = 1.0 / W_;
+    double bR = 0, bG = 0, bB = 0, bD = 0, bA = (double)rawA;
+    for (int k = -1; k < c_alphaGridN; k++) {
+        double aa = a;
+        if (k >= 0) {
+            aa = (double)c_alphaGrid[k];
+            if (aa < 1e-3) aa = 1e-3;
+            if (aa > 1) aa = 1;
+        }
+        double invA = 1.0 - aa;
+        double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / aa);
+        double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / aa);
+        double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / aa);
+        double a2 = aa * aa, twoA = 2 * aa;
+        double dR = a2 * (W_ * oR * oR - 2 * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
+        double dG = a2 * (W_ * oG * oG - 2 * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
+        double dB = a2 * (W_ * oB * oB - 2 * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
+        double dA = a2 * (W_ - 2 * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
+        double totalDelta = dR + dG + dB + dA;
+        if (nt > 0) {
+            double spillFrac = nt / (nn + nt);
+            totalDelta += a2 * nt * (1 + 2 * spillFrac) * (oR * oR + oG * oG + oB * oB + 1);
+        }
+        if (k < 0 || totalDelta < bD) {
+            bR = oR; bG = oG; bB = oB; bD = totalDelta;
+            bA = (k < 0) ? (double)rawA : aa;
+        }
+    }
+    o5[0] = (float)(bD * (double)(step * step));
+    o5[1] = (float)bR;
+    o5[2] = (float)bG;
+    o5[3] = (float)bB;
+    o5[4] = (float)bA;
+}
 
 // ---- eval kernel: one block per candidate ----
 // Accumulator layout (NACC=19): 0=W 1=n 2=nt 3..6=sT(rgba) 7..10=sC 11..14=sC2 15..18=sTC
@@ -550,32 +614,7 @@ __global__ void evalKernel(const float* __restrict__ cands, int n, const float* 
         return;
     }
 
-    double W_ = sh[0], nn = sh[1], nt = sh[2];
-    if (nn < 1 || W_ <= 0) { out[gid * 5] = REJECTED; return; }
-    if (nt > 0 && nt > 1.5 * nn) { out[gid * 5] = REJECTED; return; }
-    double sTR = sh[3], sTG = sh[4], sTB = sh[5], sTA = sh[6];
-    double sCR = sh[7], sCG = sh[8], sCB = sh[9], sCA = sh[10];
-    double sCR2 = sh[11], sCG2 = sh[12], sCB2 = sh[13], sCA2 = sh[14];
-    double sTCR = sh[15], sTCG = sh[16], sTCB = sh[17], sTCA = sh[18];
-    double invW = 1.0 / W_, invA = 1.0 - a;
-    double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / a);
-    double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / a);
-    double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / a);
-    double a2 = a * a, twoA = 2 * a;
-    double dR = a2 * (W_ * oR * oR - 2 * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
-    double dG = a2 * (W_ * oG * oG - 2 * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
-    double dB = a2 * (W_ * oB * oB - 2 * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
-    double dA = a2 * (W_ - 2 * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
-    double totalDelta = dR + dG + dB + dA;
-    if (nt > 0) {
-        double spillFrac = nt / (nn + nt);
-        totalDelta += a2 * nt * (1 + 2 * spillFrac) * (oR * oR + oG * oG + oB * oB + 1);
-    }
-    out[gid * 5 + 0] = (float)(totalDelta * (double)(step * step));
-    out[gid * 5 + 1] = (float)oR;
-    out[gid * 5 + 2] = (float)oG;
-    out[gid * 5 + 3] = (float)oB;
-    out[gid * 5 + 4] = cc[10]; // pass-through input alpha (matches CPU)
+    hardEpilogue(sh, a, cc[10], step, out + (long)gid * 5);
 }
 
 // evalKernelWarp: one WARP (32 lanes) per candidate instead of one 128-thread block.
@@ -629,32 +668,7 @@ __global__ void evalKernelWarp(const float* cands, int n, const float* target, c
     }
     if (lane != 0) return;
 
-    double W_ = L[0], nn = L[1], nt = L[2];
-    if (nn < 1 || W_ <= 0) { out[warpId * 5] = REJECTED; return; }
-    if (nt > 0 && nt > 1.5 * nn) { out[warpId * 5] = REJECTED; return; }
-    double sTR = L[3], sTG = L[4], sTB = L[5], sTA = L[6];
-    double sCR = L[7], sCG = L[8], sCB = L[9], sCA = L[10];
-    double sCR2 = L[11], sCG2 = L[12], sCB2 = L[13], sCA2 = L[14];
-    double sTCR = L[15], sTCG = L[16], sTCB = L[17], sTCA = L[18];
-    double invW = 1.0 / W_, invA = 1.0 - a;
-    double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / a);
-    double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / a);
-    double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / a);
-    double a2 = a * a, twoA = 2 * a;
-    double dR = a2 * (W_ * oR * oR - 2 * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
-    double dG = a2 * (W_ * oG * oG - 2 * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
-    double dB = a2 * (W_ * oB * oB - 2 * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
-    double dA = a2 * (W_ - 2 * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
-    double totalDelta = dR + dG + dB + dA;
-    if (nt > 0) {
-        double spillFrac = nt / (nn + nt);
-        totalDelta += a2 * nt * (1 + 2 * spillFrac) * (oR * oR + oG * oG + oB * oB + 1);
-    }
-    out[warpId * 5 + 0] = (float)(totalDelta * (double)(step * step));
-    out[warpId * 5 + 1] = (float)oR;
-    out[warpId * 5 + 2] = (float)oG;
-    out[warpId * 5 + 3] = (float)oB;
-    out[warpId * 5 + 4] = cc[10];
+    hardEpilogue(L, a, cc[10], step, out + (long)warpId * 5);
 }
 
 // evalKernelWarpFP16: a HALF-PRECISION variant of evalKernelWarp's accumulation, used ONLY for
@@ -720,32 +734,7 @@ __global__ void evalKernelWarpFP16(const float* cands, int n, const float* targe
         L[k] = v;
     }
     if (lane != 0) return;
-    double W_ = L[0], nn = L[1], nt = L[2];
-    if (nn < 1 || W_ <= 0) { out[warpId * 5] = REJECTED; return; }
-    if (nt > 0 && nt > 1.5 * nn) { out[warpId * 5] = REJECTED; return; }
-    double sTR = L[3], sTG = L[4], sTB = L[5], sTA = L[6];
-    double sCR = L[7], sCG = L[8], sCB = L[9], sCA = L[10];
-    double sCR2 = L[11], sCG2 = L[12], sCB2 = L[13], sCA2 = L[14];
-    double sTCR = L[15], sTCG = L[16], sTCB = L[17], sTCA = L[18];
-    double invW = 1.0 / W_, invA = 1.0 - a;
-    double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / a);
-    double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / a);
-    double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / a);
-    double a2 = a * a, twoA = 2 * a;
-    double dR = a2 * (W_ * oR * oR - 2 * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
-    double dG = a2 * (W_ * oG * oG - 2 * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
-    double dB = a2 * (W_ * oB * oB - 2 * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
-    double dA = a2 * (W_ - 2 * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
-    double totalDelta = dR + dG + dB + dA;
-    if (nt > 0) {
-        double spillFrac = nt / (nn + nt);
-        totalDelta += a2 * nt * (1 + 2 * spillFrac) * (oR * oR + oG * oG + oB * oB + 1);
-    }
-    out[warpId * 5 + 0] = (float)(totalDelta * (double)(step * step));
-    out[warpId * 5 + 1] = (float)oR;
-    out[warpId * 5 + 2] = (float)oG;
-    out[warpId * 5 + 3] = (float)oB;
-    out[warpId * 5 + 4] = cc[10];
+    hardEpilogue(L, a, cc[10], step, out + (long)warpId * 5);
 }
 
 // ---- apply kernel: 2D grid over the candidate bbox ----
@@ -834,7 +823,8 @@ __global__ void genKernel(float* cands, int n, unsigned long long seed,
                           float maxR, int allowAlpha, float alphaMin, float aspectMax,
                           const float* gridCDF, int gw, int gh, int W, int H,
                           const float* orient, const float* boundDist, float boundPad, float boundMix,
-                          float canvasPad) {
+                          float canvasPad, const float* kindGate, float glowTau, float glowProb,
+                          const float* rampGlow, float rampThresh, float rampTau, float rampProb) {
     int stride = gridDim.x * blockDim.x;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
         unsigned int ctr = 0;
@@ -879,9 +869,23 @@ __global__ void genKernel(float* cands, int n, unsigned long long seed,
         // 3. alpha
         float alpha = 1.f;
         if (allowAlpha) alpha = alphaMin + (1.f - alphaMin) * uf(seed, i, ctr);
-        // 4. kind via weighted CDF
+        // 4. kind via weighted CDF, region-gated when the hard-structure map is live (engine
+        // kindGate.pick): the full pool only with probability hard[centre], else ellipse (kind 0).
         int kind = (int)(kinds[nKinds - 1] + 0.5f);
-        {
+        bool fullPool = true;
+        if (kindGate) {
+            int gidx = (int)cy * W + (int)cx;
+            if (gidx >= 0 && gidx < W * H && uf(seed, i, ctr) >= kindGate[gidx]) {
+                kind = 0; fullPool = false;
+                // Deep-smooth glow swap (engine kindGate.pick): a rimless glow instead of the
+                // forced ellipse where the target has essentially no structure at all. In genuine
+                // gradient zones (rampGlow[centre] > rampThresh) the swap runs HOTTER — see fp_set_ramp_glow.
+                float effTau = glowTau, effProb = glowProb;
+                if (rampGlow && rampGlow[gidx] > rampThresh) { effTau = rampTau; effProb = rampProb; }
+                if (kindGate[gidx] < effTau && uf(seed, i, ctr) < effProb) kind = 4;
+            }
+        }
+        if (fullPool) {
             float ku = uf(seed, i, ctr) * kindCDF[nKinds - 1];
             for (int k = 0; k < nKinds; k++) {
                 if (ku < kindCDF[k]) { kind = (int)(kinds[k] + 0.5f); break; }
@@ -1014,7 +1018,9 @@ __global__ void momentSeedKernel(float* seeds, int K, unsigned long long seed,
 // around the seed — the same localisation that lets a small pool match the 50k random search.
 __global__ void genMomentKernel(float* cands, int n, int perSeed, int K, unsigned long long seed,
                                 const float* seeds, const float* kinds, const float* kindCDF, int nKinds,
-                                int allowAlpha, float alphaMin, int W, int H, float canvasPad) {
+                                int allowAlpha, float alphaMin, int W, int H, float canvasPad,
+                                const float* kindGate, float glowTau, float glowProb,
+                                const float* rampGlow, float rampThresh, float rampTau, float rampProb) {
     float padPx = canvasPad * fminf((float)W, (float)H);
     int stride = gridDim.x * blockDim.x;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
@@ -1043,8 +1049,20 @@ __global__ void genMomentKernel(float* cands, int n, int perSeed, int K, unsigne
         if (allowAlpha) alpha = alphaMin + (1.f - alphaMin) * uf(seed, i, ctr);
         c[10] = alpha;
         int kind = (int)(kinds[nKinds - 1] + 0.5f);
-        { float ku = uf(seed, i, ctr) * kindCDF[nKinds - 1];
-          for (int kk = 0; kk < nKinds; kk++) if (ku < kindCDF[kk]) { kind = (int)(kinds[kk] + 0.5f); break; } }
+        bool fullPool = true;
+        if (kindGate) { // region gate at the JITTERED centre (mirrors host momentPool's kg.pick)
+            int gidx = (int)jy * W + (int)jx;
+            if (gidx >= 0 && gidx < W * H && uf(seed, i, ctr) >= kindGate[gidx]) {
+                kind = 0; fullPool = false;
+                float effTau = glowTau, effProb = glowProb;
+                if (rampGlow && rampGlow[gidx] > rampThresh) { effTau = rampTau; effProb = rampProb; }
+                if (kindGate[gidx] < effTau && uf(seed, i, ctr) < effProb) kind = 4;
+            }
+        }
+        if (fullPool) {
+            float ku = uf(seed, i, ctr) * kindCDF[nKinds - 1];
+            for (int kk = 0; kk < nKinds; kk++) if (ku < kindCDF[kk]) { kind = (int)(kinds[kk] + 0.5f); break; }
+        }
         c[0] = (float)kind;
         if (kind == 1) { // rectangle
             float hw = 1.f + uf(seed, i, ctr) * (localR - 1.f);
@@ -1324,6 +1342,21 @@ static double* d_ploss_partial = nullptr;    // per-block partial loss, up to 10
 static float* d_pdcsnap = nullptr;           // tiled backward Pass A: dC-as-seen-by-shape, sized == d_pbelow
 static int  g_pN = 0;
 static long g_pbelowCap = 0;
+
+// SHAPE BINNING. The polish kernels are thread-per-pixel and used to walk the ENTIRE shape list
+// per pixel just to bbox-test it away: at 3000 shapes over an 11.6 MP canvas that is 35 billion
+// rejected tests per pass, and the transparent surround (a third of the canvas at the default
+// pad) pays it in full for nothing. Binning shapes into tiles once per upload lets each pixel walk
+// only the handful whose bbox reaches its tile. The list is built in ascending shape order, so the
+// composite order — and therefore the result — is unchanged; the per-pixel bbox test still runs.
+#define PTILE 32
+static int* d_tileCount = nullptr; // shapes overlapping each tile
+static int* d_tileOff   = nullptr; // prefix sum over d_tileCount, nTiles+1 entries
+static int* d_tileList  = nullptr; // shape indices per tile, ascending
+static int* d_tileTotal = nullptr; // device scalar: total list length
+static long long g_tileListCap = 0;
+static int g_tilesX = 0, g_tilesY = 0, g_nTiles = 0;
+static int g_binned = 0; // 0 = lists unusable this iteration (too large) -> kernels scan all shapes
 static int  g_polishSTE = 0; // straight-through: hard forward coverage, soft surrogate gradient
 static int  g_polishOKLab = 0; // perceptual loss: OKLab colour distance in loss/dcinit/hard (mirrors engine/oklab.go)
 
@@ -1331,6 +1364,8 @@ static int  g_polishOKLab = 0; // perceptual loss: OKLab colour distance in loss
 // INTERIOR pixels (Sobel on Rec.601 luma, 1px border ring excluded so the adjoint scatter never
 // leaves the canvas). Folded into fp_polish_loss / fp_polish_hard_loss / polishDCInit when λ>0.
 static double g_polishFELambda = 0.0;
+static float*  d_termW = nullptr;      // per-pixel FE/EAGLE term weight (region-weighted λ); null = uniform
+static int     g_termWN = 0;           // allocated pixel count of d_termW (re-alloc on image-size change)
 static float*  d_feTL = nullptr;       // target luma (computed once per lambda-set)
 static float*  d_feRL = nullptr;       // recon luma scratch
 static double* d_feDir = nullptr;      // 2*npix: active normalised gradient direction (cx,cy), 0 if inactive
@@ -1396,7 +1431,7 @@ __device__ inline void d_sobelAt(const float* luma, int w, int i, double* gx, do
 // feDirReduce — per interior pixel: relu(|∇recon|−|∇target|); active pixels write their normalised
 // gradient direction into dir (zeroed otherwise) and the excess into the block's FE partial
 // (NO atomic — fixed-order final sum, like polishLossReduce).
-__global__ void feDirReduce(const float* rl, const float* tl, int w, int h, double* dir, double* fepartial) {
+__global__ void feDirReduce(const float* rl, const float* tl, int w, int h, const float* tw, double* dir, double* fepartial) {
     __shared__ double sh[BLOCK];
     int N = w * h;
     double s = 0.0;
@@ -1410,9 +1445,10 @@ __global__ void feDirReduce(const float* rl, const float* tl, int w, int h, doub
             double gr = sqrt(gx * gx + gy * gy);
             double d = gr - sqrt(tx * tx + ty * ty);
             if (d > 0.0 && gr >= 1e-12) {
-                s += d;
-                cx = gx / gr;
-                cy = gy / gr;
+                double wi = tw ? (double)tw[i] : 1.0; // region term weight: dir carries wi so the adjoint gather scales for free
+                s += wi * d;
+                cx = wi * gx / gr;
+                cy = wi * gy / gr;
             }
         }
         dir[i * 2] = cx;
@@ -1616,16 +1652,18 @@ __global__ void polishLossFinal(const double* lpartial, int blocks, double* loss
 // oklab = 2*weight*J^T*dLab for the colour channels (engine.okLabPixelDC).
 __global__ void polishDCInit(const float* render, const float* target, const float* weight,
                             int N, float* dC, int oklab, const double* feAdj, double feLambda,
-                            const double* ssimAdj, double ssimLambda) {
+                            const double* ssimAdj, double ssimLambda,
+                            const double* egAdj, double egLambda) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
     double wt = (double)weight[idx];
     int p = idx * 4;
     double feR = 0.0, feG = 0.0, feB = 0.0;
-    if (feAdj || ssimAdj) {
+    if (feAdj || ssimAdj || egAdj) {
         double a = 0.0;
         if (feAdj) a = feLambda * feAdj[idx];
         if (ssimAdj) a += ssimLambda * ssimAdj[idx];
+        if (egAdj) a += egLambda * egAdj[idx];
         feR = a * 0.299; feG = a * 0.587; feB = a * 0.114;
     }
     if (oklab) {
@@ -1675,17 +1713,56 @@ __global__ void polishGradReduceAll(const double* gpartial, double* pgrad) {
 // or reverse (backward dC), replacing the N sequential per-shape kernel launches with O(1)
 // launches. Mirrors the per-shape kernels above byte-for-byte (incl. gradient kinds). =====
 
+__global__ void tileBinCount(const int* pbbx, int n, int tilesX, int nTiles, int* counts) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    int x0 = (t % tilesX) * PTILE, y0 = (t / tilesX) * PTILE;
+    int x1 = x0 + PTILE - 1, y1 = y0 + PTILE - 1;
+    int c = 0;
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1) continue;
+        c++;
+    }
+    counts[t] = c;
+}
+
+__global__ void tileBinScan(const int* counts, int nTiles, int* offs, int* total) {
+    if (blockIdx.x || threadIdx.x) return; // nTiles is ~10k; a sequential scan here costs microseconds
+    int acc = 0;
+    for (int t = 0; t < nTiles; t++) { offs[t] = acc; acc += counts[t]; }
+    offs[nTiles] = acc;
+    *total = acc;
+}
+
+__global__ void tileBinFill(const int* pbbx, int n, int tilesX, int nTiles, const int* offs, int* list) {
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= nTiles) return;
+    int x0 = (t % tilesX) * PTILE, y0 = (t / tilesX) * PTILE;
+    int x1 = x0 + PTILE - 1, y1 = y0 + PTILE - 1;
+    int w = offs[t];
+    for (int si = 0; si < n; si++) {
+        const int* bb = pbbx + si * 4;
+        if (bb[2] < x0 || bb[0] > x1 || bb[3] < y0 || bb[1] > y1) continue;
+        list[w++] = si;
+    }
+}
+
 // polishForwardTiled — render = base then composite every shape in order (one dispatch).
 __global__ void polishForwardTiled(const float* base, float* render, float* below,
                                    const double* pP, const double* pcol, const int* pkind,
                                    const int* pbbx, const long long* pboff, int n, int W, int H,
-                                   double tau, int ste) {
+                                   double tau, int ste,
+                                   const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < n; si++) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = lo; k < hi; k++) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1718,13 +1795,17 @@ __global__ void polishForwardTiled(const float* base, float* render, float* belo
 // polishHardTiled — HARD-coverage deliverable render (no below snapshot), one dispatch.
 __global__ void polishHardTiled(const float* base, float* render, const double* pP,
                                 const double* pcol, const int* pkind, const int* pbbx,
-                                int n, int W, int H) {
+                                int n, int W, int H,
+                                const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < n; si++) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = lo; k < hi; k++) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1757,13 +1838,17 @@ __global__ void polishHardTiled(const float* base, float* render, const double* 
 // conditions match exactly (else Pass B could read an unwritten dcsnap slot).
 __global__ void polishDCWalk(const float* dC, float* dcsnap, const double* pP, const double* pcol,
                              const int* pkind, const int* pbbx, const long long* pboff, int n,
-                             int W, int H, double tau, int ste) {
+                             int W, int H, double tau, int ste,
+                             const int* tileOff, const int* tileList, int tilesX, int binned) {
     long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (long long)W * H) return;
     int x = (int)(idx % W), y = (int)(idx / W);
     long long p = idx * 4;
     float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
-    for (int si = n - 1; si >= 0; si--) {
+    int lo = 0, hi = n;
+    if (binned) { int t = (y / PTILE) * tilesX + (x / PTILE); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int k = hi - 1; k >= lo; k--) {
+        int si = binned ? tileList[k] : k;
         const int* bb = pbbx + si * 4;
         if (x < bb[0] || x > bb[2] || y < bb[1] || y > bb[3]) continue;
         const double* P = pP + (long long)si * 6;
@@ -1872,9 +1957,139 @@ __global__ void polishBackwardReduce(const float* below, const float* dcsnap, co
     }
 }
 
+// gpuWait parks the calling thread until the queued GPU work is done, WITHOUT burning a core.
+// cudaDeviceSynchronize — and the implicit sync inside every D2H cudaMemcpy — polls on Windows/WDDM
+// even with blocking-sync scheduling (measured: a full core pegged at 100% for a whole generation
+// while the GPU does all the work). A short spin keeps the sub-millisecond waits free, then the core
+// goes back to the OS. Our waits are typically 2-30 ms, so the sleep granularity costs nothing.
+// FH6_CUDA_SPIN=1 restores the driver's own wait.
+static int g_gpuSpin = 0;
+
+#ifdef _WIN32
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+// Sleep(1) is useless here: the default Windows timer granularity is ~15 ms, so sleeping between
+// polls starves the GPU (measured: utilisation fell to 4-29%). A high-resolution waitable timer
+// sleeps in the sub-millisecond range instead, which is short against our 2-30 ms waits. Per thread,
+// so concurrent callers never share one timer; NULL falls back to Sleep(1) on older Windows.
+static __declspec(thread) HANDLE t_gpuTimer = NULL;
+static __declspec(thread) int t_gpuTimerTried = 0;
+
+static void gpuNap(LONGLONG micros) {
+    if (!t_gpuTimerTried) {
+        t_gpuTimerTried = 1;
+        t_gpuTimer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    }
+    if (!t_gpuTimer) { Sleep(1); return; }
+    LARGE_INTEGER due;
+    due.QuadPart = -(micros * 10); // relative, 100 ns units
+    if (!SetWaitableTimer(t_gpuTimer, &due, 0, NULL, NULL, FALSE)) { Sleep(1); return; }
+    WaitForSingleObject(t_gpuTimer, INFINITE);
+}
+#endif
+
+// Each sync point has its own characteristic wait: a greedy candidate batch is hundreds of µs, a
+// polish forward/backward is a large fraction of a second. Polling all of them keeps a core at 100%
+// for the whole run; napping through all of them starves the GPU (measured: utilisation fell to
+// 57%). So gpuWait learns each site's typical wait, sleeps through most of it, and only polls the
+// tail. g_spinUs is the poll window kept in reserve. FH6_CUDA_SPIN=1 hands the wait back to the
+// driver; FH6_CUDA_SPIN_US tunes the window.
+static double g_spinUs = 5000;
+
+enum GpuWaitSite { WAIT_EVAL = 0, WAIT_SEARCH, WAIT_POLISH, WAIT_GRAD, WAIT_READ, WAIT_SITES };
+static double g_waitEma[WAIT_SITES] = {0};
+
+static void gpuWait(int site) {
+    if (g_gpuSpin) { cudaDeviceSynchronize(); return; }
+#ifdef _WIN32
+    LARGE_INTEGER freq, t0, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    const double perUs = (double)freq.QuadPart * 1e-6;
+    const double est = g_waitEma[site];
+    bool overslept = false;
+    for (;;) {
+        if (cudaStreamQuery(0) != cudaErrorNotReady) break;
+        QueryPerformanceCounter(&now);
+        const double elapsed = (double)(now.QuadPart - t0.QuadPart) / perUs;
+        // A nap costs ~500 µs to arm and wake, so it only pays when the wait left to run is much
+        // longer than that. Short waits (the greedy's candidate batches) poll; long ones (a polish
+        // forward or backward) sleep through most of what is left and poll only the tail.
+        const double left = est - elapsed;
+        if (left > g_spinUs) {
+            // Nap a fraction of what is left rather than all of it: a wake costs ~500 µs, but
+            // sleeping right up to the estimated finish overshoots whenever the estimate is high
+            // and that costs more (measured: one long nap saves ~7% CPU and gives back ~3% wall).
+            gpuNap((LONGLONG)(left * 0.6));
+            overslept = true; // provisional — cleared below if the stream was still busy after
+            if (cudaStreamQuery(0) != cudaErrorNotReady) break;
+            overslept = false;
+        } else {
+            YieldProcessor();
+        }
+    }
+    if (overslept) {
+        // Slept past the finish: the measured time is our own sleep, not the GPU's work, so pull
+        // the estimate down instead of feeding the overshoot back in (it would run away).
+        g_waitEma[site] = est * 0.7;
+        return;
+    }
+    QueryPerformanceCounter(&now);
+    const double took = (double)(now.QuadPart - t0.QuadPart) / perUs;
+    g_waitEma[site] = est <= 0 ? took : est * 0.8 + took * 0.2;
+#else
+    while (cudaStreamQuery(0) == cudaErrorNotReady) {
+        sched_yield();
+    }
+#endif
+}
+
+// calibrateSpinWindow measures what a nap actually costs on THIS machine (arming the timer plus
+// the scheduler getting back to us) and sizes the poll window from it. Napping only pays once the
+// wait left clearly exceeds that cost, and the cost is hardware and OS dependent — a fixed constant
+// was measured to be either wasteful (a wide window polls waits it could have slept through) or
+// harmful on a different kernel mix. Measured here: ~0.3-0.5 ms, giving a ~1 ms window.
+static void calibrateSpinWindow() {
+#ifdef _WIN32
+    LARGE_INTEGER freq, a, b;
+    QueryPerformanceFrequency(&freq);
+    const double perUs = (double)freq.QuadPart * 1e-6;
+    double best = 1e9;
+    for (int i = 0; i < 3; i++) {
+        QueryPerformanceCounter(&a);
+        gpuNap(200);
+        QueryPerformanceCounter(&b);
+        const double overhead = (double)(b.QuadPart - a.QuadPart) / perUs - 200;
+        if (overhead > 0 && overhead < best) best = overhead;
+    }
+    if (best < 1e9) {
+        g_spinUs = 2.5 * best;
+        if (g_spinUs < 500) g_spinUs = 500;
+        if (g_spinUs > 5000) g_spinUs = 5000;
+    }
+#endif
+}
+
 // ---- extern C API ----
 
 API int fp_init(const float* target, const float* weight, int w, int h, int maxCands, int gridSize) {
+    // Sync policy, set before the context exists (the first cudaMalloc below creates it). CUDA's
+    // default (cudaDeviceScheduleAuto) SPINS the calling thread while kernels run, so a generation
+    // pegs a full CPU core start to finish even though all the work is on the GPU — on a 4-core
+    // laptop that is a quarter of the machine and a screaming fan. Blocking sync parks the thread
+    // on an interrupt instead. FH6_CUDA_SPIN=1 restores spinning for A/Bs.
+    {
+        const char* spin = getenv("FH6_CUDA_SPIN");
+        g_gpuSpin = (spin && spin[0] == '1') ? 1 : 0;
+        calibrateSpinWindow();
+        if (const char* su = getenv("FH6_CUDA_SPIN_US")) {
+            double v = atof(su); // explicit override wins over the calibration
+            if (v >= 0) g_spinUs = v;
+        }
+
+        cudaSetDeviceFlags(g_gpuSpin ? cudaDeviceScheduleSpin : cudaDeviceScheduleBlockingSync);
+    }
     g_w = w; g_h = h; g_gw = gridSize; g_gh = gridSize; g_maxCands = maxCands;
     size_t npix = (size_t)w * h;
     if (cudaMalloc(&d_target, npix * 4 * sizeof(float)) != cudaSuccess) return 1;
@@ -1897,6 +2112,7 @@ API void fp_eval(const float* cands, int n, float* out) {
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
     else
         evalKernel<<<n, BLOCK>>>(d_cands, n, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_out);
+    gpuWait(WAIT_EVAL);
     cudaMemcpy(out, d_out, (size_t)n * 5 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -1989,13 +2205,28 @@ API void fp_set_polish_false_edge(const double* lambdaPtr) {
     feLumaKernel<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_target, d_feTL, npix);
 }
 
+// fp_set_term_weight uploads (or clears, hostW==null) the per-pixel FE/EAGLE term-weight map —
+// region-weighted perceptual λ (1−HardEdgeMap): strong in smooth zones where the rim patchwork
+// lives, ~zero on legitimate line-work. Kernels treat a null map as uniform 1.
+API void fp_set_term_weight(const float* hostW) {
+    if (!hostW) {
+        if (d_termW) { cudaFree(d_termW); d_termW = nullptr; }
+        g_termWN = 0;
+        return;
+    }
+    int npix = g_w * g_h;
+    if (d_termW && g_termWN != npix) { cudaFree(d_termW); d_termW = nullptr; }
+    if (!d_termW) { cudaMalloc(&d_termW, (size_t)npix * sizeof(float)); g_termWN = npix; }
+    cudaMemcpy(d_termW, hostW, (size_t)npix * sizeof(float), cudaMemcpyHostToDevice);
+}
+
 // feAccumulateLoss adds λ·FE(d_prender) into d_ploss (deterministic fixed-order partial sum).
 static void feAccumulateLoss() {
     int npix = g_w * g_h;
     int blocks = (npix + BLOCK - 1) / BLOCK;
     feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_feRL, npix);
     if (blocks > 1024) blocks = 1024;
-    feDirReduce<<<blocks, BLOCK>>>(d_feRL, d_feTL, g_w, g_h, d_feDir, d_fe_partial);
+    feDirReduce<<<blocks, BLOCK>>>(d_feRL, d_feTL, g_w, g_h, d_termW, d_feDir, d_fe_partial);
     feAddTotal<<<1, 1>>>(d_fe_partial, blocks, g_polishFELambda, d_ploss);
 }
 
@@ -2054,12 +2285,302 @@ static void ssimAccumulateLoss() {
     feAddTotal<<<1, 1>>>(d_ss_partial, rblocks, g_polishSSIMLambda, d_ploss);
 }
 
+// ===== EAGLE additive term (mirrors engine/eagleterm.go) =====
+// λ·Σ|HP(var₃(Scharr recon)) − HP(var₃(Scharr target))| per gradient direction. All windowed ops are
+// ZERO-padded with fixed 1/9 (1/3) normalization — identical to the CPU reference, whose zero-padded
+// symmetric kernels make the adjoint exact; every stage runs in double with the same per-pixel
+// summation order, so the golden-diff stays tight. No atomics anywhere (deterministic gathers).
+static double g_polishEagleLambda = 0.0;
+static float*  d_egTL = nullptr;      // target luma (computed once per lambda-set)
+static float*  d_egRL = nullptr;      // recon luma scratch
+static double* d_egTH = nullptr;      // 2 planes: target high-passed variance maps (fixed)
+static double* d_egG = nullptr;       // 2 planes: Scharr gx, gy
+static double* d_egV = nullptr;       // 2 planes: patch variance (reused as u·m in the backward)
+static double* d_egM = nullptr;       // 2 planes: patch mean
+static double* d_egHP = nullptr;      // 2 planes: recon high-passed variance maps
+static double* d_egS = nullptr;       // 2 planes: sign → dL/dg (W) scratch
+static double* d_egT1 = nullptr;      // blur scratch
+static double* d_egT2 = nullptr;      // blur scratch
+static double* d_egAdj = nullptr;     // npix: dEagle/dLuma adjoint
+static double* d_eg_partial = nullptr;
+
+// egScharrKernel — /16 Scharr gradient planes of luma; the border ring stays 0 (engine scharr).
+__global__ void egScharrKernel(const float* luma, int w, int h, double* gx, double* gy) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * h) return;
+    int x = i % w, y = i / w;
+    if (x == 0 || x == w - 1 || y == 0 || y == h - 1) { gx[i] = 0.0; gy[i] = 0.0; return; }
+    double tl = luma[i - w - 1], tc = luma[i - w], tr = luma[i - w + 1];
+    double ml = luma[i - 1], mr = luma[i + 1];
+    double bl = luma[i + w - 1], bc = luma[i + w], br = luma[i + w + 1];
+    gx[i] = ((3.0 * tr + 10.0 * mr + 3.0 * br) - (3.0 * tl + 10.0 * ml + 3.0 * bl)) / 16.0;
+    gy[i] = ((3.0 * bl + 10.0 * bc + 3.0 * br) - (3.0 * tl + 10.0 * tc + 3.0 * tr)) / 16.0;
+}
+
+// egPatchVarKernel — zero-padded fixed-1/9 3×3 patch variance + mean of g (engine patchVar; same
+// dy→dx accumulation order per pixel).
+__global__ void egPatchVarKernel(const double* g, int w, int h, double* v, double* m) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * h) return;
+    int x = i % w, y = i / w;
+    double s1 = 0.0, s2 = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        int yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (int dx = -1; dx <= 1; dx++) {
+            int xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            double gv = g[yy * w + xx];
+            s1 += gv; s2 += gv * gv;
+        }
+    }
+    double mm = s1 / 9.0;
+    m[i] = mm;
+    v[i] = s2 / 9.0 - mm * mm;
+}
+
+// egBoxXKernel / egBoxYKernel — zero-padded fixed-1/3 3-tap box along one axis (engine box3 halves).
+__global__ void egBoxXKernel(const double* src, int w, int h, double* dst) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * h) return;
+    int x = i % w;
+    double s = src[i];
+    if (x > 0) s += src[i - 1];
+    if (x < w - 1) s += src[i + 1];
+    dst[i] = s / 3.0;
+}
+__global__ void egBoxYKernel(const double* src, int w, int h, double* dst) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * h) return;
+    int y = i / w;
+    double s = src[i];
+    if (y > 0) s += src[i - w];
+    if (y < h - 1) s += src[i + w];
+    dst[i] = s / 3.0;
+}
+
+// egHPFinishKernel — dst = src − gauss (engine highpass tail).
+__global__ void egHPFinishKernel(const double* src, const double* gauss, int N, double* dst) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    dst[i] = src[i] - gauss[i];
+}
+
+// egLossReduce — Σ|hx−tHx|+|hy−tHy| into block partials (grid-stride, NO atomic — fixed-order
+// final sum via feAddTotal, like feDirReduce).
+__global__ void egLossReduce(const double* hx, const double* hy, const double* tHx, const double* tHy,
+                             int N, const float* tw, double* partial) {
+    __shared__ double sh[BLOCK];
+    double s = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < N; i += gridDim.x * blockDim.x) {
+        double wi = tw ? (double)tw[i] : 1.0;
+        s += wi * (fabs(hx[i] - tHx[i]) + fabs(hy[i] - tHy[i]));
+    }
+    sh[threadIdx.x] = s;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) sh[threadIdx.x] += sh[threadIdx.x + st];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) partial[blockIdx.x] = sh[0];
+}
+
+// egSignKernel — s = sign(h − tH) (the |·| subgradient; engine adjoint sign stage).
+__global__ void egSignKernel(const double* hcur, const double* tH, int N, const float* tw, double* s) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double d = hcur[i] - tH[i];
+    double wi = tw ? (double)tw[i] : 1.0; // region term weight enters the chain at the sign, like the CPU reference
+    s[i] = d > 0.0 ? wi : (d < 0.0 ? -wi : 0.0);
+}
+
+// egMulKernel — dst = u·m (the variance-adjoint's second box operand).
+__global__ void egMulKernel(const double* u, const double* m, int N, double* dst) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    dst[i] = u[i] * m[i];
+}
+
+// egVarAdjKernel — W = (2/9)·(g·Box₉(u) − Box₉(u·m)), Box₉ = zero-padded 3×3 SUM (engine variance
+// adjoint; same dy→dx accumulation order).
+__global__ void egVarAdjKernel(const double* g, const double* u, const double* um, int w, int h, double* W) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= w * h) return;
+    int x = i % w, y = i / w;
+    double su = 0.0, sum = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        int yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (int dx = -1; dx <= 1; dx++) {
+            int xx = x + dx;
+            if (xx < 0 || xx >= w) continue;
+            su += u[yy * w + xx];
+            sum += um[yy * w + xx];
+        }
+    }
+    W[i] = (2.0 / 9.0) * (g[i] * su - sum);
+}
+
+// egScharrAdjKernel — gather form of the CPU interior-only Scharr scatter, both directions summed
+// into adj. A neighbour j contributes only when j is itself interior (the CPU scatter loops
+// interior j only; border g is pinned to 0 so its W is irrelevant).
+__global__ void egScharrAdjKernel(const double* Wx, const double* Wy, int w, int h, double* adj) {
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= w * h) return;
+    int x = p % w, y = p / w;
+    double a = 0.0;
+    // dir x scatter targets (from j): j−w+1:+3, j+1:+10, j+w+1:+3, j−w−1:−3, j−1:−10, j+w−1:−3.
+    // Gather at p: source j = p − offset, kept only if j interior.
+    if (x > 0 && y + 1 < h - 1 && y + 1 >= 1 && x - 1 >= 1)  a += 3.0 * Wx[p + w - 1];
+    if (x - 1 >= 1 && y >= 1 && y < h - 1)                   a += 10.0 * Wx[p - 1];
+    if (x > 0 && y - 1 >= 1 && x - 1 >= 1 && y - 1 < h - 1)  a += 3.0 * Wx[p - w - 1];
+    if (x + 1 <= w - 2 && y + 1 <= h - 2)                    a += -3.0 * Wx[p + w + 1];
+    if (x + 1 <= w - 2 && y >= 1 && y <= h - 2)              a += -10.0 * Wx[p + 1];
+    if (x + 1 <= w - 2 && y - 1 >= 1)                        a += -3.0 * Wx[p - w + 1];
+    // dir y scatter targets: j+w−1:+3, j+w:+10, j+w+1:+3, j−w−1:−3, j−w:−10, j−w+1:−3.
+    if (x - 1 >= 1 && y - 1 >= 1)                            a += 3.0 * Wy[p - w - 1];
+    if (x >= 1 && x <= w - 2 && y - 1 >= 1)                  a += 10.0 * Wy[p - w];
+    if (x + 1 <= w - 2 && y - 1 >= 1)                        a += 3.0 * Wy[p - w + 1];
+    if (x - 1 >= 1 && y + 1 <= h - 2)                        a += -3.0 * Wy[p + w - 1];
+    if (x >= 1 && x <= w - 2 && y + 1 <= h - 2)              a += -10.0 * Wy[p + w];
+    if (x + 1 <= w - 2 && y + 1 <= h - 2)                    a += -3.0 * Wy[p + w + 1];
+    adj[p] = a / 16.0;
+}
+
+// eagleMapsFrom — luma plane → high-passed variance planes (the shared forward pipeline).
+static void eagleMapsFrom(const float* lumaPlane, double* outHx, double* outHy) {
+    int npix = g_w * g_h;
+    int blocks = (npix + BLOCK - 1) / BLOCK;
+    size_t plane = (size_t)npix;
+    egScharrKernel<<<blocks, BLOCK>>>(lumaPlane, g_w, g_h, d_egG, d_egG + plane);
+    egPatchVarKernel<<<blocks, BLOCK>>>(d_egG, g_w, g_h, d_egV, d_egM);
+    egPatchVarKernel<<<blocks, BLOCK>>>(d_egG + plane, g_w, g_h, d_egV + plane, d_egM + plane);
+    for (int dirp = 0; dirp < 2; dirp++) {
+        const double* v = d_egV + (size_t)dirp * plane;
+        double* out = dirp ? outHy : outHx;
+        egBoxXKernel<<<blocks, BLOCK>>>(v, g_w, g_h, d_egT1);
+        egBoxYKernel<<<blocks, BLOCK>>>(d_egT1, g_w, g_h, d_egT2);
+        egBoxXKernel<<<blocks, BLOCK>>>(d_egT2, g_w, g_h, d_egT1);
+        egBoxYKernel<<<blocks, BLOCK>>>(d_egT1, g_w, g_h, d_egT2);
+        egHPFinishKernel<<<blocks, BLOCK>>>(v, d_egT2, npix, out);
+    }
+}
+
+// fp_set_polish_eagle sets the EAGLE λ (pointer: Win64 syscall ABI) and prepares the target-side
+// maps. λ<=0 disables; a canvas below the CPU reference's 8px floor degrades to λ=0.
+API void fp_set_polish_eagle(const double* lambdaPtr) {
+    g_polishEagleLambda = lambdaPtr[0];
+    if (g_polishEagleLambda <= 0.0) return;
+    if (g_w < 8 || g_h < 8) { g_polishEagleLambda = 0.0; return; }
+    int npix = g_w * g_h;
+    if (!d_egTL) {
+        cudaMalloc(&d_egTL, (size_t)npix * sizeof(float));
+        cudaMalloc(&d_egRL, (size_t)npix * sizeof(float));
+        cudaMalloc(&d_egTH, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_egG, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_egV, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_egM, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_egHP, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_egS, (size_t)npix * 2 * sizeof(double));
+        cudaMalloc(&d_egT1, (size_t)npix * sizeof(double));
+        cudaMalloc(&d_egT2, (size_t)npix * sizeof(double));
+        cudaMalloc(&d_egAdj, (size_t)npix * sizeof(double));
+        cudaMalloc(&d_eg_partial, 1024 * sizeof(double));
+    }
+    feLumaKernel<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_target, d_egTL, npix);
+    eagleMapsFrom(d_egTL, d_egTH, d_egTH + (size_t)npix);
+}
+
+// eagleAccumulateLoss adds λ·EAGLE(d_prender) into d_ploss (fixed-order partial sum).
+static void eagleAccumulateLoss() {
+    int npix = g_w * g_h;
+    int blocks = (npix + BLOCK - 1) / BLOCK;
+    feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_egRL, npix);
+    eagleMapsFrom(d_egRL, d_egHP, d_egHP + (size_t)npix);
+    int rblocks = blocks > 1024 ? 1024 : blocks;
+    egLossReduce<<<rblocks, BLOCK>>>(d_egHP, d_egHP + (size_t)npix, d_egTH, d_egTH + (size_t)npix, npix, d_termW, d_eg_partial);
+    feAddTotal<<<1, 1>>>(d_eg_partial, rblocks, g_polishEagleLambda, d_ploss);
+}
+
+// eagleAdjoint recomputes the forward maps for d_prender and fills d_egAdj (engine adjoint chain:
+// sign → self-adjoint high-pass → variance adjoint → Scharr gather).
+static void eagleAdjoint() {
+    int npix = g_w * g_h;
+    int blocks = (npix + BLOCK - 1) / BLOCK;
+    size_t plane = (size_t)npix;
+    feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_egRL, npix);
+    eagleMapsFrom(d_egRL, d_egHP, d_egHP + plane);
+    for (int dirp = 0; dirp < 2; dirp++) {
+        const double* hcur = d_egHP + (size_t)dirp * plane;
+        const double* tH = d_egTH + (size_t)dirp * plane;
+        double* s = d_egS + (size_t)dirp * plane;
+        egSignKernel<<<blocks, BLOCK>>>(hcur, tH, npix, d_termW, s);
+        egBoxXKernel<<<blocks, BLOCK>>>(s, g_w, g_h, d_egT1);
+        egBoxYKernel<<<blocks, BLOCK>>>(d_egT1, g_w, g_h, d_egT2);
+        egBoxXKernel<<<blocks, BLOCK>>>(d_egT2, g_w, g_h, d_egT1);
+        egBoxYKernel<<<blocks, BLOCK>>>(d_egT1, g_w, g_h, d_egT2); // T2 = gauss(sign)
+        egHPFinishKernel<<<blocks, BLOCK>>>(s, d_egT2, npix, d_egT1); // T1 = u
+        egMulKernel<<<blocks, BLOCK>>>(d_egT1, d_egM + (size_t)dirp * plane, npix, d_egV + (size_t)dirp * plane); // V = u·m
+        egVarAdjKernel<<<blocks, BLOCK>>>(d_egG + (size_t)dirp * plane, d_egT1, d_egV + (size_t)dirp * plane, g_w, g_h, s); // W into s
+    }
+    egScharrAdjKernel<<<blocks, BLOCK>>>(d_egS, d_egS + plane, g_w, g_h, d_egAdj);
+}
+
 // fp_set_orient uploads the per-pixel edge-orientation map (len w*h, degrees) used
 // by genKernel to seed elongated shapes along local edges. Called once by the engine
 // before the greedy loop (the map is fixed for a run).
 API void fp_set_orient(const float* orient) {
     if (!d_orient) cudaMalloc(&d_orient, (size_t)g_w * g_h * sizeof(float));
     cudaMemcpy(d_orient, orient, (size_t)g_w * g_h * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+// fp_set_kind_gate uploads the per-pixel region-kinds gate (metric.HardEdgeMap, len w*h, [0,1]):
+// the on-device generators draw from the full kind pool with probability gate[centre] and force
+// ellipse otherwise (engine kindGate.pick). Uploaded once per run. NULL clears it (gate off).
+API void fp_set_kind_gate(const float* hard) {
+    if (!hard) { if (d_kindGate) { cudaFree(d_kindGate); d_kindGate = nullptr; } return; }
+    if (!d_kindGate) cudaMalloc(&d_kindGate, (size_t)g_w * g_h * sizeof(float));
+    cudaMemcpy(d_kindGate, hard, (size_t)g_w * g_h * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+// fp_set_glow_swap sets the deep-smooth glow-swap pair (tau, prob): gate cells with hard<tau swap
+// their forced ellipse for a RIMLESS glow with probability prob (the generation-side patchwork
+// kill — an ellipse rim in a structureless zone is a luminance step; a glow's rim does not exist).
+API void fp_set_glow_swap(const float* tauProb) {
+    if (!tauProb) { g_glowTau = 0.f; g_glowProb = 0.f; return; }
+    g_glowTau = tauProb[0];
+    g_glowProb = tauProb[1];
+}
+
+// fp_set_ramp_glow uploads the per-pixel smooth-gradient map (metric.RampMap, len w*h, [0,1]) and
+// its hot-glow params (params = {thresh, tau, prob}). Where rampGlow[centre] > thresh the deep-smooth
+// glow swap uses the HOTTER (tau, prob) instead of the conservative global pair, so glows fill genuine
+// gradient zones (bokeh/shading ramps) far more aggressively WITHOUT touching structured content —
+// the content-split that made a global tau-raise un-bakeable. NULL ramp clears it (falls back to the
+// global glow swap everywhere). Rides fp_set_kind_gate + fp_set_glow_swap; no effect without them.
+API void fp_set_ramp_glow(const float* ramp, const float* params) {
+    if (!ramp) {
+        if (d_rampGlow) { cudaFree(d_rampGlow); d_rampGlow = nullptr; }
+        g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f;
+        return;
+    }
+    if (!d_rampGlow) cudaMalloc(&d_rampGlow, (size_t)g_w * g_h * sizeof(float));
+    cudaMemcpy(d_rampGlow, ramp, (size_t)g_w * g_h * sizeof(float), cudaMemcpyHostToDevice);
+    g_rampGlowThresh = params[0];
+    g_rampGlowTau = params[1];
+    g_rampGlowProb = params[2];
+}
+
+// fp_set_alpha_grid installs (or clears: vals NULL / n<=0) the analytic-alpha grid used by the
+// hard-path eval epilogue (hardEpilogue): every grid alpha is re-solved for its optimal color and
+// the ΔSSE-min (alpha, color) pair wins. Gradient kinds keep their own alpha semantics (untouched).
+API void fp_set_alpha_grid(const float* vals, int n) {
+    float buf[8] = {0};
+    if (!vals || n < 0) n = 0;
+    if (n > 8) n = 8;
+    for (int i = 0; i < n; i++) buf[i] = vals[i];
+    cudaMemcpyToSymbol(c_alphaGrid, buf, sizeof(buf));
+    cudaMemcpyToSymbol(c_alphaGridN, &n, sizeof(int));
 }
 
 // fp_set_boundary_dist uploads the per-pixel distance-to-boundary field (len w*h, px)
@@ -2122,16 +2643,17 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     if (gblocks > 65535) gblocks = 65535;
     genKernel<<<gblocks, 256>>>(d_scand, n, seed, d_kinds, d_kindcdf, nKinds,
                                 maxR, allowAlpha, alphaMin, aspectMax, d_gridcdf, gw, gh, g_w, g_h, d_orient,
-                                d_boundDist, boundPad, boundMix, canvasPad);
+                                d_boundDist, boundPad, boundMix, canvasPad, d_kindGate, g_glowTau, g_glowProb,
+                                d_rampGlow, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb);
     int kpart = g_kpart;
     bool useCoarse = g_coarseSearch && d_scand2 && n > 4 * kpart;
     int firstBudget = useCoarse ? g_coarseBudget : g_sampleBudget;
     // Pass 1: score all n candidates (at the CHEAP coarse budget when filtering, else FULL).
     // When filtering, the FP16 variant (ranking-only, never the shipped score) cuts the ALU-bound
     // accumulation ~2x; the FP32 re-eval below picks + scores the winner exactly.
-    if (useCoarse && g_coarseFP16)
+    if (useCoarse && g_coarseFP16 && !g_gradients) // the FP16 filter has no per-pixel-alpha branch either
         evalKernelWarpFP16<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
-    else if (g_warpEval)
+    else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(n + 3) / 4, 128>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else
         evalKernel<<<n, BLOCK>>>(d_scand, n, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2142,7 +2664,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         // paid only the coarse cost.
         coarsePartitionMin<<<kpart, 128>>>(d_adj, n, kpart, d_cselIdx);
         gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
-        if (g_warpEval)
+        if (g_warpEval && !g_gradients)
             evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
         else
             evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
@@ -2155,7 +2677,8 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
-    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+    gpuWait(WAIT_SEARCH);
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 // fp_search_moment runs the on-device MOMENT-seeded search for one shape: fit K covariance-
@@ -2192,15 +2715,16 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     int gblocks = (nGen + 255) / 256;
     if (gblocks > 65535) gblocks = 65535;
     genMomentKernel<<<gblocks, 256>>>(d_scand, nGen, perSeed, K, seed, d_seeds, d_kinds, d_kindcdf, nKinds,
-                                      allowAlpha, alphaMin, g_w, g_h, canvasPad);
+                                      allowAlpha, alphaMin, g_w, g_h, canvasPad, d_kindGate, g_glowTau, g_glowProb,
+                                      d_rampGlow, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb);
 
     // Score + argmin (coarse-to-fine auto-applies only at high pool sizes; off for the small moment pool).
     int kpart = g_kpart;
     bool useCoarse = g_coarseSearch && d_scand2 && nGen > 4 * kpart;
     int firstBudget = useCoarse ? g_coarseBudget : g_sampleBudget;
-    if (useCoarse && g_coarseFP16)
+    if (useCoarse && g_coarseFP16 && !g_gradients) // the FP16 filter has no per-pixel-alpha branch either
         evalKernelWarpFP16<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
-    else if (g_warpEval)
+    else if (g_warpEval && !g_gradients) // gradients need the block kernel: only it carries the per-pixel-alpha branch
         evalKernelWarp<<<(nGen + 3) / 4, 128>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
     else
         evalKernel<<<nGen, BLOCK>>>(d_scand, nGen, d_target, d_canvas, d_weight, g_w, g_h, firstBudget, d_sout);
@@ -2208,7 +2732,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     if (useCoarse) {
         coarsePartitionMin<<<kpart, 128>>>(d_adj, nGen, kpart, d_cselIdx);
         gatherSubset<<<(kpart + 255) / 256, 256>>>(d_scand, d_cselIdx, kpart, d_scand2);
-        if (g_warpEval)
+        if (g_warpEval && !g_gradients)
             evalKernelWarp<<<(kpart + 3) / 4, 128>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
         else
             evalKernel<<<kpart, BLOCK>>>(d_scand2, kpart, d_target, d_canvas, d_weight, g_w, g_h, g_sampleBudget, d_sout2);
@@ -2221,7 +2745,8 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
         argminPass2<<<1, 256>>>(d_redVal, d_redIdx, REDBLK, d_bestIdx);
         gatherBest<<<1, 1>>>(d_scand, d_sout, d_bestIdx, d_best);
     }
-    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost); // syncs the stream
+    gpuWait(WAIT_SEARCH);
+    cudaMemcpy(out_best, d_best, 12 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 // ---- polish DLL API ----
@@ -2239,6 +2764,12 @@ API void fp_polish_setup(const float* base, int n) {
     if (!d_pdC)     cudaMalloc(&d_pdC, npix * 4 * sizeof(float));
     if (!d_ploss)   cudaMalloc(&d_ploss, sizeof(double));
     if (!d_ploss_partial) cudaMalloc(&d_ploss_partial, 1024 * sizeof(double)); // max 1024 loss blocks
+    g_tilesX = (g_w + PTILE - 1) / PTILE;
+    g_tilesY = (g_h + PTILE - 1) / PTILE;
+    g_nTiles = g_tilesX * g_tilesY;
+    if (!d_tileCount) cudaMalloc(&d_tileCount, (size_t)g_nTiles * sizeof(int));
+    if (!d_tileOff)   cudaMalloc(&d_tileOff, ((size_t)g_nTiles + 1) * sizeof(int));
+    if (!d_tileTotal) cudaMalloc(&d_tileTotal, sizeof(int));
     cudaFree(d_pP); cudaFree(d_pcol); cudaFree(d_pkind); cudaFree(d_pbbx); cudaFree(d_pboff); cudaFree(d_pgrad);
     cudaFree(d_pgrad_partial);
     cudaMalloc(&d_pP, (size_t)n * 6 * sizeof(double));
@@ -2249,6 +2780,29 @@ API void fp_polish_setup(const float* base, int n) {
     cudaMalloc(&d_pgrad, (size_t)n * 10 * sizeof(double));
     cudaMalloc(&d_pgrad_partial, (size_t)n * PMAXBLK * 10 * sizeof(double)); // per (shape,block) partial grad
     cudaMemcpy(d_pbase, base, npix * 4 * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+// buildTileBins re-bins the shapes after every upload (the expanded bboxes move with tau). Falls
+// back to the unbinned scan when the lists would not fit the cap — correctness never depends on it.
+static void buildTileBins() {
+    const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
+    g_binned = 0;
+    if (g_nTiles <= 0 || g_pN <= 0) return;
+    if (const char* off = getenv("FH6_NO_TILEBIN")) { if (off[0] == '1') return; } // kill switch: full scan
+    int tblocks = (g_nTiles + 255) / 256;
+    tileBinCount<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileCount);
+    tileBinScan<<<1, 1>>>(d_tileCount, g_nTiles, d_tileOff, d_tileTotal);
+    int total = 0;
+    gpuWait(WAIT_READ);
+    cudaMemcpy(&total, d_tileTotal, sizeof(int), cudaMemcpyDeviceToHost);
+    if (total <= 0 || (long long)total > cap) return;
+    if ((long long)total > g_tileListCap) {
+        cudaFree(d_tileList);
+        if (cudaMalloc(&d_tileList, (size_t)total * sizeof(int)) != cudaSuccess) { d_tileList = nullptr; g_tileListCap = 0; return; }
+        g_tileListCap = total;
+    }
+    tileBinFill<<<tblocks, 256>>>(d_pbbx, g_pN, g_tilesX, g_nTiles, d_tileOff, d_tileList);
+    g_binned = 1;
 }
 
 API void fp_polish_upload(const double* P, const double* col, const int* kinds,
@@ -2266,6 +2820,7 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
         cudaMalloc(&d_pdcsnap, (size_t)belowTotal * sizeof(float)); // tiled backward Pass A snapshot
         g_pbelowCap = belowTotal;
     }
+    buildTileBins();
 }
 
 // fp_polish_forward — ONE tiled dispatch (thread-per-pixel walks all shapes). The kernel inits
@@ -2275,7 +2830,7 @@ API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
     double tau = tauPtr[0];
     long long npix = (long long)g_w * g_h;
     int blocks = (int)((npix + BLOCK - 1) / BLOCK);
-    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    polishForwardTiled<<<blocks, BLOCK>>>(d_pbase, d_prender, d_pbelow, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE, d_tileOff, d_tileList, g_tilesX, g_binned);
 }
 
 API void fp_polish_loss(double* out) {
@@ -2286,6 +2841,8 @@ API void fp_polish_loss(double* out) {
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
+    if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2298,7 +2855,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     (void)bbxHost; // bbx is on-device (d_pbbx)
     long long npix = (long long)g_w * g_h;
     int hblocks = (int)((npix + BLOCK - 1) / BLOCK);
-    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h);
+    polishHardTiled<<<hblocks, BLOCK>>>(d_pbase, d_prender, d_pP, d_pcol, d_pkind, d_pbbx, g_pN, g_w, g_h, d_tileOff, d_tileList, g_tilesX, g_binned);
     int npx = g_w * g_h;
     int blocks = (npx + BLOCK - 1) / BLOCK;
     if (blocks > 1024) blocks = 1024;
@@ -2306,6 +2863,8 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     polishLossFinal<<<1, 1>>>(d_ploss_partial, blocks, d_ploss);
     if (g_polishFELambda > 0.0) feAccumulateLoss();
     if (g_polishSSIMLambda > 0.0) ssimAccumulateLoss();
+    if (g_polishEagleLambda > 0.0) eagleAccumulateLoss();
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(out, d_ploss, sizeof(double), cudaMemcpyDeviceToHost);
 }
 
@@ -2324,7 +2883,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
         int blocks = (npix + BLOCK - 1) / BLOCK;
         feLumaKernel<<<blocks, BLOCK>>>(d_prender, d_feRL, npix);
         int rblocks = blocks > 1024 ? 1024 : blocks;
-        feDirReduce<<<rblocks, BLOCK>>>(d_feRL, d_feTL, g_w, g_h, d_feDir, d_fe_partial);
+        feDirReduce<<<rblocks, BLOCK>>>(d_feRL, d_feTL, g_w, g_h, d_termW, d_feDir, d_fe_partial);
         feAdjKernel<<<blocks, BLOCK>>>(d_feDir, g_w, g_h, d_feAdj);
         feAdj = d_feAdj;
     }
@@ -2341,10 +2900,15 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
                                                            d_ssRL, d_ssTL, g_w, g_h, mh, d_ssAdj);
         ssAdjPtr = d_ssAdj;
     }
-    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda, ssAdjPtr, g_polishSSIMLambda);
+    const double* egAdjPtr = nullptr;
+    if (g_polishEagleLambda > 0.0) {
+        eagleAdjoint();
+        egAdjPtr = d_egAdj;
+    }
+    polishDCInit<<<(npix + BLOCK - 1) / BLOCK, BLOCK>>>(d_prender, d_target, d_weight, npix, d_pdC, g_polishOKLab, feAdj, g_polishFELambda, ssAdjPtr, g_polishSSIMLambda, egAdjPtr, g_polishEagleLambda);
     // Pass A: one thread per pixel walks shapes in reverse, snapshotting dcsnap + propagating dC.
     int pblocks = (int)(((long long)npix + BLOCK - 1) / BLOCK);
-    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE);
+    polishDCWalk<<<pblocks, BLOCK>>>(d_pdC, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, g_h, tau, g_polishSTE, d_tileOff, d_tileList, g_tilesX, g_binned);
     // Pass B: 2D grid (x=block-in-shape up to PMAXBLK, y=shape) — all shapes' gradients at once.
     dim3 grd(PMAXBLK, g_pN);
     polishBackwardReduce<<<grd, BLOCK>>>(d_pbelow, d_pdcsnap, d_pP, d_pcol, d_pkind, d_pbbx, d_pboff, g_pN, g_w, tau, d_pgrad_partial, g_polishSTE);
@@ -2353,14 +2917,16 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
 }
 
 API void fp_polish_read_grad(double* dst) {
+    gpuWait(WAIT_GRAD);
     cudaMemcpy(dst, d_pgrad, (size_t)g_pN * 10 * sizeof(double), cudaMemcpyDeviceToHost);
 }
 
 // fp_polish_sync blocks until all queued polish kernels complete. Used by the host loop
 // to attribute async GPU time to the correct phase (forward/backward) when profiling.
-API void fp_polish_sync() { cudaDeviceSynchronize(); }
+API void fp_polish_sync() { gpuWait(WAIT_POLISH); }
 
 API void fp_polish_read_render(float* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_prender, (size_t)g_w * g_h * 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -2376,10 +2942,17 @@ API void fp_polish_free() {
     cudaFree(d_ssH); cudaFree(d_ssG); cudaFree(d_ssHG); cudaFree(d_ssAdj); cudaFree(d_ss_partial);
     d_ssTL = d_ssRL = nullptr; d_ssMy = d_ssMyy = d_ssH = d_ssG = d_ssHG = d_ssAdj = d_ss_partial = nullptr;
     g_polishSSIMLambda = 0.0;
+    cudaFree(d_egTL); cudaFree(d_egRL); cudaFree(d_egTH); cudaFree(d_egG); cudaFree(d_egV);
+    cudaFree(d_egM); cudaFree(d_egHP); cudaFree(d_egS); cudaFree(d_egT1); cudaFree(d_egT2);
+    cudaFree(d_egAdj); cudaFree(d_eg_partial);
+    d_egTL = d_egRL = nullptr; d_egTH = d_egG = d_egV = d_egM = d_egHP = d_egS = nullptr;
+    d_egT1 = d_egT2 = d_egAdj = d_eg_partial = nullptr;
+    g_polishEagleLambda = 0.0;
     d_pbase = d_prender = d_pdC = d_pbelow = nullptr;
     d_pP = d_pcol = d_pgrad = d_ploss = nullptr;
     d_pgrad_partial = d_ploss_partial = nullptr; d_pdcsnap = nullptr;
     d_pkind = nullptr; d_pbbx = nullptr; d_pboff = nullptr;
+    cudaFree(d_tileList); d_tileList = nullptr; g_tileListCap = 0; g_binned = 0;
     g_pN = 0; g_pbelowCap = 0;
 }
 
@@ -2397,10 +2970,12 @@ API void fp_apply(const float* cand) {
 
 API void fp_error_grid(float* out) {
     gridKernel<<<g_gw * g_gh, BLOCK>>>(d_target, d_canvas, d_weight, g_w, g_h, g_gw, g_gh, d_grid);
+    gpuWait(WAIT_READ);
     cudaMemcpy(out, d_grid, (size_t)g_gw * g_gh * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
 API void fp_read_canvas(float* dst) {
+    gpuWait(WAIT_READ);
     cudaMemcpy(dst, d_canvas, (size_t)g_w * g_h * 4 * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
@@ -2414,6 +2989,8 @@ API void fp_free() {
     d_target = d_canvas = d_weight = d_cands = d_out = d_grid = nullptr;
     // search scratch (build "B1")
     cudaFree(d_orient); cudaFree(d_gridcdf); cudaFree(d_kinds); cudaFree(d_kindcdf);
+    cudaFree(d_kindGate); d_kindGate = nullptr;
+    cudaFree(d_rampGlow); d_rampGlow = nullptr;
     cudaFree(d_scand); cudaFree(d_sout); cudaFree(d_adj);
     cudaFree(d_redVal); cudaFree(d_redIdx); cudaFree(d_bestIdx); cudaFree(d_best);
     cudaFree(d_seeds);

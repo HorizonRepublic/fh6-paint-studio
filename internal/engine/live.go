@@ -1,5 +1,10 @@
 package engine
 
+import (
+	"os"
+	"strconv"
+)
+
 // live.go — EXPERIMENTAL LIVE-style co-adaptation scheduler (Options.LiveBatch, default 0/off; replaces the
 // greedy loop when >0). The greedy adds ONE shape at a time then FREEZES it until the single final polish, so
 // at low budgets the early layout is locked in before later shapes reveal it was wrong. LIVE (Ma et al.,
@@ -21,6 +26,11 @@ func (r *run) live() {
 	bi := r.opt.PolishOpts.Iters / 4
 	if bi < 30 {
 		bi = 30
+	}
+	if s := os.Getenv("FH6_LIVEITERS"); s != "" { // lab-only interim-polish depth override (bench harness)
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			bi = v
+		}
 	}
 	batchOpt.PolishOpts.Iters = bi
 

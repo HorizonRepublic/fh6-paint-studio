@@ -58,6 +58,21 @@ $shaders = [ordered]@{
     'ssim_map'        = 'ssim_map_spv'
     'ssim_gh'         = 'ssim_gh_spv'
     'ssim_adj'        = 'ssim_adj_spv'
+    'eagle_scharr'    = 'eagle_scharr_spv'
+    'eagle_var'       = 'eagle_var_spv'
+    'eagle_boxx'      = 'eagle_boxx_spv'
+    'eagle_boxy'      = 'eagle_boxy_spv'
+    'eagle_hpfin'     = 'eagle_hpfin_spv'
+    'eagle_loss'      = 'eagle_loss_spv'
+    'eagle_sign'      = 'eagle_sign_spv'
+    'eagle_um'        = 'eagle_um_spv'
+    'eagle_varadj'    = 'eagle_varadj_spv'
+    'eagle_scharradj' = 'eagle_scharradj_spv'
+    'coarse_min'      = 'coarse_min_spv'
+    'coarse_gather'   = 'coarse_gather_spv'
+    'tile_count'      = 'tb_count_spv'
+    'tile_scan'       = 'tb_scan_spv'
+    'tile_fill'       = 'tb_fill_spv'
 }
 foreach ($s in $shaders.Keys) {
     & $glsl -V --target-env vulkan1.2 (Join-Path $shim "$s.comp") --vn $shaders[$s] -o (Join-Path $shim "$s.spv.h")

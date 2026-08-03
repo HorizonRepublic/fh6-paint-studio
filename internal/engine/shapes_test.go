@@ -13,7 +13,7 @@ func TestRandomShapesRespectsKinds(t *testing.T) {
 	s := NewErrorSampler(grid, 4, 4, 40, 40)
 	rng := rand.New(rand.NewSource(3))
 	allowed := map[model.ShapeKind]bool{model.KindTriangle: true, model.KindRectangle: true}
-	cands := RandomShapes(rng, 40, 40, 80, []model.ShapeKind{model.KindTriangle, model.KindRectangle}, nil, s, 0, nil, false, 1, 0, nil)
+	cands := RandomShapes(rng, 40, 40, 80, []model.ShapeKind{model.KindTriangle, model.KindRectangle}, nil, s, 0, nil, false, 1, 0, nil, nil)
 	if len(cands) != 80 {
 		t.Fatalf("got %d candidates, want 80", len(cands))
 	}
@@ -28,7 +28,7 @@ func TestRandomShapesInBounds(t *testing.T) {
 	grid := make([]float32, 16) // total 0 -> uniform sampling
 	s := NewErrorSampler(grid, 4, 4, 40, 40)
 	rng := rand.New(rand.NewSource(4))
-	cands := RandomShapes(rng, 40, 40, 100, []model.ShapeKind{model.KindEllipse, model.KindLine}, nil, s, 0.5, nil, false, 1, 0, nil)
+	cands := RandomShapes(rng, 40, 40, 100, []model.ShapeKind{model.KindEllipse, model.KindLine}, nil, s, 0.5, nil, false, 1, 0, nil, nil)
 	for _, c := range cands {
 		if c.P[0] < 0 || c.P[0] > 39 || c.P[1] < 0 || c.P[1] > 39 {
 			t.Fatalf("primary point out of bounds: %+v", c.P)
@@ -57,7 +57,7 @@ func TestAllowAlphaProducesSemiTransparent(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	const alphaMin = 0.3
 	sawBelow1 := false
-	for _, c := range RandomShapes(rng, 40, 40, 200, []model.ShapeKind{model.KindEllipse}, nil, s, 0, nil, true, alphaMin, 0, nil) {
+	for _, c := range RandomShapes(rng, 40, 40, 200, []model.ShapeKind{model.KindEllipse}, nil, s, 0, nil, true, alphaMin, 0, nil, nil) {
 		if c.Color.A < alphaMin-1e-6 || c.Color.A > 1+1e-6 {
 			t.Fatalf("alpha %.3f out of [%.2f,1]", c.Color.A, alphaMin)
 		}
@@ -69,7 +69,7 @@ func TestAllowAlphaProducesSemiTransparent(t *testing.T) {
 		t.Fatal("allowAlpha never produced a semi-transparent shape")
 	}
 	// Opaque path: every shape alpha == 1.
-	for _, c := range RandomShapes(rng, 40, 40, 50, []model.ShapeKind{model.KindEllipse}, nil, s, 0, nil, false, 1, 0, nil) {
+	for _, c := range RandomShapes(rng, 40, 40, 50, []model.ShapeKind{model.KindEllipse}, nil, s, 0, nil, false, 1, 0, nil, nil) {
 		if c.Color.A != 1 {
 			t.Fatalf("opaque path produced alpha %.3f", c.Color.A)
 		}

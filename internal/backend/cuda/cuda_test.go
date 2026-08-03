@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/model"
 )
@@ -73,8 +72,7 @@ func TestGoldenDiffEvaluate(t *testing.T) {
 		w, h := 37, 29 // non-square, non-power-of-two to exercise edge cases
 		target, weight := makeTarget(rng, w, h, transparent)
 
-		ref := cpu.New(target, w, h, 8)
-		ref.SetWeight(weight)
+		ref := newRef(target, weight, w, h)
 		gpu, err := New(target, weight, w, h, 8)
 		if err != nil {
 			t.Fatalf("cuda.New: %v", err)
@@ -86,11 +84,11 @@ func TestGoldenDiffEvaluate(t *testing.T) {
 		for i := range canvas {
 			canvas[i] = rng.Float32()
 		}
-		_ = ref.Reset(canvas)
+		ref.Reset(canvas)
 		_ = gpu.Reset(canvas)
 
 		cands := randCands(rng, w, h, 2000)
-		rc, _ := ref.Evaluate(cands)
+		rc := ref.Evaluate(cands)
 		gc, _ := gpu.Evaluate(cands)
 
 		var mismatches int
@@ -121,6 +119,73 @@ func TestGoldenDiffEvaluate(t *testing.T) {
 	}
 }
 
+// TestGoldenDiffEvaluateAlphaGrid repeats the Evaluate golden-diff with the analytic-alpha grid
+// installed on BOTH backends (fp_set_alpha_grid vs the CPU reference): scores, colors AND the
+// chosen alphas must agree. Also asserts the grid actually engages (some alphas move off the
+// candidates' sampled values) — a silently-ignored grid would still pass a pure parity check.
+func TestGoldenDiffEvaluateAlphaGrid(t *testing.T) {
+	rng := rand.New(rand.NewSource(43))
+	w, h := 37, 29
+	target, weight := makeTarget(rng, w, h, false)
+
+	ref := newRef(target, weight, w, h)
+	gpu, err := New(target, weight, w, h, 8)
+	if err != nil {
+		t.Fatalf("cuda.New: %v", err)
+	}
+	defer gpu.Close()
+
+	grid := []float32{0.3, 0.44, 0.58, 0.72, 0.86, 1.0}
+	if err := gpu.SetAlphaGrid(grid); err != nil {
+		t.Fatalf("SetAlphaGrid: %v (rebuild the DLL)", err)
+	}
+	ref.SetAlphaGrid(grid)
+	defer func() { _ = gpu.SetAlphaGrid(nil) }() // never leak the grid into other tests (pooled state)
+
+	canvas := make([]float32, w*h*4)
+	for i := range canvas {
+		canvas[i] = rng.Float32()
+	}
+	ref.Reset(canvas)
+	_ = gpu.Reset(canvas)
+
+	cands := randCands(rng, w, h, 2000)
+	rc := ref.Evaluate(cands)
+	gc, _ := gpu.Evaluate(cands)
+
+	var mismatches, moved int
+	for i := range cands {
+		rRej := rc[i].Score == rejected
+		gRej := gc[i].Score == rejected
+		if rRej || gRej {
+			if rRej != gRej {
+				t.Errorf("cand %d reject mismatch: cpu=%v cuda=%v", i, rRej, gRej)
+			}
+			continue
+		}
+		if rc[i].Color.A != cands[i].Color.A {
+			moved++
+		}
+		if !closeRel(rc[i].Score, gc[i].Score, 2e-3, 1e-2) {
+			if mismatches++; mismatches <= 10 {
+				t.Errorf("cand %d score: cpu=%.5f cuda=%.5f", i, rc[i].Score, gc[i].Score)
+			}
+		}
+		for _, cc := range [][2]float32{
+			{rc[i].Color.R, gc[i].Color.R}, {rc[i].Color.G, gc[i].Color.G},
+			{rc[i].Color.B, gc[i].Color.B}, {rc[i].Color.A, gc[i].Color.A},
+		} {
+			if math.Abs(float64(cc[0]-cc[1])) > 1e-3 {
+				t.Errorf("cand %d color/alpha: cpu=%.5f cuda=%.5f", i, cc[0], cc[1])
+				break
+			}
+		}
+	}
+	if moved == 0 {
+		t.Errorf("alpha grid never moved a candidate's alpha — grid not engaged")
+	}
+}
+
 // gradCands builds random radial-gradient candidates (KindGlow/KindDisk) with the ellipse param layout.
 func gradCands(rng *rand.Rand, w, h, n int) []model.Candidate {
 	kinds := []model.ShapeKind{model.KindGlow, model.KindDisk}
@@ -143,8 +208,7 @@ func TestGradientEvalMatchesCPU(t *testing.T) {
 	rng := rand.New(rand.NewSource(11))
 	w, h := 37, 29
 	target, weight := makeTarget(rng, w, h, false)
-	ref := cpu.New(target, w, h, 8)
-	ref.SetWeight(weight)
+	ref := newRef(target, weight, w, h)
 	gpu, err := New(target, weight, w, h, 8)
 	if err != nil {
 		t.Fatalf("cuda.New: %v", err)
@@ -159,11 +223,11 @@ func TestGradientEvalMatchesCPU(t *testing.T) {
 	for i := range canvas {
 		canvas[i] = rng.Float32()
 	}
-	_ = ref.Reset(canvas)
+	ref.Reset(canvas)
 	_ = gpu.Reset(canvas)
 
 	cands := gradCands(rng, w, h, 1500)
-	rc, _ := ref.Evaluate(cands)
+	rc := ref.Evaluate(cands)
 	gc, _ := gpu.Evaluate(cands)
 
 	var mism int
@@ -192,8 +256,7 @@ func TestGoldenDiffApplyAndGrid(t *testing.T) {
 	rng := rand.New(rand.NewSource(7))
 	w, h := 40, 40
 	target, weight := makeTarget(rng, w, h, false)
-	ref := cpu.New(target, w, h, 8)
-	ref.SetWeight(weight)
+	ref := newRef(target, weight, w, h)
 	gpu, err := New(target, weight, w, h, 8)
 	if err != nil {
 		t.Fatalf("cuda.New: %v", err)
@@ -204,17 +267,17 @@ func TestGoldenDiffApplyAndGrid(t *testing.T) {
 	for i := 0; i < w*h; i++ {
 		canvas[i*4+3] = 1 // opaque black
 	}
-	_ = ref.Reset(canvas)
+	ref.Reset(canvas)
 	_ = gpu.Reset(canvas)
 
 	for _, c := range randCands(rng, w, h, 25) {
-		_ = ref.Apply(c)
+		ref.Apply(c)
 		_ = gpu.Apply(c)
 	}
 
 	rcv := make([]float32, w*h*4)
 	gcv := make([]float32, w*h*4)
-	_ = ref.ReadCanvas(rcv)
+	ref.ReadCanvas(rcv)
 	_ = gpu.ReadCanvas(gcv)
 	for i := range rcv {
 		if math.Abs(float64(rcv[i]-gcv[i])) > 1e-4 {
@@ -222,7 +285,7 @@ func TestGoldenDiffApplyAndGrid(t *testing.T) {
 		}
 	}
 
-	rg, _, _, _ := ref.ErrorGrid()
+	rg := ref.ErrorGrid(8)
 	gg, _, _, _ := gpu.ErrorGrid()
 	for i := range rg {
 		if !closeRel(rg[i], gg[i], 1e-3, 1e-3) {
@@ -269,19 +332,40 @@ func TestGoldenDiffPolish(t *testing.T) {
 	// Run both coverage modes: soft (the original) and STE (hard forward + soft surrogate
 	// gradient). The mixed scene's optGeo shapes have edges inside their expanded bbox, so
 	// the STE split-guard outer-band geometry gradient is exercised.
+	// Deterministic per-pixel term-weight map for the weighted modes (a horizontal ramp exercises
+	// weighting without depending on any detector).
+	twMap := make([]float32, w*h)
+	for i := range twMap {
+		twMap[i] = float32(i%w) / float32(w-1)
+	}
 	for _, mode := range []struct {
 		ste, oklab bool
 		fe         float64
 		ssim       float64
-	}{{false, false, 0, 0}, {true, false, 0, 0}, {false, true, 0, 0}, {true, true, 0, 0},
-		{false, false, 0.01, 0}, {true, false, 0.01, 0},
-		{false, false, 0, 0.01}, {true, false, 0, 0.01}, {false, false, 0.01, 0.01}} {
-		ste, oklab, feLam, ssLam := mode.ste, mode.oklab, mode.fe, mode.ssim
+		eagle      float64
+		lost       float64
+		tw         bool
+	}{{false, false, 0, 0, 0, 0, false}, {true, false, 0, 0, 0, 0, false}, {false, true, 0, 0, 0, 0, false}, {true, true, 0, 0, 0, 0, false},
+		{false, false, 0.01, 0, 0, 0, false}, {true, false, 0.01, 0, 0, 0, false},
+		{false, false, 0, 0.01, 0, 0, false}, {true, false, 0, 0.01, 0, 0, false}, {false, false, 0.01, 0.01, 0, 0, false},
+		{false, false, 0, 0, 0.02, 0, false}, {true, false, 0, 0, 0.02, 0, false}, {false, false, 0.01, 0.01, 0.02, 0, false},
+		{false, false, 0.01, 0, 0.02, 0, true}, {true, false, 0.01, 0.01, 0.02, 0, true},
+		// Lost-detail (the FE mirror) alone, weighted, and COMBINED with FE. The combined case is
+		// the one that matters: both terms scatter through the same Sobel stencil with opposite
+		// signs into one dir plane, so a sign or activation slip cancels in isolation.
+		{false, false, 0, 0, 0, 0.01, false}, {true, false, 0, 0, 0, 0.01, false},
+		{false, false, 0, 0, 0, 0.01, true}, {false, false, 0.01, 0, 0, 0.01, false},
+		{false, false, 0.01, 0.01, 0.02, 0.01, true}} {
+		ste, oklab, feLam, ssLam, egLam, ldLam := mode.ste, mode.oklab, mode.fe, mode.ssim, mode.eagle, mode.lost
+		var tw []float32
+		if mode.tw {
+			tw = twMap
+		}
 		if oklab && !gpu.PolishSetOKLab(true) {
 			t.Log("DLL lacks fp_set_polish_oklab — skipping the OKLab golden-diff (rebuild the DLL)")
 			continue
 		}
-		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam, ssLam)
+		ref := engine.PolishStepProbe(shapes, target, weight, w, h, bg, false, tau, ste, oklab, feLam, ssLam, egLam, ldLam, tw)
 
 		gpu.PolishSetSTE(ste)
 		gpu.PolishSetup(ref.Base, ref.N)
@@ -292,6 +376,21 @@ func TestGoldenDiffPolish(t *testing.T) {
 		}
 		if ssLam > 0 && !gpu.PolishSetSSIM(ssLam) {
 			t.Log("DLL lacks fp_set_polish_ssim — skipping the SSIM golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
+		if egLam > 0 && !gpu.PolishSetEagle(egLam) {
+			t.Log("DLL lacks fp_set_polish_eagle — skipping the EAGLE golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
+		if ldLam > 0 && !gpu.PolishSetLostDetail(ldLam) {
+			t.Log("DLL lacks fp_set_polish_lostdetail — skipping the lost-detail golden-diff (rebuild the DLL)")
+			gpu.PolishFree()
+			continue
+		}
+		if !gpu.PolishSetTermWeight(tw) && tw != nil {
+			t.Log("DLL lacks fp_set_term_weight — skipping the weighted golden-diff (rebuild the DLL)")
 			gpu.PolishFree()
 			continue
 		}

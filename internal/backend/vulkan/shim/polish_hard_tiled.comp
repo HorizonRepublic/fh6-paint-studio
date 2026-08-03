@@ -14,7 +14,12 @@ layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
 layout(std430, binding = 3) writeonly buffer Rb { float  render[]; };
 layout(std430, binding = 5) readonly  buffer Xb { int    bbx[]; };
 layout(std430, binding = 7) readonly  buffer Ab { float  base[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+layout(std430, binding = 8) readonly  buffer Tb { int    tileOff[]; };
+layout(std430, binding = 9) readonly  buffer Lb { int    tileList[]; };
+layout(std430, binding = 10) readonly buffer MA { float maskAtlas[]; };
+layout(std430, binding = 11) readonly buffer MM { int   maskMeta[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; } pc;
+#include "mask_common.glsl"
 #include "polish_common.glsl"
 
 void main() {
@@ -22,13 +27,23 @@ void main() {
     if (idx >= pc.w * pc.h) return;
     int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
-    for (int si = 0; si < pc.n; si++) {
+    int lo = 0, hi = pc.n;
+    if (pc.binned != 0) { int t = (y / pc.tile) * pc.tilesX + (x / pc.tile); lo = tileOff[t]; hi = tileOff[t + 1]; }
+    for (int ti = lo; ti < hi; ti++) {
+        int si = (pc.binned != 0) ? tileList[ti] : ti;
         int bx0 = bbx[si * 4], by0 = bbx[si * 4 + 1], bx1 = bbx[si * 4 + 2], by1 = bbx[si * 4 + 3];
         if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
         int kind = Kbuf[si];
         float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
-        if (!insideShape(kind, P, x, y)) continue;
-        float a = clamp(float(Cbuf[si * 4 + 3]), 0.0, 1.0), ia = 1.0 - a;
+        float a = clamp(float(Cbuf[si * 4 + 3]), 0.0, 1.0);
+        if (isGradKind(kind)) { // per-pixel falloff, exactly as the deliverable render composites it
+            float cov = gradCovAny(kind, P, x, y);
+            if (cov <= 0.0) continue;
+            a *= cov;
+        } else if (!insideShape(kind, P, x, y)) {
+            continue;
+        }
+        float ia = 1.0 - a;
         float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]);
         ar = ar * ia + R * a; ag = ag * ia + G * a; ab = ab * ia + B * a; aa = aa * ia + a;
     }

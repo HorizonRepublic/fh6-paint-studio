@@ -1138,10 +1138,14 @@ func loadCropRegion(path string, abs image.Rectangle) (*imageio.Prepared, *image
 
 // genMaxRes is the engine-side fit resolution for the modes that benefit from it. Thin strokes at
 // studioMaxRes degrade to ~1px of gray AA the search can neither detect nor cover; fitting the same
-// budget at up to this long side measured (seed 1, NEXTGEN): line-art 3541px native −69% SSE, flat
-// 1560px −21%, anime 1920px −11% — with no low-view tradeoff and ≤2× wall. Photo measured a wash and
-// stays at studioMaxRes.
-const genMaxRes = 2000
+// budget at a higher long side recovers them. 2026-07-20 native-resolution ladder (out/resbench,
+// img.png 3541px, cross-res scored at native): cap 2000 → 2800 → 4096 gave unweighted SSE
+// 54088 → 38896 → 29034, a clean −46% at native with NO low-view tradeoff; wall 155 → 216 → 259s
+// (1.67× on the largest source). Sources at/below the old 2000 cap are BYTE-IDENTICAL across caps
+// (they already fit native), so raising the ceiling only slows genuinely-large sources — exactly
+// where the gain is largest. So anime/flat now fit at NATIVE by default (owner decision 2026-07-20:
+// "native resolution default"), capped by srcResCap. Photo measured a wash and stays at studioMaxRes.
+const genMaxRes = srcResCap
 
 // srcResCap bounds the "Use source resolution" toggle: measured on a 3541px line-art source the
 // gain keeps growing all the way to native (−40% vs the 2000 cap, no low-view tradeoff, ~2× wall),
@@ -1159,7 +1163,9 @@ const srcResCap = 4096
 // resolution.
 func hiResPrep(st *ui.AppState, mode string, viewAbs image.Rectangle, curW, curH int) *imageio.Prepared {
 	capPx := srcResCap
-	if !st.SourceRes.Value {
+	if preset.PresetMode(mode) == "pixel" {
+		capPx = srcResCap // pixel-art ALWAYS fits at native: a working-res downscale destroys the grid
+	} else if !st.SourceRes.Value {
 		switch preset.PresetMode(mode) {
 		case "flat", "anime":
 			capPx = genMaxRes

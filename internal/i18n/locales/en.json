@@ -139,6 +139,7 @@
   "advanced.keep_inside": "Keep shapes inside image",
   "advanced.mono": "Single colour (logo / decal)",
   "advanced.economy": "Economy mode (slower, better at low budgets)",
+  "advanced.best_of": "Best of N runs",
 
   "shapes.used": "Used shapes",
 
@@ -154,6 +155,8 @@
   "mode.photo_subtitle": "photo · photographs",
   "mode.gaussian_title": "Soft glow",
   "mode.gaussian_subtitle": "gaussian · soft gradients",
+  "mode.pixel_title": "Pixel art",
+  "mode.pixel_subtitle": "pixel · exact sprite copy",
   "mode.saved_presets": "SAVED PRESETS",
   "mode.saved_preset": "saved preset",
   "mode.ink_badge": "ink",
@@ -280,7 +283,9 @@
   "hint.keep_inside": "ON by default. Generates against a transparent surround so the spill penalty forces every shape to stay INSIDE the picture, with no circles or rectangles ballooning past the edge (the worst in-game artefact). The reconstruction is mapped back to the original size afterwards, so the preview is clean. Turn off only for the legacy behaviour.",
   "hint.mono": "For a FLAT single-colour brand logo or decal. Forces every shape to ONE solid colour (auto-detected from the logo) on a clean cutout, so there are no grey antialiased-edge shapes and no background box — just the crisp single-colour silhouette. Pairs with a low shape budget. Leave OFF for normal multi-colour images.",
   "hint.economy": "OFF by default. At low shape counts (≲1500) this co-adapts the shapes — it keeps re-fitting ALL of them together as it builds, for a cleaner result with fewer shapes. The catch: it's MUCH slower (it re-polishes the whole set repeatedly), so turn it on only when you want maximum quality on a tight budget and don't mind the wait. No effect on Logo/Flat or above ~1500 shapes.",
+  "hint.best_of": "1 by default (single run). N>1 reruns the WHOLE generation N times with different random seeds and keeps the best result — run-to-run variance is ~6%, so this squeezes out extra quality at N× the time. Runs are independent (no mixing); the progress bar restarts for each attempt. 2–3 is the sweet spot.",
   "hint.gaussian": "Soft-glow mode trains glow splats jointly — no greedy options apply. Detail = number of glows; more glows + the automatic training give a closer (but always smooth) result. Best for SMOOTH / gradient / painterly images — it can't render crisp fine detail, so use Drawing/Photo/Logo for sharp or cel content. Slower than the others (it trains; the bar shows training progress).",
+  "hint.pixel": "Pixel-art mode reproduces the art EXACTLY — it detects the pixel grid and rebuilds every color region from solid rectangles, pixel-perfect. No engine settings apply: the art itself defines the shape count (a 32×32 sprite is typically 100–300 shapes). If the art needs more than 3000 rectangles, generation stops with the required count — crop to one sprite or simplify the palette. Works best with clean PNG exports (no smoothing/JPEG).",
   "hint.polish": "Refines all shapes together after the greedy build. On = smoother, better colour fit; off = faster but rawer and more faceted.\n\nAffects: time and quality.",
   "hint.polish_iters": "How many polish refinement steps. More = closer fit and smoother gradients but slower; early-stop trims the tail. Blank = the preset's tuned count. For flat art the tuned count depends on the palette.\n\nAffects: time and quality.",
   "hint.edge_softness": "Softness of the polished edges. Lower = crisper, harder edges; higher = softer, smoother blends.\n\nAffects: quality.",

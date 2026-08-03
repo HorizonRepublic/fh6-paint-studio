@@ -1,0 +1,16 @@
+#version 450
+// tile_scan.comp — shape binning, pass 2: prefix sum over the per-tile counts, plus the total
+// in the last slot. Single invocation on purpose — the tile count is ~10k, so a sequential scan
+// here costs microseconds and keeps the pass free of cross-workgroup coordination.
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 1) readonly  buffer Cb { int counts[]; };
+layout(std430, binding = 2) writeonly buffer Ob { int offs[]; };
+layout(push_constant) uniform PC { int n, tilesX, nTiles, tile; } pc;
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+    int acc = 0;
+    for (int t = 0; t < pc.nTiles; t++) { offs[t] = acc; acc += counts[t]; }
+    offs[pc.nTiles] = acc;
+}

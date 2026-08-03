@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
 
 	"golang.org/x/sys/windows"
@@ -33,7 +34,7 @@ import (
 const (
 	candStride = 11
 	resStride  = 5
-	maxCands   = 16384 // device scratch capacity; Evaluate chunks if exceeded
+	maxCands   = 65536 // device scratch capacity; Evaluate chunks if exceeded (each chunk is a launch plus a sync, so a bigger one is fewer round-trips for ~4 MB more device scratch)
 )
 
 // maskRejected is a large positive ΔSSE sentinel: a mask candidate can never be the
@@ -52,6 +53,7 @@ type Vulkan struct {
 	candBuf []float32 // reused Evaluate/Apply staging buffer
 	outBuf  []float32
 
+	masksOn       bool // word atlas uploaded — bank words score/composite/polish on device
 	dll           *windows.DLL
 	procEval      *windows.Proc
 	procApply     *windows.Proc
@@ -67,7 +69,8 @@ type Vulkan struct {
 	procSetOrient  *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
-	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolSSIM, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
+	procGradients, procSetMasks,
+	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolLD, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procBigGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
 
@@ -127,7 +130,17 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	}
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
+	g.procPolLD, _ = dll.FindProc("fp_set_polish_lostdetail") // optional: lost-detail additive polish term
 	g.procPolSSIM, _ = dll.FindProc("fp_set_polish_ssim")     // optional: SSIM additive polish term
+	g.procPolEagle, _ = dll.FindProc("fp_set_polish_eagle")   // optional: EAGLE additive polish term
+	g.procKindGate, _ = dll.FindProc("fp_set_kind_gate")      // optional: region-kinds per-pixel gate
+	g.procGradients, _ = dll.FindProc("fp_set_gradients")     // optional: per-pixel-alpha eval for glow/disk
+	g.procSetMasks, _ = dll.FindProc("fp_set_masks")          // optional: dictionary-word coverage atlas
+	g.procGlowSwap, _ = dll.FindProc("fp_set_glow_swap")      // optional: deep-smooth glow swap
+	g.procRampGlow, _ = dll.FindProc("fp_set_ramp_glow")      // optional: ramp-aware hotter glow swap
+	g.procBigGlow, _ = dll.FindProc("fp_set_big_glow")        // optional: size-conditioned glow swap
+	g.procAlphaGrid, _ = dll.FindProc("fp_set_alpha_grid")    // optional: analytic-alpha grid in the eval epilogue
+	g.procTermW, _ = dll.FindProc("fp_set_term_weight")       // optional: region-weighted FE/EAGLE map
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -144,6 +157,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		g.Close()
 		return nil, fmt.Errorf("fp_init failed (code %d) — check GPU/Vulkan driver", ret)
 	}
+	g.uploadMasks()
 	return g, nil
 }
 
@@ -192,11 +206,9 @@ func (g *Vulkan) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
-		// The Vulkan eval kernel has no mask/gradient geometry yet (Phase 2+): its inside
-		// switch falls through to ELLIPSE for kind >= KindMaskBase and rejects gradients.
-		// Reject mask candidates here (fail-loud, never selected); the on-device generator
-		// never emits masks, so this is inert for the default pipeline.
-		if cands[i].Kind >= model.KindMaskBase {
+		// Without the atlas a word has no coverage to score, so reject it fail-loud rather than
+		// let the kernel's inside switch treat one as an ellipse and silently ship it.
+		if cands[i].Kind >= model.KindMaskBase && !g.masksOn {
 			out[i] = backend.EvalResult{Score: maskRejected}
 			continue
 		}
@@ -311,6 +323,19 @@ func (g *Vulkan) PolishSetFalseEdge(lambda float64) bool {
 	return true
 }
 
+// PolishSetLostDetail sets the lost-detail additive polish loss λ — the MIRROR of the false edge
+// (structure the recon ERASED rather than invented; see engine/lostdetail.go). Same contract as
+// PolishSetFalseEdge: folded into loss, hard loss and the dC seed; λ<=0 disables; call AFTER
+// PolishSetup. Reports whether the DLL exports it — an older shim silently has no such term, so the
+// engine must treat false as "the term is NOT active" rather than assume it applied.
+func (g *Vulkan) PolishSetLostDetail(lambda float64) bool {
+	if g.procPolLD == nil {
+		return false
+	}
+	g.procPolLD.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
 // PolishSetSSIM sets the SSIM additive polish loss λ on the device — same contract as
 // PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
 func (g *Vulkan) PolishSetSSIM(lambda float64) bool {
@@ -319,6 +344,161 @@ func (g *Vulkan) PolishSetSSIM(lambda float64) bool {
 	}
 	g.procPolSSIM.Call(uintptr(unsafe.Pointer(&lambda)))
 	return true
+}
+
+// PolishSetEagle sets the EAGLE additive polish loss λ on the device — same contract as
+// PolishSetFalseEdge (fold into loss/hard-loss/dC; λ<=0 disables; call AFTER PolishSetup).
+func (g *Vulkan) PolishSetEagle(lambda float64) bool {
+	if g.procPolEagle == nil {
+		return false
+	}
+	g.procPolEagle.Call(uintptr(unsafe.Pointer(&lambda)))
+	return true
+}
+
+// PolishSetTermWeight uploads (nil clears) the per-pixel FE/EAGLE term-weight map - the
+// region-weighted perceptual lambda (1-HardEdgeMap). Call AFTER PolishSetup, like the lambda setters.
+func (g *Vulkan) PolishSetTermWeight(tw []float32) bool {
+	if g.procTermW == nil {
+		return false
+	}
+	if tw == nil {
+		g.procTermW.Call(0)
+		return true
+	}
+	g.procTermW.Call(uintptr(unsafe.Pointer(&tw[0])))
+	return true
+}
+
+// SetKindGate uploads the per-pixel region-kinds gate for the on-device generators, or clears it
+// with nil. false = the export is missing (older DLL) — the engine disables the gate for the run.
+func (g *Vulkan) SetKindGate(hard []float32) bool {
+	if g.procKindGate == nil {
+		return false
+	}
+	if hard == nil {
+		g.procKindGate.Call(0)
+		return true
+	}
+	if len(hard) != g.w*g.h {
+		return false
+	}
+	g.procKindGate.Call(fptr(hard))
+	runtime.KeepAlive(hard)
+	return true
+}
+
+// uploadMasks ships the bank's coverage atlas to the device so words can be scored, composited and
+// polished there. Same layout as the CUDA path: the atlas is every word's coverage concatenated and
+// meta is (offset,w,h) per word. Without it the backend has no words and says so via MasksOnDevice.
+func (g *Vulkan) uploadMasks() {
+	if g.procSetMasks == nil {
+		return
+	}
+	bank := maskbank.All()
+	if len(bank) == 0 {
+		return
+	}
+	var total int
+	for _, e := range bank {
+		total += e.W * e.H
+	}
+	atlas := make([]float32, 0, total)
+	meta := make([]int32, 0, len(bank)*3)
+	for _, e := range bank {
+		meta = append(meta, int32(len(atlas)), int32(e.W), int32(e.H))
+		atlas = append(atlas, e.Cov...)
+	}
+	ret, _, _ := g.procSetMasks.Call(
+		fptr(atlas), uintptr(len(atlas)),
+		uintptr(unsafe.Pointer(&meta[0])), uintptr(len(bank)),
+	)
+	runtime.KeepAlive(atlas)
+	runtime.KeepAlive(meta)
+	if ret == 0 {
+		g.masksOn = true
+	}
+}
+
+// MasksOnDevice reports whether the word atlas made it to the device — the engine gates the glyph
+// and shade pre-passes on this, and it is what tells a bank word apart from a rejected candidate.
+func (g *Vulkan) MasksOnDevice() bool { return g.masksOn }
+
+// SetGradients tells the eval kernel the batch may contain the native gradient kinds, which carry
+// a per-pixel alpha. Off (the greedy's hard path), a glow scores as a flat ellipse — mirroring the
+// CUDA warp/block split, so the on-device search picks the same shapes on both backends.
+func (g *Vulkan) SetGradients(on bool) bool {
+	if g.procGradients == nil {
+		return false
+	}
+	g.procGradients.Call(uintptr(b2i32(on)))
+	return true
+}
+
+// SetGlowSwap sets the deep-smooth glow-swap pair on the device generators (tau=prob=0 disables).
+// Companion of SetKindGate; only meaningful while a gate map is live.
+func (g *Vulkan) SetGlowSwap(tau, prob float32) bool {
+	if g.procGlowSwap == nil {
+		return false
+	}
+	tp := [2]float32{tau, prob}
+	g.procGlowSwap.Call(fptr(tp[:]))
+	runtime.KeepAlive(tp[:])
+	return true
+}
+
+// SetRampGlow uploads the per-pixel smooth-gradient map (metric.RampMap) and the hot-glow triple
+// {thresh, tau, prob}: where ramp[i] > thresh the deep-smooth glow swap runs at the hotter (tau, prob).
+// nil clears it (the glow swap falls back to the global pair everywhere). Rides SetKindGate +
+// SetGlowSwap; false = the DLL lacks the export (older build) — the engine keeps the plain glow swap.
+func (g *Vulkan) SetRampGlow(ramp []float32, thresh, tau, prob float32) bool {
+	if g.procRampGlow == nil {
+		return false
+	}
+	if ramp == nil {
+		g.procRampGlow.Call(0, 0)
+		return true
+	}
+	if len(ramp) != g.w*g.h {
+		return false
+	}
+	p := [3]float32{thresh, tau, prob}
+	g.procRampGlow.Call(fptr(ramp), fptr(p[:]))
+	runtime.KeepAlive(ramp)
+	runtime.KeepAlive(p[:])
+	return true
+}
+
+// SetBigGlow sets the size-conditioned glow swap: a candidate larger than tau*min(w,h) becomes a
+// rimless glow with probability prob, independent of the hardness gate. allKinds extends it from
+// ellipses to rects and triangles. prob 0 disables; false = the DLL lacks the export (older build).
+func (g *Vulkan) SetBigGlow(tau, prob float32, allKinds bool, kind int32) bool {
+	if g.procBigGlow == nil {
+		return false
+	}
+	p := [4]float32{tau, prob, 0, float32(kind)}
+	if allKinds {
+		p[2] = 1
+	}
+	g.procBigGlow.Call(fptr(p[:]))
+	runtime.KeepAlive(p[:])
+	return true
+}
+
+// SetAlphaGrid installs (nil clears) the analytic-alpha grid in the eval epilogue: every grid
+// alpha is re-solved for its optimal color and the ΔSSE-min (alpha, color) pair wins.
+// Mirrors the CPU reference's SetAlphaGrid; errors when the loaded DLL predates the export.
+func (g *Vulkan) SetAlphaGrid(vals []float32) error {
+	if g.procAlphaGrid == nil {
+		return fmt.Errorf("vulkan: DLL lacks fp_set_alpha_grid")
+	}
+	if len(vals) == 0 {
+		g.procAlphaGrid.Call(0, 0)
+		return nil
+	}
+	g.procAlphaGrid.Call(fptr(vals), uintptr(len(vals)))
+	runtime.KeepAlive(vals)
+	return nil
 }
 
 func (g *Vulkan) PolishSync() {

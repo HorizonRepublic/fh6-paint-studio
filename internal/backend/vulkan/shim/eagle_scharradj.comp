@@ -1,0 +1,31 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// eagle_scharradj.comp — gather form of the CPU interior-only Scharr scatter, both directions
+// summed into adj (engine adjoint tail / shim.cu egScharrAdjKernel). A neighbour j contributes
+// only when j is itself interior.
+layout(local_size_x = 256) in;
+layout(std430, binding = 14) readonly buffer SX { double sx[]; };
+layout(std430, binding = 15) readonly buffer SY { double sy[]; };
+layout(std430, binding = 16)          buffer Ab { double adj[]; };
+layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
+bool interior(int x, int y) { return x >= 1 && x <= pc.w - 2 && y >= 1 && y <= pc.h - 2; }
+void main() {
+    int p = int(gl_GlobalInvocationID.x);
+    if (p >= pc.w * pc.h) return;
+    int x = p % pc.w, y = p / pc.w;
+    int w = pc.w;
+    double a = 0.0LF;
+    if (interior(x - 1, y + 1)) a += 3.0LF * sx[p + w - 1];
+    if (interior(x - 1, y))     a += 10.0LF * sx[p - 1];
+    if (interior(x - 1, y - 1)) a += 3.0LF * sx[p - w - 1];
+    if (interior(x + 1, y + 1)) a += -3.0LF * sx[p + w + 1];
+    if (interior(x + 1, y))     a += -10.0LF * sx[p + 1];
+    if (interior(x + 1, y - 1)) a += -3.0LF * sx[p - w + 1];
+    if (interior(x + 1, y - 1)) a += 3.0LF * sy[p - w + 1];
+    if (interior(x, y - 1))     a += 10.0LF * sy[p - w];
+    if (interior(x - 1, y - 1)) a += 3.0LF * sy[p - w - 1];
+    if (interior(x + 1, y + 1)) a += -3.0LF * sy[p + w + 1];
+    if (interior(x, y + 1))     a += -10.0LF * sy[p + w];
+    if (interior(x - 1, y + 1)) a += -3.0LF * sy[p + w - 1];
+    adj[p] = a / 16.0LF;
+}

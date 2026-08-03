@@ -11,8 +11,9 @@ layout(std430, binding = 8) readonly buffer Tb { float target[]; };
 layout(std430, binding = 9) readonly buffer Wb { float weightb[]; };
 layout(std430, binding = 10) readonly buffer Fb { double feAdj[]; };
 layout(std430, binding = 11) readonly buffer Sb { double ssimAdj[]; };
+layout(std430, binding = 12) readonly buffer Eb { double eagleAdj[]; };
 layout(push_constant) uniform PC {
-    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab; float feLambda; float ssimLambda;
+    int shapeIdx, w, h, xMin, yMin, xMax, yMax, boff, ste, npix; float tau; int oklab; float feLambda; float ssimLambda; float eagleLambda; float ldLambda;
 } pc;
 
 // dcbrt — double cube root via float seed + 2 Newton steps (see polish_loss.comp).
@@ -38,10 +39,13 @@ void main() {
     // False-edge + SSIM terms (engine falseedge.go / ssimterm.go): both chain through the luma
     // coefficients into the dC RGB seeds; alpha carries no luma.
     double feR = 0.0LF, feG = 0.0LF, feB = 0.0LF;
-    if (pc.feLambda > 0.0 || pc.ssimLambda > 0.0) {
+    if (pc.feLambda > 0.0 || pc.ssimLambda > 0.0 || pc.eagleLambda > 0.0 || pc.ldLambda > 0.0) {
         double a = 0.0LF;
-        if (pc.feLambda > 0.0) a = double(pc.feLambda) * feAdj[idx];
+        // feAdj carries BOTH the false-edge and lost-detail scatter, already lambda-weighted by
+        // fe_dir (the two lambdas differ, so they cannot be applied here). Do not scale it again.
+        if (pc.feLambda > 0.0 || pc.ldLambda > 0.0) a = feAdj[idx];
         if (pc.ssimLambda > 0.0) a += double(pc.ssimLambda) * ssimAdj[idx];
+        if (pc.eagleLambda > 0.0) a += double(pc.eagleLambda) * eagleAdj[idx];
         feR = a * 0.299LF; feG = a * 0.587LF; feB = a * 0.114LF;
     }
     if (pc.oklab != 0) {

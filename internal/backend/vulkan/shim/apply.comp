@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // apply.comp — Vulkan port of shim.cu applyKernel / cpu.Apply. Composites one shape
 // onto the device canvas at full coverage (step 1, exact). Dispatched with enough
 // workgroups that #threads >= image area, so each covered pixel is written exactly
@@ -7,6 +8,9 @@
 layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) buffer Canvas { float canvasb[]; };
+layout(std430, binding = 1) readonly buffer MA { float maskAtlas[]; };
+layout(std430, binding = 2) readonly buffer MM { int   maskMeta[]; };
+#include "mask_common.glsl"
 
 layout(push_constant) uniform PC {
     int kind;
@@ -51,7 +55,38 @@ bool insideShape(int kind, float P[6], int x, int y) {
     }
 }
 
+// Radial-gradient coverage — same constants as eval.comp, raster/gradient.go and the CUDA shim.
+#define GRAD_GLOW_E 0.0820849986238988
+float gradFalloff(int kind, float t2) {
+    if (t2 >= 1.0) return 0.0;
+    if (kind == 4) {
+        float g = (exp(-2.5 * t2) - float(GRAD_GLOW_E)) / (1.0 - float(GRAD_GLOW_E));
+        return 0.89 * g;
+    }
+    float t = sqrt(t2);
+    if (t <= 0.40) return 1.0;
+    float u = (t - 0.40) * (1.0 / 0.60);
+    return 1.0 - (3.0 * u * u - 2.0 * u * u * u);
+}
+
+float gradCovP(int kind, float P[6], int x, int y) {
+    float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+    float th = P[4] * 0.017453292519943295;
+    float c = cos(th), sn = sin(th);
+    float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
+    float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
+}
+
+bool isGradKind(int kind) { return kind == 4 || kind == 5 || kind >= MASKBASE; }
+
+float gradCov(int kind, float P[6], int x, int y) {
+    if (kind >= MASKBASE) return maskCovP(kind, P, x, y);
+    return gradCovP(kind, P, x, y);
+}
+
 void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out int xMax, out int yMax) {
+    if (kind >= MASKBASE) { maskBBoxOf(P, W, H, xMin, yMin, xMax, yMax); return; }
     if (kind == 2) {
         float minX = min(P[0], min(P[2], P[4])), maxX = max(P[0], max(P[2], P[4]));
         float minY = min(P[1], min(P[3], P[5])), maxY = max(P[1], max(P[3], P[5]));
@@ -77,17 +112,26 @@ void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out 
 }
 
 void main() {
-    if (pc.kind > 3) return; // gradients/masks not handled in this kernel
+    if (pc.kind > 5 && pc.kind < MASKBASE) return;
     float P[6] = float[6](pc.p0, pc.p1, pc.p2, pc.p3, pc.p4, pc.p5);
     int xMin, yMin, xMax, yMax;
     bboxOf(pc.kind, P, pc.W, pc.H, xMin, yMin, xMax, yMax);
     int cols = xMax - xMin + 1, rows = yMax - yMin + 1, total = cols * rows;
     if (total <= 0) return;
-    float a = clamp(pc.ca, 0.0, 1.0), invA = 1.0 - a;
+    float aBase = clamp(pc.ca, 0.0, 1.0);
+    bool grad = isGradKind(pc.kind);
     int threads = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
     for (int tt = int(gl_GlobalInvocationID.x); tt < total; tt += threads) {
         int x = xMin + tt % cols, y = yMin + tt / cols;
-        if (!insideShape(pc.kind, P, x, y)) continue;
+        float a = aBase;
+        if (grad) { // per-pixel falloff: aEff = A * cov(x)
+            float cov = gradCov(pc.kind, P, x, y);
+            if (cov <= 0.0) continue;
+            a *= cov;
+        } else if (!insideShape(pc.kind, P, x, y)) {
+            continue;
+        }
+        float invA = 1.0 - a;
         int p = (y * pc.W + x) * 4;
         canvasb[p + 0] = canvasb[p + 0] * invA + pc.cr * a;
         canvasb[p + 1] = canvasb[p + 1] * invA + pc.cg * a;

@@ -142,7 +142,7 @@ func TestMomentPoolSeedIsExactEllipse(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	kinds := []model.ShapeKind{model.KindEllipse, model.KindTriangle, model.KindRectangle}
 	cdf := buildKindCDF(kinds, nil)
-	pool := momentPool(rng, 50, 60, 20, 8, 30, 100, kinds, cdf, 10, 200, 200, false, 0)
+	pool := momentPool(rng, 50, 60, 20, 8, 30, 100, kinds, cdf, 10, 200, 200, false, 0, nil)
 	if len(pool) != 10 {
 		t.Fatalf("pool size %d want 10", len(pool))
 	}

@@ -44,11 +44,26 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 		owner[i] = -1
 	}
 	for j := len(shapes) - 1; j >= 0; j-- {
-		if !opaqueShape(shapes[j]) {
-			continue
-		}
 		kind := model.KindFromType(shapes[j].Type)
 		p := model.ParamsFromShape(shapes[j])
+		if !opaqueShape(shapes[j]) {
+			// A per-pixel-alpha shape (mask word / glow / disk) CONTESTS what shows beneath it:
+			// an opaque shape under a gradient must keep its solved colour (a claim stack's base
+			// only makes sense UNDER its ramp) — a weighted-mean repaint through the gradient
+			// flattens the composite. Block ownership on the gradient's footprint.
+			if raster.IsGradient(kind) {
+				xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
+				for y := yMin; y <= yMax; y++ {
+					for x := xMin; x <= xMax; x++ {
+						idx := y*w + x
+						if owner[idx] == -1 && raster.Coverage(kind, p, x, y) > 0.02 {
+							owner[idx] = -2
+						}
+					}
+				}
+			}
+			continue
+		}
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {

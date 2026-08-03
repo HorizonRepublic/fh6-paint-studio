@@ -177,7 +177,7 @@ func TestHardwiredPresets(t *testing.T) {
 		}
 		wantFE := 0.0
 		if mode == "anime" {
-			wantFE = 0.004 // false-edge polish term: anime-only default (GPU-measured, seed-replicated)
+			wantFE = 0.012 // false-edge polish term: anime-only default (GPU-measured, seed-replicated)
 		}
 		if o.PolishOpts.FalseEdgeLambda != wantFE {
 			t.Errorf("%s FalseEdgeLambda=%v want %v", mode, o.PolishOpts.FalseEdgeLambda, wantFE)

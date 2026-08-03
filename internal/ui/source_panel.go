@@ -196,6 +196,12 @@ func (s *AppState) advancedSection(gtx C) D {
 		l.Color = th.TextDim
 		return l.Layout(gtx)
 	}
+	// Pixel-art bypasses the engine entirely (exact rect decomposition) — no knob applies.
+	if s.baseMode == "pixel" || s.Mode.Value() == "pixel" {
+		l := material.Label(th.M, 12, i18n.T("hint.pixel"))
+		l.Color = th.TextDim
+		return l.Layout(gtx)
+	}
 	if s.AdvClick.Clicked(gtx) {
 		s.AdvOpen = !s.AdvOpen
 	}
@@ -237,8 +243,26 @@ func (s *AppState) advancedSection(gtx C) D {
 			return s.toggleRow(gtx, &s.Economy, i18n.T("advanced.economy"), &s.EconomyHint,
 				i18n.T("hint.economy"))
 		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(s.bestOfRow),
 		layout.Rigid(GapV(12).Layout),
 		layout.Rigid(s.expertBlock),
+	)
+}
+
+// bestOfRow is the best-of-N-seeds control: rerun the whole generation N times with different seeds
+// and keep the best result. Blank/1 = single run; N multiplies the generation time.
+func (s *AppState) bestOfRow(gtx C) D {
+	th := s.Th
+	return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx C) D { return th.Dim(gtx, i18n.T("advanced.best_of")) }),
+		layout.Rigid(GapH(6).Layout),
+		layout.Rigid(func(gtx C) D { return s.BestOfHint.Layout(gtx, th, i18n.T("hint.best_of")) }),
+		layout.Flexed(1, func(gtx C) D { return D{} }),
+		layout.Rigid(func(gtx C) D {
+			gtx.Constraints.Min.X, gtx.Constraints.Max.X = gtx.Dp(50), gtx.Dp(50)
+			return th.editorBox(gtx, &s.BestOfEd, "1")
+		}),
 	)
 }
 

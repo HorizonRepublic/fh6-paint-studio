@@ -1,9 +1,10 @@
+//go:build cuda
+
 package engine_test
 
 import (
 	"testing"
 
-	"fh6-paint-studio/internal/backend/cpu"
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/model"
 )
@@ -41,7 +42,7 @@ func TestCancelStopsEarly(t *testing.T) {
 	const w, h = 32, 32
 	tgt := makeGradientTarget(w, h)
 
-	beC := cpu.New(append([]float32(nil), tgt...), w, h, 16)
+	beC := newTestBackend(t, append([]float32(nil), tgt...), w, h, 16)
 	var placed int
 	optC := cancelBaseOpts(w, h, 30)
 	optC.Progress = func(n int, _ float64) { placed = n }
@@ -51,7 +52,7 @@ func TestCancelStopsEarly(t *testing.T) {
 		t.Fatalf("cancelled run placed too many shapes: got %d (want <=8: bg + ~5)", got)
 	}
 
-	beN := cpu.New(append([]float32(nil), tgt...), w, h, 16)
+	beN := newTestBackend(t, append([]float32(nil), tgt...), w, h, 16)
 	resN := engine.Run(beN, cancelBaseOpts(w, h, 30))
 	if len(resN.Shapes) < 12 {
 		t.Fatalf("control run should keep improving on a gradient, placed only %d", len(resN.Shapes))
@@ -64,7 +65,7 @@ func TestCancelStopsEarly(t *testing.T) {
 // TestCancelNilUnchanged: a nil Cancel behaves exactly as before (no panic, shapes placed).
 func TestCancelNilUnchanged(t *testing.T) {
 	const w, h = 32, 32
-	be := cpu.New(makeGradientTarget(w, h), w, h, 16)
+	be := newTestBackend(t, makeGradientTarget(w, h), w, h, 16)
 	res := engine.Run(be, cancelBaseOpts(w, h, 20))
 	if len(res.Shapes) < 2 {
 		t.Fatalf("nil-cancel run should place shapes, got %d", len(res.Shapes))
