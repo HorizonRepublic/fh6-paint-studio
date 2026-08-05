@@ -20,6 +20,7 @@ type studioConfig struct {
 	// preferred setup survives a restart.
 	KeepInside *bool  `json:"keep_inside,omitempty"` // default ON
 	SourceRes  *bool  `json:"source_res,omitempty"`  // default OFF: fit the engine at the image's original resolution (max quality, much slower)
+	AIFast     *bool  `json:"ai_fast,omitempty"`     // default OFF: neural candidate proposer — same result on ~a quarter of the candidates, a couple of percent more error
 	Locale     string `json:"locale,omitempty"`      // chosen UI language tag (e.g. "uk", "pt-BR"); empty = auto-detect from the OS
 
 	CheckUpdates    *bool     `json:"check_updates,omitempty"` // tri-state, nil = on

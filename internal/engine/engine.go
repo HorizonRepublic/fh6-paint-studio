@@ -45,6 +45,33 @@ type Options struct {
 	// ellipse-rim patchwork the eye reads as facets, and SSE is blind to it — tune by eye.
 	SmoothGlowTau  float64
 	SmoothGlowProb float64
+	// SegHard swaps the source of the gate map (needs RegionKinds): instead of metric.HardEdgeMap's
+	// Sobel edge DENSITY in a 12px cell, the score comes from distance to an actual segmentation
+	// boundary weighted by the colour contrast across it. Measured 2026-08-03 on three of the owner's
+	// generations, HardEdgeMap barely discriminates — mean 0.67 over region interiors against 0.79 on
+	// real boundaries (img_9) — because one line crossing a cell saturates it. Every anti-artifact
+	// mechanism keys on this map (kind gate, glow swap, region-weighted polish terms), so all three
+	// go quiet in exactly the smooth zones the owner keeps pointing at. FH6_SEGHARD
+	// "k,minSize,contrast,falloff" pins the parameters for lab A/Bs. See metric/segboundary.go.
+	SegHard bool
+	// ProposerPath points at the trained candidate proposer (export_weights.py output). Empty = off.
+	// ProposerFrac is the share of each candidate batch drawn from it, ProposerEvery how many shapes
+	// pass between refreshes of the proposal map -- the canvas moves slowly, so a sweep every N steps
+	// amortises to nothing next to the scoring it replaces.
+	ProposerPath string
+	// ProposerBlob is the same export carried in memory rather than on disk, so a GUI build can
+	// embed the model instead of shipping a third file next to the executable.
+	ProposerBlob   []byte
+	ProposerFrac   float64
+	ProposerEvery  int
+	ProposerJitter float64 // spread around each proposal, in patch widths (0 -> 0.05)
+	// ProposerConfGate hands the decision of WHERE proposals are used to the network's own
+	// confidence head instead of the hand-made region gate. Needs a model exported with one.
+	ProposerConfGate bool
+	// ProposerConfTau is how much predicted advantage the learned gate demands. See gen.comp: the
+	// head's baseline was a handful of random draws, the engine's is thousands, so zero is a
+	// permissive threshold rather than a neutral one.
+	ProposerConfTau float64
 	// WarpEval picks the CUDA eval kernel: false (default) = block-per-candidate, which is both
 	// faster here (large early shapes want 128 threads each, not 32) and the only one carrying the
 	// per-pixel-alpha branch the gradient kinds need. true = warp-per-candidate, reference only.
@@ -62,6 +89,7 @@ type Options struct {
 	BigGlowAllKinds   bool          // extend the swap from ellipses to rects/triangles (a big triangle's straight rims are the same contour artifact); a triangle is re-emitted as the glow inscribed in its vertex box
 	RampGlow          bool          // ramp-aware hotter glow swap (opt-in, BUST — not defaulted; needs RegionKinds): precompute metric.RampMap of the target and, where a cell reads as a genuine smooth gradient (ramp > thresh), run the deep-smooth glow swap at a HOTTER tau/prob than the global pair. Aimed to recover the img_10 win from a global tau-raise without its structured-content regression; measured noise (img_10 SSE +0.01% parity) because the global win came from moderate-hardness cells RampMap excludes. Code kept + CLI-reachable; on-device via fp_set_ramp_glow (rides fp_set_kind_gate + fp_set_glow_swap), inert when off. See regionkinds.go.
 	SoftSwapTol       float64       // post-polish SOFT-SWAP standout repair (opt-in, 0 = off): replace the worst standout rect/triangle shapes (rim draws an edge the target lacks) with a soft/round shape moment-fitted to the SAME footprint (ellipse / feathered disk / glow; same colour + z), gated so the GLOBAL error rises at most this fraction. Substitution keeps the coverage, so — unlike StandoutTol's recolour/fade/remove menu, which live polish starves at the gate — many repairs fit in the same budget. ~0.005-0.02. Judge by eye; see softswap.go.
+	RimAim            bool          // aim the soft-swap by RIM DEBT instead of interior false-edge mass, and let it consider ELLIPSES (rimsalience.go). The artefact the owner names — a contour of the reconstruction standing on ground the picture leaves smooth — is a property of a shape's boundary and sits mostly on ellipses, which the original ordering never even offered as candidates. Measured out of the engine (post-hoc on finished stacks): softening the worst offenders removes ~23% of the rim debt at no SSE cost, while softening the same NUMBER of random shapes makes the rim debt worse — so the aim, not the softening, is what does the work. Needs SoftSwapTol.
 	SoftSwapPre       bool          // soft-swap PRE-polish variant: run the swap on the GREEDY result and let the joint polish co-adapt around the substitutions, gated end-to-end (polish(greedy) vs polish(swap(greedy)): keep the swap branch only if SSE lands within SoftSwapTol AND the global false-edge ratio improves). The post-polish pass starves at the cumulative gate (~4-7 swaps — every substitution on a converged optimum costs irreducible SSE); pre-polish the redistribution is the polish's job. Needs Polish; no-op with BackFit (trio partition).
 	ZSwapTrials       int           // z-order local swap EXPERIMENT (opt-in, 0 = off): after polish, try swapping up to this many z-adjacent overlapping pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render — keep the cap modest. Aimed at opaque/flat content where stack order owns contested pixels.
 	PersistGain       float64       // persistent-error sampling EXPERIMENT (opt-in, 0 = off): upweight sampling cells whose error stagnates across refreshes by (1 + gain·stagnation), so small stubborn details (a saturated iris) stop losing the importance lottery to big soft regions. Sampling-only — the accept gate, knee and progress stay on the raw grid. See persist.go.
@@ -73,6 +101,12 @@ type Options struct {
 	MergeRefit        bool          // merge consolidation inside the LOO-refit rounds (opt-in; needs LooRefit>0): collapse near-duplicate pairs (same kind, near-same color, high overlap — 6-8% of a @3000 stack) into one moment-fitted shape, freeing slots the round's regrow re-spends. See mergerefit.go.
 	TermRegionWeight  bool          // region-weighted FE/EAGLE polish terms (opt-in): build PolishOpts.TermWeight = 1−metric.HardEdgeMap(target) so the perceptual λ terms press hard in SMOOTH zones (where the translucent-rim patchwork lives) and ~vanish on legitimate line-work. Lets λ run far stronger than the global-λ compromise. Applies only when FE/EAGLE λ > 0; device without fp_set_term_weight runs unweighted (log, GPU polish kept).
 	SmoothBase        bool          // smooth-region gradient BASE (opt-in): before the greedy, segment LARGE smooth regions (low HardEdgeMap cells, colour-continuous BFS) and claim each with a minimal stack — an opaque base + up to 3 gradient primitives (linear-ramp word / arc bands / glow / disk), ALL colours solved jointly in linear light (stacksolve.go). One 2-4 shape stack replaces the hundreds of translucent facets whose rims are the smooth-zone patchwork artifact; every layer must deepen the earn ≥25% and the gradient layers must carry ≥20% of it, else the stack rolls back (the region-fill lesson). See smoothbase.go.
+	GlobalAlphaSweeps int           // closed-form ALPHA sweeps alternating with the colour solve on the frozen stack (0 = off, needs GlobalColorIters > 0). The composite is affine in one layer's alpha as well as in its colour, so the optimum has a closed form the polish only approximates with Adam on a soft-coverage surrogate. Clamped to the preset's alpha floor; skipped for cutouts, whose silhouette must stay solid.
+	GlobalColorInLoo  bool          // ALSO run the joint colour re-solve at the head of every LOO-refit round, not only once after them (needs GlobalColorIters > 0). The LOO ranking measures each shape's contribution; a shape whose colour is stale looks harmful for a reason unrelated to redundancy, so the prune ranks staleness instead. Separate gate from GlobalColorIters so the measured single-pass default is unaffected.
+	OrientAspect      float64       // anisotropy prior from the structure tensor (opt-in, <=1 = off): the coherence of the local tensor decides how ELONGATED a candidate is drawn and how tightly its angle hugs the edge direction — this value is the maximum aspect ratio at full coherence. The orientation seed alone has always been applied everywhere, including flat regions where the angle is noise; approximation theory puts the n^-2 rate on elements matched to locally ANISOTROPIC structure, and our measured slope is -0.98 (isotropic), so "how elongated, and how confidently" is the missing input rather than "which way".
+	FoBaEvery         int           // run a BACKWARD step every N placed shapes (0 = off): measure the stack's exact leave-one-out contributions mid-greedy and drop the shapes that are already harmful, returning their slots to the greedy immediately. Same measurement LooRefit uses after the fact — the biggest quality win on record (-10.5% SSE) — but a shape dead since shape 300 otherwise holds its slot for 700 more placements. Only strictly-negative contributions are dropped, capped at 5% of the stack per step. See foba.go.
+	CompSeeds         int           // residual connected-component seeds added to every greedy step's candidate pool (0 = off). Our moment seeding fits a covariance ellipse inside a LOCAL WINDOW, which has no relationship to the picture and happily straddles two unrelated regions; a connected component of the residual is a region the image itself delimits. Purely ADDITIVE — the seeds are scored by the same evaluator and only win if they beat the search's own answer — so it can cost wall time but not quality. See compseed.go.
+	GlobalColorIters  int           // global joint colour re-solve (opt-in, 0=off): after the LOO refit, re-solve EVERY layer's RGB jointly for the frozen geometry instead of leaving each shape coloured against the canvas that existed when the greedy placed it. Compositing is exactly affine in the layer colours, so this is a convex box-constrained least-squares solved matrix-free by projected FISTA; the iteration count is this value. Gated on the hard render like every pass. See globalcolor.go.
 	GlyphPrepass      bool          // glyph PRE-PASS (opt-in): before the greedy, claim flat-colour components of the TARGET that match a dictionary silhouette (signature match + strict IoU verification) as single mask-word shapes — one word instead of the many primitives the greedy would spend. Needs a mask-capable backend; flat/logo content is the target audience. See glyphpre.go.
 	GlyphDict         bool          // glyph-dictionary EXPERIMENT (opt-in): offer the bank's mask words as greedy candidates — each word moment-fitted onto a residual blob, competing by exact ΔSSE against the primitive winner. Needs a backend that scores mask kinds (CPU; CUDA with the atlas); silently off otherwise. See glyph.go.
 	CompactPenalty    bool          // bias the per-shape pick toward compact shapes (esp. the first few) — cleaner coarse stage
@@ -149,6 +183,25 @@ type gradientEvaluator interface{ SetGradients(on bool) bool }
 // false = the export is missing (older DLL / Vulkan) and the engine disables the gate for the run.
 type deviceKindGater interface{ SetKindGate(hard []float32) bool }
 
+// deviceProposer is the optional capability of a backend to run the neural candidate proposer in its
+// on-device generator. The engine spends ~96% of a run exactly scoring candidates, and that cost is
+// linear in how many are scored; the network's job is to make a much smaller batch worth scoring.
+//
+// The contract that makes this safe: every proposal is still scored by the same exact eval as a
+// random draw, and only part of the batch comes from the network, so a weak or stale model costs
+// wall-clock and cannot damage the output.
+// proposerGater is the optional capability of a backend to switch the proposal gate. Separate from
+// deviceProposer so a backend that predates the confidence head keeps satisfying that interface.
+type proposerGater interface {
+	SetProposerGate(on bool, tau float32) bool
+}
+
+type deviceProposer interface {
+	SetProposer(blob []byte) bool
+	SetProposerEnabled(on bool, progress, frac, jitter float32) bool
+	RunProposer(progress float32) bool
+}
+
 // deviceBigGlower is the optional capability of a backend to run the size-conditioned glow swap in
 // its on-device generators (fp_set_big_glow). Independent of deviceKindGater; (0,0) clears it.
 type deviceBigGlower interface {
@@ -177,6 +230,14 @@ type randomSearcher interface {
 	SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCDF []float32,
 		maxR float32, allowAlpha bool, alphaMin, aspectMax float32, compact bool, shapeCount int,
 		grid []float32, gw, gh int, boundPad, boundMix, canvasPad float32) (model.Candidate, float32, bool)
+}
+
+// coherenceSetter is the optional capability of a backend whose generator can take the structure
+// tensor's per-pixel coherence, so candidate ELONGATION follows the local anisotropy instead of one
+// global aspect. Returns false when the loaded shim predates the export — the caller then falls back
+// to host generation rather than running without the prior and reporting success.
+type coherenceSetter interface {
+	SetCoherence(coh []float32, aspectCap float32) bool
 }
 
 // momentSearcher is the optional capability of a backend to run the on-device MOMENT-seeded
@@ -213,6 +274,13 @@ func annealMaxR(w, h int, progress float32) float32 {
 func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, initCanvas []float32,
 	opt Options, w, h int, tm *Timings) ([]model.Shape, float64) {
 	t0 := time.Now()
+	// The greedy places candidates above the preset's organic alpha floor, and the descent used to
+	// walk them back down to a hard-coded 0.05 — the floor was shipped as a quality default and the
+	// next stage undid it. Cutouts keep the historical bound: their candidates are opaque by
+	// construction, so a floor here would be a different change with no measurement behind it.
+	if opt.PolishOpts.AlphaMin == 0 && opt.AllowAlpha && !opt.TransparentBG {
+		opt.PolishOpts.AlphaMin = polishAlphaFloor(opt.AlphaMin)
+	}
 	// Use the GPU polish primitives when the backend provides them (CUDA), else the pure-Go
 	// reference. Both run the same algorithm; the GPU path just moves forward/loss/backward
 	// onto the device. A non-zero false-edge λ needs the device-side term (fp_set_polish_false_edge);
@@ -258,7 +326,9 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		}
 	}
 	var pr PolishResult
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK {
+	// The collision diagnostic instruments the host backward pass only, so asking for it forces the
+	// CPU driver — otherwise it would silently report nothing on the backend we actually ship.
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK && !absGradOn() {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)

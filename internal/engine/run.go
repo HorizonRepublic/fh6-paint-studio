@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -11,6 +12,37 @@ import (
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 )
+
+// resolveAlphaMin applies the candidate alpha floor's fallback: unset or out of range takes the
+// photo default, which the presets override per mode.
+func resolveAlphaMin(v float32) float32 {
+	if v <= 0 || v > 1 {
+		return defaultAlphaMin
+	}
+	return v
+}
+
+// polishAlphaFloor returns the floor the polish descent may push alpha to, given the candidate
+// floor the greedy used. FH6_PALPHA pins it for A/Bs from the studio, which has no flags; 0 there
+// restores the historical behaviour of a free descent down to 0.05.
+func polishAlphaFloor(candMin float32) float64 {
+	if s := os.Getenv("FH6_PALPHA"); s != "" {
+		var v float64
+		if n, err := fmt.Sscanf(s, "%f", &v); n == 1 && err == nil && v >= 0 && v < 1 {
+			return v
+		}
+	}
+	return float64(resolveAlphaMin(candMin))
+}
+
+// jitterOr resolves the proposal spread: the network emits a fixed set of modes per location, so a
+// batch without spread would carry only as many distinct candidates as there are heads.
+func jitterOr(v float64) float64 {
+	if v <= 0 {
+		return 0.05
+	}
+	return v
+}
 
 // gradEvalSearch (FH6_GRAD_EVAL=1) scores the radial-gradient candidates with their true
 // per-pixel alpha during the greedy search instead of as solid ellipses.
@@ -48,6 +80,8 @@ type run struct {
 	boundCtx   *boundaryCtx
 	kindGate   *kindGate
 	devSearch  randomSearcher
+	devProp    deviceProposer
+	propEvery  int
 	devMoment  momentSearcher
 
 	// Generation strategy: random / moment / hybrid (selected once from the options).
@@ -60,11 +94,20 @@ type run struct {
 	gw         int
 	gh         int
 	sampler    *ErrorSampler
+	coh        []float32 // structure-tensor coherence, nil unless OrientAspect > 1
+	aspectCap  float32
 	persist    *persistCtx
 	salient    []bool // lazy saliency-quota cell mask (see saliency.go)
 	glyphs     bool   // glyph-dictionary proposer active (Options.GlyphDict + a mask-capable backend)
 	initialErr float64
 	finalErr   float64
+
+	// Component-seed bookkeeping: a seeding idea that never wins the argmax is inert, and only a
+	// counter distinguishes that from one that wins and does not help.
+	compSeedTried int
+	compSeedWon   int
+	fobaDropped   int
+	fobaNext      int // high-water mark for the next backward step (see foba.go)
 }
 
 // Run reconstructs opt's target image as a stack of filled shapes on the given backend. It is a
@@ -88,6 +131,9 @@ func Run(be backend.Backend, opt Options) Result {
 			r.glyphPrepass()
 		}
 		r.greedy()
+	}
+	if r.opt.CompSeeds > 0 {
+		applog.Printf("comp-seeds: %d proposed, %d won the step", r.compSeedTried, r.compSeedWon)
 	}
 	r.postProcess()
 	r.refine()
@@ -153,10 +199,7 @@ func newRun(be backend.Backend, opt Options) *run {
 	// Semi-transparent shapes: alpha ~U(alphaMin,1). Forced opaque for cutouts
 	// (the reconstructed object must stay alpha=1 so the cutout silhouette is solid).
 	allowAlpha := opt.AllowAlpha && !opt.TransparentBG
-	alphaMin := opt.AlphaMin
-	if alphaMin <= 0 || alphaMin > 1 {
-		alphaMin = defaultAlphaMin
-	}
+	alphaMin := resolveAlphaMin(opt.AlphaMin)
 
 	// Early-stop budget: how many consecutive non-improving shapes before we give
 	// up filling the budget. A high value places the FULL shape budget (a deep search
@@ -207,8 +250,18 @@ func newRun(be backend.Backend, opt Options) *run {
 		genTarget = int(float32(opt.StopAt) * opt.Overdraw)
 	}
 
-	// Edge-orientation map: seed elongated shapes along local edges (hair, folds).
-	orient := metric.OrientationMap(be.Target(), w, h)
+	// Edge-orientation map: seed elongated shapes along local edges (hair, folds). With
+	// OrientAspect > 1 the same structure tensor also yields the per-pixel COHERENCE, which the
+	// generator uses to decide HOW elongated a candidate should be — the orientation alone is
+	// defined even in flat regions, where it is noise.
+	var orient, coh []float32
+	aspectCap := float32(opt.OrientAspect)
+	if aspectCap > 1 {
+		orient, coh = metric.OrientationCoherenceMap(be.Target(), w, h)
+	} else {
+		orient = metric.OrientationMap(be.Target(), w, h)
+		aspectCap = 0
+	}
 
 	// Detail-weighted sampling (opt-in via DetailStrength>0): precompute a target-detail
 	// field at grid resolution ONCE. Past DetailSamplingStart progress, it biases the
@@ -253,7 +306,7 @@ func newRun(be backend.Backend, opt Options) *run {
 	var kg *kindGate
 	if opt.RegionKinds {
 		glowTau, glowProb := resolveSmoothGlow(opt.SmoothGlowTau, opt.SmoothGlowProb)
-		kg = &kindGate{hard: metric.HardEdgeMap(be.Target(), w, h), w: w, h: h, tau: glowTau, prob: glowProb}
+		kg = &kindGate{hard: gateHardMap(be.Target(), w, h, opt), w: w, h: h, tau: glowTau, prob: glowProb}
 		if opt.RampGlow {
 			kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
 		}
@@ -280,6 +333,17 @@ func newRun(be backend.Backend, opt Options) *run {
 		if s, ok := be.(randomSearcher); ok {
 			devSearch = s
 			devSearch.SetOrient(orient)
+			// The anisotropy prior needs the coherence map on the device. A DLL that predates the
+			// export cannot take it, and keeping the device path there would leave the option
+			// silently inert — so that case drops to the host generator instead, which carries the
+			// same prior at a wall cost.
+			if aspectCap > 1 {
+				cs, ok := be.(coherenceSetter)
+				if !ok || !cs.SetCoherence(coh, aspectCap) {
+					applog.Printf("orient-aspect %.2f: device generator lacks fp_set_coherence — host generation", aspectCap)
+					devSearch = nil
+				}
+			}
 			if boundCtx != nil {
 				devSearch.SetBoundaryDist(boundCtx.dist) // also serves the on-device moment kernel (same backend)
 			}
@@ -328,6 +392,42 @@ func newRun(be backend.Backend, opt Options) *run {
 			}
 		}
 	}
+	// Neural candidate proposer: install the weights once, and let the greedy loop refresh the
+	// proposal map every ProposerEvery shapes. Installing costs nothing when the option is empty, and
+	// a backend or DLL without the export simply keeps the random search.
+	var devProp deviceProposer
+	if (opt.ProposerPath != "" || len(opt.ProposerBlob) > 0) && opt.OnDeviceSearch {
+		if dp, ok := be.(deviceProposer); ok {
+			// An embedded blob wins over a path: the studio ships the model inside the binary so the
+			// release stays two files, while the CLI keeps -proposer for lab work on other exports.
+			blob, err := opt.ProposerBlob, error(nil)
+			if len(blob) == 0 {
+				blob, err = os.ReadFile(opt.ProposerPath)
+			}
+			switch {
+			case err != nil:
+				applog.Printf("proposer: %v — random search kept", err)
+			case !dp.SetProposer(blob):
+				// Two different failures used to share this line, and the message sent me looking for
+				// a missing export when the real cause was a PyTorch checkpoint handed over instead of
+				// the exported blob.
+				applog.Printf("proposer: %s rejected — either the DLL predates fp_set_proposer or the "+
+					"file is not an export_weights.py blob (expect the FH6P magic) — random search kept",
+					opt.ProposerPath)
+			default:
+				devProp = dp
+				frac := float32(opt.ProposerFrac)
+				if frac <= 0 {
+					frac = 0.5 // half the batch; the random half keeps the exploration the net lacks
+				}
+				dp.SetProposerEnabled(true, 0, frac, float32(jitterOr(opt.ProposerJitter)))
+				if g, ok := dp.(proposerGater); ok {
+					g.SetProposerGate(opt.ProposerConfGate, float32(opt.ProposerConfTau))
+				}
+			}
+		}
+	}
+
 	// Size-conditioned glow swap: independent of the hardness gate, so it is wired outside the block
 	// above and ALWAYS pushed (0/0 clears a pooled backend's previous run).
 	if bg, ok := be.(deviceBigGlower); ok {
@@ -368,10 +468,12 @@ func newRun(be backend.Backend, opt Options) *run {
 		allowAlpha: allowAlpha, alphaMin: alphaMin, maxNI: maxNI, genTarget: genTarget,
 		moveStep: moveStep, radiusStep: radiusStep, rounds: rounds, perRound: perRound,
 		detailStart: detailStart,
-		orient:      orient, detailGrid: detailGrid, boundCtx: boundCtx, kindGate: kg,
+		orient:      orient, coh: coh, aspectCap: aspectCap, detailGrid: detailGrid, boundCtx: boundCtx, kindGate: kg,
+		devProp: devProp, propEvery: opt.ProposerEvery,
 		devSearch: devSearch, devMoment: devMoment, src: newShapeSource(opt),
 		initCanvas: initCanvas, shapes: shapes, grid: grid, gw: gw, gh: gh,
 		sampler: sampler, persist: persist, glyphs: glyphs, initialErr: initialErr,
+		fobaNext: opt.FoBaEvery,
 	}
 }
 
@@ -389,9 +491,22 @@ func (r *run) greedy() {
 	var penalty func(model.Candidate) float32
 
 	noImprove := 0
+	// How often the proposal map is refreshed. The canvas changes by one shape per step, so the map
+	// goes stale slowly; sweeping every shape would spend more than the scoring it saves.
+	propEvery := r.propEvery
+	if propEvery <= 0 {
+		propEvery = 25
+	}
 	for len(r.shapes)-1 < r.genTarget {
 		if r.opt.Cancel != nil && r.opt.Cancel() {
 			break
+		}
+		if r.devProp != nil {
+			if placed := len(r.shapes) - 1; placed%propEvery == 0 {
+				prog := float32(placed) / float32(maxInt(r.genTarget, 1))
+				r.devProp.SetProposerEnabled(true, prog, float32(r.opt.ProposerFrac), float32(jitterOr(r.opt.ProposerJitter)))
+				r.devProp.RunProposer(prog)
+			}
 		}
 		progress := float32(len(r.shapes)-1) / float32(r.genTarget)
 		if r.opt.CompactPenalty {
@@ -466,6 +581,12 @@ func (r *run) greedy() {
 		if knee.push(curErr) {
 			break // sustained diminishing returns — auto-stop at the knee
 		}
+		// Backward step (foba.go): drop what is already dead so the greedy re-spends the slot now
+		// rather than leaving it occupied to the end of the run.
+		r.fobaMaybe(len(r.shapes) - 1)
+	}
+	if r.opt.FoBaEvery > 0 {
+		applog.Printf("foba: %d shapes dropped mid-greedy in total", r.fobaDropped)
 	}
 }
 
@@ -476,6 +597,22 @@ func (r *run) greedy() {
 func (r *run) searchOne(progress float32, sampGrid []float32, penalty func(model.Candidate) float32) (model.Candidate, float32) {
 	w, h := r.w, r.h
 	best, bestScore := r.src.search(r, progress, sampGrid, penalty)
+	// Residual component seeds join the same competition (compseed.go): the search's answer stands
+	// unless a seed scores strictly better on the same evaluator.
+	if r.opt.CompSeeds > 0 {
+		t0 := time.Now()
+		pool := compSeeds(sampGrid, r.gw, r.gh, w, h, annealMaxR(w, h, progress), r.opt.CompSeeds,
+			r.kinds, r.kindCDF, r.alphaMin)
+		if len(pool) > 0 {
+			clampCandidatesToCanvas(pool, float32(w), float32(h), r.opt.CanvasPad)
+			r.compSeedTried += len(pool)
+			if c, sc := pickBest(r.be, pool, penalty); sc < bestScore {
+				best, bestScore = c, sc
+				r.compSeedWon++
+			}
+		}
+		r.tm.Evaluate += time.Since(t0)
+	}
 	if r.glyphs && r.opt.GlyphDict {
 		t0 := time.Now()
 		if gb, gs, ok := r.glyphPropose(progress, sampGrid, penalty); ok && gs < bestScore {

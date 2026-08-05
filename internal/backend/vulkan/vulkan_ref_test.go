@@ -182,3 +182,65 @@ func TestRefErrorGrid(t *testing.T) {
 		}
 	}
 }
+
+// TestGradientGateIsLive pins the tuning decision the shipped search depends on: with SetGradients
+// OFF a glow is scored as a SOLID shape, not with its radial alpha. That over-credits its coverage
+// on purpose — honest gradient scoring is locally correct and measurably worse end to end
+// (89876/16 against 90916/7 on img_9@1000), which is why removing the gate on 2026-08-03 had to be
+// found by bisect and put back.
+//
+// The failure this guards against is silent in every other test: an honest branch left ungated still
+// matches the pure-Go reference (that test asks for the honest branch explicitly), still agrees with
+// itself across seeds, and still produces a plausible picture. Only the end-to-end error moves, a
+// day later, on a bench nobody re-runs. So the gate needs a test that fails the moment it stops
+// gating.
+func TestGradientGateIsLive(t *testing.T) {
+	rng := rand.New(rand.NewSource(29))
+	w, h := 37, 29
+	target, weight := makeTarget(rng, w, h, false)
+	gpu, err := New(target, weight, w, h, 8)
+	if err != nil {
+		t.Skipf("vulkan unavailable: %v", err)
+	}
+	defer gpu.Close()
+
+	canvas := make([]float32, w*h*4)
+	for i := range canvas {
+		canvas[i] = rng.Float32()
+	}
+	cands := randGradCands(rng, w, h, 200)
+
+	if err := gpu.Reset(canvas); err != nil {
+		t.Fatalf("vulkan Reset: %v", err)
+	}
+	gpu.SetGradients(false)
+	off, err := gpu.Evaluate(cands)
+	if err != nil {
+		t.Fatalf("vulkan Evaluate (gate on): %v", err)
+	}
+	if err := gpu.Reset(canvas); err != nil {
+		t.Fatalf("vulkan Reset: %v", err)
+	}
+	gpu.SetGradients(true)
+	on, err := gpu.Evaluate(cands)
+	if err != nil {
+		t.Fatalf("vulkan Evaluate (honest): %v", err)
+	}
+
+	moved := 0
+	for i := range cands {
+		if off[i].Score == rejected || on[i].Score == rejected {
+			continue
+		}
+		if !closeRel(off[i].Score, on[i].Score, 2e-3, 1e-2) {
+			moved++
+		}
+	}
+	// A glow scored as a solid ellipse is off by 1.6-2x, so nearly every candidate should move. A
+	// handful may not (a tiny glow whose falloff barely differs from full coverage), hence the
+	// margin rather than an exact count.
+	if moved < len(cands)/2 {
+		t.Errorf("only %d of %d gradient scores changed when the gate was lifted — the gate is not gating",
+			moved, len(cands))
+	}
+}

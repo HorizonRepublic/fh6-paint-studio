@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"runtime"
@@ -9,6 +10,8 @@ import (
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
+
+	"fh6-paint-studio/internal/applog"
 )
 
 // LOO refit (Options.LooRefit rounds): after the polish, measure every shape's TRUE leave-one-out
@@ -21,11 +24,26 @@ import (
 // only fade, and the budget the owner picks is silently wasted.
 
 const (
-	looPruneCap  = 0.25 // max fraction pruned per round (LOO deltas are not additive — interactions)
-	looStride    = 4096 // sampled pixels per shape for the LOO measure
-	looTinyFrac  = 0.02 // also prune positive-but-tiny shapes: fit below this fraction of the median positive fit
-	looMinRegrow = 8    // stop rounds when fewer shapes than this got pruned (converged)
+	looStride   = 4096 // sampled pixels per shape for the LOO measure
+	looTinyFrac = 0.02 // also prune positive-but-tiny shapes: fit below this fraction of the median positive fit
 )
+
+// looPruneCap / looMinRegrow decide how far a round may go and when the loop gives up. They are
+// pinned here rather than hard-coded because an exact leave-one-out pass over a FINISHED 3000-shape
+// run still finds 10.8% of shapes hurting the fit, and the rounds converge (identical output at 6,
+// 8 and 10 rounds) well before that residue is gone -- so the question of whether a bolder cap
+// reaches it is worth an A/B. FH6_LOO_PRUNE ("cap,minRegrow") overrides both.
+var looPruneCap, looMinRegrow = func() (float64, int) {
+	cap_, min_ := 0.25, 8
+	if v := os.Getenv("FH6_LOO_PRUNE"); v != "" {
+		var c float64
+		var m int
+		if n, err := fmt.Sscanf(v, "%f,%d", &c, &m); n == 2 && err == nil && c > 0 && c <= 1 && m >= 1 {
+			cap_, min_ = c, m
+		}
+	}
+	return cap_, min_
+}()
 
 type looRefitPass struct{}
 
@@ -72,6 +90,22 @@ func (looRefitPass) apply(r *run) {
 	env := r.newBackfitEnv()
 	target, weight := r.be.Target(), r.be.Weight()
 	for round := 0; round < r.opt.LooRefit; round++ {
+		// Colours first, then the ranking. looFitContrib asks what each shape CONTRIBUTES, but a
+		// shape still carrying the colour the greedy fitted against a canvas later shapes have
+		// overwritten looks harmful for a reason that has nothing to do with redundancy — so the
+		// prune would be ranking staleness. Re-solving first makes the ranking measure the thing it
+		// is named after. Gated like everything else: a solve that does not lower the hard render is
+		// discarded and the round proceeds on the original stack.
+		if r.opt.GlobalColorInLoo && r.opt.GlobalColorIters > 0 {
+			if cand, _, _, ok := globalColorSolve(r.shapes, target, weight, r.w, r.h,
+				r.opt.Background, r.opt.TransparentBG, r.opt.GlobalColorIters); ok {
+				if e := rerender(r.be, r.initCanvas, cand); e+1e-9 < r.finalErr {
+					r.shapes, r.finalErr = cand, e
+				} else {
+					rerender(r.be, r.initCanvas, r.shapes)
+				}
+			}
+		}
 		fit := looFitContrib(r.shapes, target, weight, r.w, r.h)
 		drop := looSelectPrune(fit)
 		kept := make([]model.Shape, 0, len(r.shapes))
@@ -86,6 +120,7 @@ func (looRefitPass) apply(r *run) {
 		merged := 0
 		if r.opt.MergeRefit {
 			kept, merged = mergePairs(kept, r.w, r.h)
+			applog.Printf("loo round %d: pruned %d, merged %d pairs", round, len(r.shapes)-len(kept)+merged, merged)
 		}
 		if len(drop)+merged < looMinRegrow {
 			break

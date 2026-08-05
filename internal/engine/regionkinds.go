@@ -5,7 +5,9 @@ import (
 	"math/rand"
 	"os"
 	"strconv"
+	"strings"
 
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -116,6 +118,54 @@ func (g *kindGate) bigGlowSwap(r *rand.Rand, c *model.Candidate) {
 	if tri {
 		c.P = [6]float32{gcx, gcy, grx, gry, 0, 0}
 	}
+}
+
+// gateHardMap builds the per-pixel structure map the kind gate keys on: the Sobel-density
+// HardEdgeMap by default, or the segmentation-boundary map when Options.SegHard is set. Both are
+// [0,1] per pixel and interchangeable at every consumer (the host gate, fp_set_kind_gate, and the
+// region-weighted polish terms), so the swap needs no plumbing of its own.
+func gateHardMap(target []float32, w, h int, opt Options) []float32 {
+	if !opt.SegHard {
+		return metric.HardEdgeMap(target, w, h)
+	}
+	k, minSize, contrast, falloff := segHardParams()
+	seg := metric.Segment(target, w, h, k, minSize)
+	m := metric.BoundaryHardMap(seg, w, h, contrast, falloff)
+	if m == nil {
+		return metric.HardEdgeMap(target, w, h)
+	}
+	return m
+}
+
+// FH6_SEGHARD="k,minSize,contrast,falloff" pins the segmentation gate for lab A/Bs; the defaults are
+// the ones the demand measurement ran at (k in [0,1] colour units — the classic 0-255 k=300 is ~1-2
+// here, and 400 collapses a frame to one region).
+func segHardParams() (k float64, minSize int, contrast, falloff float64) {
+	k, minSize, contrast, falloff = 2, 200, 0.12, 3
+	if s := os.Getenv("FH6_SEGHARD"); s != "" {
+		p := strings.Split(s, ",")
+		if len(p) > 0 {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(p[0]), 64); err == nil && v > 0 {
+				k = v
+			}
+		}
+		if len(p) > 1 {
+			if v, err := strconv.Atoi(strings.TrimSpace(p[1])); err == nil && v > 0 {
+				minSize = v
+			}
+		}
+		if len(p) > 2 {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(p[2]), 64); err == nil && v > 0 {
+				contrast = v
+			}
+		}
+		if len(p) > 3 {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(p[3]), 64); err == nil && v > 0 {
+				falloff = v
+			}
+		}
+	}
+	return
 }
 
 // pick returns the kind for a candidate centred at (x, y).

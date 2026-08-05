@@ -1,0 +1,50 @@
+#version 450
+// prop_orient.comp — fills the proposer's two ORIENTATION planes from the target planes prop_input
+// already wrote. Derived on device rather than carried in the training record: the shards stay valid
+// across this change, and there is one less thing that has to agree between the writer and the engine.
+//
+// The arithmetic is the mirror of orient_planes() in debug/tools/proposer/train_diff.py and of the
+// reference in debug/cmd/propcheck. It has to be exact, not merely similar — the golden test feeds
+// only the six stored planes and diffs the whole map against torch, so a drift here surfaces as a
+// mismatch rather than as a network that quietly behaves unlike the one that was trained.
+//
+// Doubled-angle structure tensor: gradients from central differences, the tensor box-smoothed over
+// 5x5 (a per-pixel gradient direction is noise on flat ground), then divided by the trace so that
+// coherence rides along in the same number and both planes land inside [0,1] with no clamp.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) buffer Io { float px[]; };  // planar, 8 x h x w; reads 0..2, writes 6,7
+layout(push_constant) uniform PC { int w, h; } pc;
+
+int cx(int v, int n) { return clamp(v, 0, n - 1); }
+
+float lum(int x, int y) {
+    int plane = pc.w * pc.h;
+    int i = cx(y, pc.h) * pc.w + cx(x, pc.w);
+    return 0.299 * px[i] + 0.587 * px[plane + i] + 0.114 * px[2 * plane + i];
+}
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.w || y >= pc.h) return;
+
+    float jxx = 0.0, jyy = 0.0, jxy = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            // Clamped sampling reproduces the replicate padding the training path uses: the gradient
+            // of an edge-clamped pixel is taken at the clamped position, not skipped.
+            int sx = cx(x + dx, pc.w), sy = cx(y + dy, pc.h);
+            float gx = 0.5 * (lum(sx + 1, sy) - lum(sx - 1, sy));
+            float gy = 0.5 * (lum(sx, sy + 1) - lum(sx, sy - 1));
+            jxx += gx * gx; jyy += gy * gy; jxy += gx * gy;
+        }
+    }
+    jxx /= 25.0; jyy /= 25.0; jxy /= 25.0;
+
+    float tr = jxx + jyy + 1e-6;
+    int plane = pc.w * pc.h;
+    int i = y * pc.w + x;
+    px[6 * plane + i] = 0.5 + 0.5 * (jxx - jyy) / tr;
+    px[7 * plane + i] = 0.5 + 0.5 * (2.0 * jxy) / tr;
+}

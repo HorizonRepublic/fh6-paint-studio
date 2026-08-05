@@ -1,6 +1,10 @@
 package engine
 
-import "time"
+import (
+	"time"
+
+	"fh6-paint-studio/internal/applog"
+)
 
 // pass is one gated post-greedy refinement step. Each pass declares when it is enabled() for a given
 // Options and applies itself to the run, mutating r.shapes / r.finalErr in place. Every pass is
@@ -21,6 +25,7 @@ func postPasses() []pass {
 		softSwapPolishPass{},
 		polishPass{},
 		looRefitPass{},
+		globalColorPass{},
 		artifactFixPass{},
 		annealPass{},
 		zswapPass{},
@@ -35,7 +40,7 @@ func postPasses() []pass {
 func (r *run) newBackfitEnv() *greedyEnv {
 	return &greedyEnv{
 		be: r.be, rng: r.rng, w: r.w, h: r.h,
-		kinds: r.kinds, kindWeights: r.kindWeights, kindCDF: r.kindCDF, orient: r.orient, kg: r.kindGate,
+		kinds: r.kinds, kindWeights: r.kindWeights, kindCDF: r.kindCDF, orient: r.orient, coh: r.coh, aspectCap: r.aspectCap, compSeeds: r.opt.CompSeeds, kg: r.kindGate,
 		devSearch: r.devSearch, allowAlpha: r.allowAlpha, alphaMin: r.alphaMin, aspectMax: r.opt.AspectMax,
 		compact: r.opt.CompactPenalty, moveStep: r.moveStep, radiusStep: r.radiusStep,
 		rounds: r.rounds, perRound: r.perRound, randomN: r.opt.RandomSamples, canvasPad: r.opt.CanvasPad, tm: nil,
@@ -148,4 +153,37 @@ func (standoutPass) enabled(opt Options) bool { return opt.StandoutTol > 0 }
 func (standoutPass) apply(r *run) {
 	r.setStatus("Smoothing standouts…")
 	r.shapes, r.finalErr = suppressStandouts(r.be, r.shapes, r.finalErr, r.initCanvas, r.opt, r.w, r.h)
+}
+
+// globalColorPass re-solves every layer's colour jointly for the frozen geometry (globalcolor.go).
+// It runs AFTER the LOO refit, because both the pruning and the regrow change which shapes are in
+// the stack, and the solve is only meaningful for the stack that ships.
+//
+// Gated on the backend's own hard render, like every other pass: the solve minimises a weighted
+// SSE over SOFT-free, exact coverage, but the shipped error is what the device measures, and the
+// two can disagree at the sub-quantisation level once colours are rounded back to bytes.
+type globalColorPass struct{}
+
+func (globalColorPass) enabled(opt Options) bool { return opt.GlobalColorIters > 0 }
+
+func (globalColorPass) apply(r *run) {
+	r.setStatus("Re-solving colours…")
+	t0 := time.Now()
+	// Alpha rides the same frozen geometry (block coordinate descent, colours then alphas). Its
+	// floor is the preset's organic one, so the sweep cannot re-open the hole the polish used to
+	// leave by optimising alpha down to 0.05.
+	cand, before, after, ok := globalColorAlphaSolve(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h,
+		r.opt.Background, r.opt.TransparentBG, r.opt.GlobalColorIters,
+		r.opt.GlobalAlphaSweeps, polishAlphaFloor(r.opt.AlphaMin))
+	if !ok {
+		return
+	}
+	candErr := rerender(r.be, r.initCanvas, cand)
+	applog.Printf("global-color: solve %.1f -> %.1f, hard %.1f -> %.1f (%.2f%%) in %.1fs",
+		before, after, r.finalErr, candErr, 100*(candErr-r.finalErr)/r.finalErr, time.Since(t0).Seconds())
+	if candErr < r.finalErr {
+		r.shapes, r.finalErr = cand, candErr
+		return
+	}
+	_ = rerender(r.be, r.initCanvas, r.shapes) // leave the backend rendering what we keep
 }

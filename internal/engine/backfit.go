@@ -28,6 +28,9 @@ type greedyEnv struct {
 	devSearch   randomSearcher
 	allowAlpha  bool
 	alphaMin    float32
+	coh         []float32 // structure-tensor coherence (nil = no anisotropy prior)
+	aspectCap   float32   // max elongation at full coherence (<=1 = off)
+	compSeeds   int       // residual connected-component seeds added to each step's pool (0 = off)
 	aspectMax   float32
 	compact     bool
 	moveStep    float32
@@ -66,9 +69,26 @@ func (g *greedyEnv) searchOne(sampler *ErrorSampler, grid []float32, gw, gh, sha
 			g.devSearch = nil // older DLL without the export — fall back for the rest of the run
 		}
 	}
+	// Component seeds are ADDITIVE: scored by the same evaluator against the same residual, and kept
+	// only if they beat whatever the search found. The pass can cost wall time; it cannot cost quality.
+	if g.compSeeds > 0 {
+		t0 = time.Now()
+		pool := compSeeds(grid, gw, gh, g.w, g.h, annealMaxR(g.w, g.h, progress), g.compSeeds,
+			g.kinds, g.kindCDF, g.alphaMin)
+		if len(pool) > 0 {
+			clampCandidatesToCanvas(pool, float32(g.w), float32(g.h), g.canvasPad)
+			c, sc := pickBest(g.be, pool, penalty)
+			if sc < bestScore {
+				best, bestScore = c, sc
+			}
+		}
+		if g.tm != nil {
+			g.tm.Evaluate += time.Since(t0)
+		}
+	}
 	if g.devSearch == nil {
 		t0 = time.Now()
-		cands := RandomShapes(g.rng, g.w, g.h, g.randomN, g.kinds, g.kindWeights, sampler, progress, g.orient, g.allowAlpha, g.alphaMin, g.aspectMax, nil, g.kg)
+		cands := RandomShapes(g.rng, g.w, g.h, g.randomN, g.kinds, g.kindWeights, sampler, progress, g.orient, g.coh, g.aspectCap, g.allowAlpha, g.alphaMin, g.aspectMax, nil, g.kg)
 		clampCandidatesToCanvas(cands, float32(g.w), float32(g.h), g.canvasPad)
 		if g.tm != nil {
 			g.tm.Generate += time.Since(t0)

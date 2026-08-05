@@ -28,6 +28,10 @@
 #include "polish_forward_tiled.spv.h" // pt_forward_spv (one-dispatch tiled forward)
 #include "polish_hard_tiled.spv.h"    // pt_hard_spv    (one-dispatch tiled hard)
 #include "polish_dcwalk_tiled.spv.h"    // pt_dcwalk_spv  (tiled backward Pass A: dC reverse walk)
+#include "conv3x3.spv.h"    // conv3x3_spv    (one 3x3 layer of the candidate proposer)
+#include "prop_input.spv.h" // prop_input_spv (target+canvas -> the proposer's stored input planes)
+#include "prop_orient.spv.h"// prop_orient_spv(target planes -> the derived orientation planes)
+#include "prop_head.spv.h"  // prop_head_spv  (pooled features -> the proposal map)
 #include "tile_count.spv.h"           // tb_count_spv   (shape binning: count per tile)
 #include "tile_scan.spv.h"            // tb_scan_spv    (shape binning: prefix sum)
 #include "tile_fill.spv.h"            // tb_fill_spv    (shape binning: fill per-tile lists)
@@ -104,7 +108,10 @@ struct GridPC  { int32_t W, H, gw, gh; };
 
 // ---- on-device random search (fp_search_random) ----
 struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind;
-                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb; };
+                // propConfGate: use the network's confidence head instead of the hand-made region gate.
+                int32_t hasProp, propW, propH, propHeads, propOff, propConfGate, hasCoh;
+                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb;
+                float propFrac, propPatch, propJitter, propStrideF, propConfTau, aspectCap; };
 struct PrepPC { int32_t n, compact, shapeCount, W, H; };
 struct ArgPC  { int32_t n; };
 
@@ -112,8 +119,9 @@ VkDescriptorSetLayout g_genDSL = VK_NULL_HANDLE, g_prepDSL = VK_NULL_HANDLE, g_a
 VkPipelineLayout      g_genPL = VK_NULL_HANDLE, g_prepPL = VK_NULL_HANDLE, g_argPL = VK_NULL_HANDLE;
 VkPipeline            g_genPipe = VK_NULL_HANDLE, g_prepPipe = VK_NULL_HANDLE, g_argPipe = VK_NULL_HANDLE;
 VkDescriptorSet       g_genSet = VK_NULL_HANDLE, g_sevalSet = VK_NULL_HANDLE, g_prepSet = VK_NULL_HANDLE, g_argSet = VK_NULL_HANDLE;
-Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound, g_kgate, g_rampglow;
-int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0, g_hasGate = 0, g_hasRampGlow = 0;
+Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound, g_kgate, g_rampglow, g_coh;
+int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0, g_hasGate = 0, g_hasRampGlow = 0, g_hasCoh = 0;
+float g_aspectCap = 0.f;
 float g_glowTau = 0.f, g_glowProb = 0.f; // deep-smooth glow swap (fp_set_glow_swap)
 float g_rampGlowThresh = 0.f, g_rampGlowTau = 0.f, g_rampGlowProb = 0.f; // hotter glow swap in gradient zones (fp_set_ramp_glow)
 float g_bigGlowTau = 0.f, g_bigGlowProb = 0.f;                          // size-conditioned glow swap (fp_set_big_glow)
@@ -121,6 +129,52 @@ int   g_bigGlowKinds = 0, g_bigGlowKind = 4;                            // ... w
 int   g_alphaGridN = 0;                  // analytic-alpha grid size (fp_set_alpha_grid), 0 = off
 float g_alphaGrid[6] = {};               // grid values (eval epilogue picks the ΔSSE-min alpha)
 bool g_searchSetsDirty = true;
+
+// ---- neural candidate proposer (fp_set_proposer) ----
+// The engine's cost is dominated by exactly scoring candidates -- 96% of a polish-free run -- and it
+// is linear in how many are scored. The proposer replaces a large random draw with a handful of
+// learned ones. It is safe by construction: every proposal is still scored by the same exact eval,
+// so a bad network costs speed and never correctness.
+//
+// The trunk runs ONCE over the canvas and every candidate location reads its own proposal out of the
+// resulting map; a forward pass per candidate would cost more than it saves. That equivalence
+// between per-patch and whole-canvas evaluation only holds because every operator is translation-
+// equivariant, which is why the network carries folded BatchNorm rather than GroupNorm and was
+// trained on context windows wider than its receptive field.
+struct ConvPC { int32_t inC, outC, inW, inH, outW, outH, stride, act; };
+struct PropInPC { int32_t w, h, ow, oh; float scale; };
+struct PropOrPC { int32_t w, h; };
+struct PropHeadPC { int32_t chan, fw, fh, pw, ph, heads, pool; float progress; };
+struct PropLayer { int inC, outC, stride; Buf w, b; };
+
+VkDescriptorSetLayout g_pcDSL = VK_NULL_HANDLE, g_piDSL = VK_NULL_HANDLE, g_phDSL = VK_NULL_HANDLE,
+                      g_poDSL = VK_NULL_HANDLE;
+VkPipelineLayout      g_pcPL = VK_NULL_HANDLE, g_piPL = VK_NULL_HANDLE, g_phPL = VK_NULL_HANDLE,
+                      g_poPL = VK_NULL_HANDLE;
+VkPipeline            g_pcPipe = VK_NULL_HANDLE, g_piPipe = VK_NULL_HANDLE, g_phPipe = VK_NULL_HANDLE,
+                      g_poPipe = VK_NULL_HANDLE;
+VkDescriptorSet       g_pcSetA = VK_NULL_HANDLE, g_pcSetB = VK_NULL_HANDLE,
+                      g_piSet = VK_NULL_HANDLE, g_phSet = VK_NULL_HANDLE,
+                      g_poSet = VK_NULL_HANDLE;
+std::vector<PropLayer> g_propLayers;
+Buf g_propIn, g_propA, g_propB, g_propMap, g_propKinds;
+Buf g_pMixW, g_pMixB, g_pGeoW, g_pGeoB, g_pAlpW, g_pAlpB, g_pCnfW, g_pCnfB;
+int g_propHeads = 0, g_propPool = 8, g_propPatchSrc = 256, g_propChan = 0;
+// Input planes the trunk expects, taken from the first layer's in_ch rather than assumed: 6 planes
+// come straight from the target and the canvas, anything beyond that is derived on device.
+int g_propInC = 6;
+int g_propHasConf = 0;   // v3 blobs carry a confidence head; older ones do not
+int g_propConfGate = 0;  // caller's request to gate on it (ignored when the blob has no head)
+float g_propConfTau = 0.f; // how much predicted advantage the gate demands before it lets a proposal through
+int g_propCtxSrc = 512, g_propInDim = 128;   // training context window and the network's input size
+int g_propNW = 0, g_propNH = 0;              // the downscaled canvas the network actually sees
+float g_propScale = 1.f;                     // canvas pixels per network pixel
+int g_propTrainDim = 571; // short side of the canvases the network was trained on
+int g_propW = 0, g_propH = 0;      // proposal-map dimensions
+int g_hasProposer = 0, g_propOn = 0;
+float g_propFrac = 0.5f;   // share of the batch drawn from the network; the rest stays random
+float g_propJitter = 0.05f; // spread around each proposal, in patch widths (see gen.comp jit())
+float g_propProgress = 0.f;
 
 // ---- on-device moment-seeded search (fp_search_moment) ----
 struct MomSeedPC { uint32_t seedLo, seedHi; int32_t K, gw, gh, W, H, hasBound; float maxR, boundPad, boundMix; };
@@ -352,7 +406,7 @@ void teardown() {
     if (g_gridPL)    { vkDestroyPipelineLayout(g_device, g_gridPL, nullptr); g_gridPL = VK_NULL_HANDLE; }
     if (g_gridDSL)   { vkDestroyDescriptorSetLayout(g_device, g_gridDSL, nullptr); g_gridDSL = VK_NULL_HANDLE; }
     destroyBuf(g_scand); destroyBuf(g_sout); destroyBuf(g_adj); destroyBuf(g_best);
-    destroyBuf(g_kindsB); destroyBuf(g_kindcdf); destroyBuf(g_gridcdf); destroyBuf(g_orient); destroyBuf(g_bound); destroyBuf(g_kgate); destroyBuf(g_rampglow);
+    destroyBuf(g_kindsB); destroyBuf(g_kindcdf); destroyBuf(g_gridcdf); destroyBuf(g_orient); destroyBuf(g_bound); destroyBuf(g_kgate); destroyBuf(g_rampglow); destroyBuf(g_coh);
     if (g_genPipe)  { vkDestroyPipeline(g_device, g_genPipe, nullptr);  g_genPipe = VK_NULL_HANDLE; }
     if (g_prepPipe) { vkDestroyPipeline(g_device, g_prepPipe, nullptr); g_prepPipe = VK_NULL_HANDLE; }
     if (g_argPipe)  { vkDestroyPipeline(g_device, g_argPipe, nullptr);  g_argPipe = VK_NULL_HANDLE; }
@@ -369,7 +423,7 @@ void teardown() {
     if (g_gmPL) { vkDestroyPipelineLayout(g_device, g_gmPL, nullptr); g_gmPL = VK_NULL_HANDLE; }
     if (g_msDSL) { vkDestroyDescriptorSetLayout(g_device, g_msDSL, nullptr); g_msDSL = VK_NULL_HANDLE; }
     if (g_gmDSL) { vkDestroyDescriptorSetLayout(g_device, g_gmDSL, nullptr); g_gmDSL = VK_NULL_HANDLE; }
-    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_glowTau = 0.f; g_glowProb = 0.f; g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; g_bigGlowTau = g_bigGlowProb = 0.f; g_bigGlowKinds = 0; g_bigGlowKind = 4; g_alphaGridN = 0; g_searchSetsDirty = true; g_momentCap = 0;
+    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_hasCoh = 0; g_aspectCap = 0.f; g_glowTau = 0.f; g_glowProb = 0.f; g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; g_bigGlowTau = g_bigGlowProb = 0.f; g_bigGlowKinds = 0; g_bigGlowKind = 4; g_alphaGridN = 0; g_searchSetsDirty = true; g_momentCap = 0;
     if (g_evalPL)    { vkDestroyPipelineLayout(g_device, g_evalPL, nullptr);  g_evalPL = VK_NULL_HANDLE; }
     if (g_applyPL)   { vkDestroyPipelineLayout(g_device, g_applyPL, nullptr); g_applyPL = VK_NULL_HANDLE; }
     if (g_descPool)  { vkDestroyDescriptorPool(g_device, g_descPool, nullptr); g_descPool = VK_NULL_HANDLE; g_evalSet = g_applySet = VK_NULL_HANDLE; }
@@ -473,7 +527,7 @@ bool buildContext() {
     if (!makePL(g_gridDSL, sizeof(GridPC), g_gridPL)) { g_lastError = 1010; return false; }
     if (!makePipe(g_gridPL, grid_spv, sizeof(grid_spv), g_gridPipe)) { g_lastError = 1011; return false; }
     // on-device search: gen (8 bindings: +rampGlow), prepadj (3), argmin (4); eval is reused for scoring.
-    if (!makeDSL(8, g_genDSL) || !makeDSL(3, g_prepDSL) || !makeDSL(4, g_argDSL)) { g_lastError = 1009; return false; }
+    if (!makeDSL(11, g_genDSL) || !makeDSL(3, g_prepDSL) || !makeDSL(4, g_argDSL)) { g_lastError = 1009; return false; }
     if (!makePL(g_genDSL, sizeof(GenPC), g_genPL) || !makePL(g_prepDSL, sizeof(PrepPC), g_prepPL) || !makePL(g_argDSL, sizeof(ArgPC), g_argPL)) { g_lastError = 1010; return false; }
     if (!makePipe(g_genPL, gen_spv, sizeof(gen_spv), g_genPipe) || !makePipe(g_prepPL, prepadj_spv, sizeof(prepadj_spv), g_prepPipe) || !makePipe(g_argPL, argmin_spv, sizeof(argmin_spv), g_argPipe)) { g_lastError = 1011; return false; }
     // moment search: momentseed (3 bindings), genmoment (6 bindings: +rampGlow); eval/prepadj/argmin reused.
@@ -1213,7 +1267,7 @@ void writeSearchDescriptors() {
         w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set; w.dstBinding = b; w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
     };
-    VkWriteDescriptorSet w[24]; VkDescriptorBufferInfo bi[24]; int k = 0;
+    VkWriteDescriptorSet w[27]; VkDescriptorBufferInfo bi[27]; int k = 0;
     wr(g_genSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_genSet, 1, g_kindsB.buf, g_kindsB.size, w[k], bi[k]); k++;
     wr(g_genSet, 2, g_kindcdf.buf, g_kindcdf.size, w[k], bi[k]); k++;
@@ -1222,6 +1276,13 @@ void writeSearchDescriptors() {
     wr(g_genSet, 5, g_bound.buf, g_bound.size, w[k], bi[k]); k++;
     wr(g_genSet, 6, g_kgate.buf, g_kgate.size, w[k], bi[k]); k++;
     wr(g_genSet, 7, g_rampglow.buf, g_rampglow.size, w[k], bi[k]); k++;
+    // Vulkan requires every binding to be written even when the feature is off, so the proposal
+    // bindings fall back to an existing buffer; the shader never reads them unless hasProp is set.
+    wr(g_genSet, 8, g_hasProposer ? g_propMap.buf : g_kindsB.buf,
+       g_hasProposer ? g_propMap.size : g_kindsB.size, w[k], bi[k]); k++;
+    wr(g_genSet, 9, g_hasProposer ? g_propKinds.buf : g_kindsB.buf,
+       g_hasProposer ? g_propKinds.size : g_kindsB.size, w[k], bi[k]); k++;
+    wr(g_genSet, 10, g_coh.buf, g_coh.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 1, g_target.buf, g_target.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 2, g_canvas.buf, g_canvas.size, w[k], bi[k]); k++;
@@ -1325,6 +1386,7 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_bound) ||
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_kgate) ||
         !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_rampglow) ||
+        !createBufEx(npix * sizeof(float), dstStore, devLocal, false, g_coh) ||
         // Placeholders so every set can be written before a bank arrives; meta[0]=0 = no words.
         !createBufEx(16, dstStore, devLocal, false, g_maskAtlas) ||
         !createBufEx(16, dstStore, devLocal, false, g_maskMeta)) {
@@ -1335,7 +1397,7 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
         memcpy(g_staging.map, zero, sizeof(zero)); copyBuf(g_staging.buf, g_maskMeta.buf, sizeof(zero));
     }
     g_masksOn = 0;
-    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_hasRampGlow = 0; g_searchSetsDirty = true;
+    g_searchCap = 0; g_hasOrient = 0; g_hasBound = 0; g_hasGate = 0; g_hasRampGlow = 0; g_hasCoh = 0; g_aspectCap = 0.f; g_searchSetsDirty = true;
     // upload target + weight; zero the canvas — all via the staging buffer.
     memcpy(g_staging.map, target, tSize); copyBuf(g_staging.buf, g_target.buf, tSize);
     memcpy(g_staging.map, weight, wSize); copyBuf(g_staging.buf, g_weight.buf, wSize);
@@ -1481,6 +1543,306 @@ API void fp_set_alpha_grid(const float* vals, int n) {
     g_alphaGridN = n;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Neural candidate proposer
+// ---------------------------------------------------------------------------------------------
+
+// buildProposerPipelines creates the four pipelines the network needs, lazily on the first upload
+// so a run that never enables the proposer pays nothing.
+static bool buildProposerPipelines() {
+    if (g_pcPipe) return true;
+    auto dsl = [](uint32_t count, VkDescriptorSetLayout& out) -> bool {
+        std::vector<VkDescriptorSetLayoutBinding> bs(count);
+        for (uint32_t i = 0; i < count; i++) {
+            bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        ci.bindingCount = count; ci.pBindings = bs.data();
+        return vkCreateDescriptorSetLayout(g_device, &ci, nullptr, &out) == VK_SUCCESS;
+    };
+    auto pl = [](VkDescriptorSetLayout d, uint32_t pcSize, VkPipelineLayout& out) -> bool {
+        VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, pcSize};
+        VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        ci.setLayoutCount = 1; ci.pSetLayouts = &d; ci.pushConstantRangeCount = 1; ci.pPushConstantRanges = &pr;
+        return vkCreatePipelineLayout(g_device, &ci, nullptr, &out) == VK_SUCCESS;
+    };
+    auto pipe = [](VkPipelineLayout layout, const uint32_t* spv, size_t bytes, VkPipeline& out) -> bool {
+        VkShaderModule sm = loadShader(spv, bytes);
+        if (!sm) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = sm; ci.stage.pName = "main";
+        ci.layout = layout;
+        VkResult r = vkCreateComputePipelines(g_device, VK_NULL_HANDLE, 1, &ci, nullptr, &out);
+        vkDestroyShaderModule(g_device, sm, nullptr);
+        return r == VK_SUCCESS;
+    };
+    if (!dsl(4, g_pcDSL) || !dsl(3, g_piDSL) || !dsl(10, g_phDSL) || !dsl(1, g_poDSL)) return false;
+    if (!pl(g_pcDSL, sizeof(ConvPC), g_pcPL) || !pl(g_piDSL, sizeof(PropInPC), g_piPL) ||
+        !pl(g_phDSL, sizeof(PropHeadPC), g_phPL) || !pl(g_poDSL, sizeof(PropOrPC), g_poPL)) return false;
+    if (!pipe(g_pcPL, conv3x3_spv, sizeof(conv3x3_spv), g_pcPipe) ||
+        !pipe(g_piPL, prop_input_spv, sizeof(prop_input_spv), g_piPipe) ||
+        !pipe(g_poPL, prop_orient_spv, sizeof(prop_orient_spv), g_poPipe) ||
+        !pipe(g_phPL, prop_head_spv, sizeof(prop_head_spv), g_phPipe)) return false;
+
+    // Two conv sets so the layers can ping-pong between the two feature buffers without rewriting
+    // descriptors mid-command-buffer.
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpci.maxSets = 5; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &pool) != VK_SUCCESS) return false;
+    VkDescriptorSetLayout ls[5] = { g_pcDSL, g_pcDSL, g_piDSL, g_phDSL, g_poDSL };
+    VkDescriptorSet* ds[5] = { &g_pcSetA, &g_pcSetB, &g_piSet, &g_phSet, &g_poSet };
+    for (int i = 0; i < 5; i++) {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &ls[i];
+        if (vkAllocateDescriptorSets(g_device, &ai, ds[i]) != VK_SUCCESS) return false;
+    }
+    return true;
+}
+
+static void freeProposer() {
+    for (auto& l : g_propLayers) { destroyBuf(l.w); destroyBuf(l.b); }
+    g_propLayers.clear();
+    destroyBuf(g_propIn); destroyBuf(g_propA); destroyBuf(g_propB);
+    destroyBuf(g_propMap); destroyBuf(g_propKinds);
+    destroyBuf(g_pMixW); destroyBuf(g_pMixB); destroyBuf(g_pGeoW); destroyBuf(g_pGeoB);
+    destroyBuf(g_pAlpW); destroyBuf(g_pAlpB); destroyBuf(g_pCnfW); destroyBuf(g_pCnfB);
+    g_hasProposer = 0; g_propOn = 0; g_propChan = 0; g_propInC = 6; g_propHasConf = 0; g_propW = g_propH = 0;
+}
+
+// uploadTo allocates a device buffer of n floats and fills it from src.
+static bool uploadTo(const float* src, size_t n, Buf& dst) {
+    size_t bytes = n * sizeof(float);
+    if (!createHost(bytes, dst)) return false;
+    memcpy(dst.map, src, bytes);
+    return true;
+}
+
+// fp_set_proposer installs the trained network from the flat blob written by export_weights.py.
+// blob == NULL clears it. The layout is deliberately dumb (a header then tensors back to back) so
+// there is no parser here to disagree with the exporter; debug/cmd/propcheck reads the same file
+// with an independent implementation and matches torch to 1e-6, which is what pins the contract.
+API int fp_set_proposer(const void* blob, int bytes) {
+    if (!g_device) return 0;
+    freeProposer();
+    if (!blob || bytes <= 24) return 1;
+    const unsigned char* p = (const unsigned char*)blob;
+    if (memcmp(p, "FH6P", 4) != 0) return 0;
+    size_t off = 4;
+    auto i32 = [&]() -> int32_t { int32_t v; memcpy(&v, p + off, 4); off += 4; return v; };
+    int ver = i32();
+    if (ver < 1 || ver > 3) return 0;
+    int width = i32();
+    g_propHeads = i32();
+    int layers = i32();
+    g_propPatchSrc = i32();
+    g_propPool = i32();
+    if (ver >= 2) { g_propCtxSrc = i32(); g_propInDim = i32(); }
+    (void)width;
+    std::vector<float> kinds(g_propHeads);
+    for (int i = 0; i < g_propHeads; i++) kinds[i] = (float)i32();
+    if (!uploadTo(kinds.data(), kinds.size(), g_propKinds)) return 0;
+
+    for (int l = 0; l < layers; l++) {
+        PropLayer pl{};
+        pl.inC = i32(); pl.outC = i32(); pl.stride = i32();
+        if (l == 0) g_propInC = pl.inC;
+        size_t wn = (size_t)pl.outC * pl.inC * 9;
+        if (!uploadTo((const float*)(p + off), wn, pl.w)) return 0;
+        off += wn * 4;
+        if (!uploadTo((const float*)(p + off), (size_t)pl.outC, pl.b)) return 0;
+        off += (size_t)pl.outC * 4;
+        g_propLayers.push_back(pl);
+        g_propChan = pl.outC;
+    }
+    // Four linear heads since the confidence head was added; a blob that predates it (three) is
+    // rejected by the trailing-bytes check below rather than read as garbage.
+    struct { Buf* w; Buf* b; } lin[4] = { {&g_pMixW, &g_pMixB}, {&g_pGeoW, &g_pGeoB},
+                                          {&g_pAlpW, &g_pAlpB}, {&g_pCnfW, &g_pCnfB} };
+    // v3 added the confidence head. Older exports stay loadable and simply have no opinion about
+    // where they are useful: the buffers are zero-filled, so the head emits 0 and the learned gate
+    // refuses to turn on rather than gating on uninitialised memory.
+    g_propHasConf = (ver >= 3) ? 1 : 0;
+    int nlin = g_propHasConf ? 4 : 3;
+    for (int i = 0; i < nlin; i++) {
+        int in = i32(), out = i32();
+        if (!uploadTo((const float*)(p + off), (size_t)in * out, *lin[i].w)) return 0;
+        off += (size_t)in * out * 4;
+        if (!uploadTo((const float*)(p + off), (size_t)out, *lin[i].b)) return 0;
+        off += (size_t)out * 4;
+    }
+    if (!g_propHasConf) {
+        std::vector<float> z((size_t)g_propHeads * 4096, 0.f);
+        if (!uploadTo(z.data(), z.size(), g_pCnfW)) return 0;
+        if (!uploadTo(z.data(), (size_t)g_propHeads, g_pCnfB)) return 0;
+    }
+    if ((int)off != bytes) { freeProposer(); return 0; }
+    if (!buildProposerPipelines()) { freeProposer(); return 0; }
+
+    // Feature buffers are sized for the worst case: the first layer's output at half resolution with
+    // the widest channel count of any layer.
+    // The network sees the canvas reduced by the same factor its training windows were: a context
+    // window of g_propCtxSrc source pixels became g_propInDim network pixels, on canvases whose short
+    // side was g_propTrainDim. Anything else is a scale mismatch -- measured as both wrong extents and
+    // a sweep costing the square of the error in time.
+    float ctxCanvas = (float)g_propCtxSrc * (float)std::min(g_w, g_h) / (float)g_propTrainDim;
+    g_propScale = std::max(1.0f, ctxCanvas / (float)g_propInDim);
+    g_propNW = std::max(16, (int)((float)g_w / g_propScale));
+    g_propNH = std::max(16, (int)((float)g_h / g_propScale));
+    size_t npix = (size_t)g_propNW * g_propNH;
+    size_t widest = 0;
+    for (auto& l : g_propLayers) widest = std::max(widest, (size_t)l.outC);
+    if (g_propInC != 6 && g_propInC != 8) { freeProposer(); return 0; }
+    if (!createHost(npix * (size_t)g_propInC * sizeof(float), g_propIn)) return 0;
+    size_t featMax = (npix + 64) * widest * sizeof(float);
+    if (!createHost(featMax, g_propA) || !createHost(featMax, g_propB)) return 0;
+    int fw = g_propNW, fh = g_propNH;
+    for (auto& l : g_propLayers) { fw = (fw + l.stride - 1) / l.stride; fh = (fh + l.stride - 1) / l.stride; }
+    g_propW = std::max(1, fw - g_propPool + 1);
+    g_propH = std::max(1, fh - g_propPool + 1);
+    if (!createHost((size_t)g_propW * g_propH * g_propHeads * 8 * sizeof(float), g_propMap)) return 0;
+    g_hasProposer = 1;
+    g_searchSetsDirty = true;   // the generator's proposal bindings now point at real buffers
+    return 1;
+}
+
+// writeSet points a descriptor set's bindings at the given buffers.
+static void writeSet(VkDescriptorSet set, std::initializer_list<Buf*> bufs) {
+    std::vector<VkWriteDescriptorSet> w;
+    std::vector<VkDescriptorBufferInfo> bi(bufs.size());
+    uint32_t i = 0;
+    for (Buf* b : bufs) {
+        bi[i] = {b->buf, 0, b->size};
+        VkWriteDescriptorSet ws{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        ws.dstSet = set; ws.dstBinding = i; ws.descriptorCount = 1;
+        ws.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; ws.pBufferInfo = &bi[i];
+        w.push_back(ws);
+        i++;
+    }
+    vkUpdateDescriptorSets(g_device, (uint32_t)w.size(), w.data(), 0, nullptr);
+}
+
+// fp_run_proposer refreshes the proposal map from the CURRENT canvas. It is a whole-canvas sweep of
+// the trunk plus the head, and the caller decides how often to pay for it: the canvas barely changes
+// between adjacent steps, so refreshing every N shapes amortises the cost to nothing next to the
+// candidate scoring it replaces (measured at ~5 ms per sweep against ~36 s of scoring per run).
+API int fp_run_proposer(float progress) {
+    if (!g_device || !g_hasProposer) return 0;
+    g_propProgress = progress;
+    vkResetCommandBuffer(g_cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_cmd, &bi);
+
+    writeSet(g_piSet, {&g_target, &g_canvas, &g_propIn});
+    PropInPC ipc{ g_w, g_h, g_propNW, g_propNH, g_propScale };
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_piPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_piPL, 0, 1, &g_piSet, 0, nullptr);
+    vkCmdPushConstants(g_cmd, g_piPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ipc), &ipc);
+    vkCmdDispatch(g_cmd, (uint32_t)((g_propNW + 15) / 16), (uint32_t)((g_propNH + 15) / 16), 1);
+    cmdBarrierRW();
+
+    // Orientation planes, when the trunk was trained with them. Same buffer in and out: the pass
+    // reads the target planes and writes past the six prop_input filled, so there is no aliasing
+    // beyond the barrier already placed above.
+    if (g_propInC > 6) {
+        writeSet(g_poSet, {&g_propIn});
+        PropOrPC opc{ g_propNW, g_propNH };
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_poPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_poPL, 0, 1, &g_poSet, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_poPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(opc), &opc);
+        vkCmdDispatch(g_cmd, (uint32_t)((g_propNW + 15) / 16), (uint32_t)((g_propNH + 15) / 16), 1);
+        cmdBarrierRW();
+    }
+
+    int inW = g_propNW, inH = g_propNH;
+    Buf* src = &g_propIn;
+    Buf* dst = &g_propA;
+    for (size_t l = 0; l < g_propLayers.size(); l++) {
+        PropLayer& pl = g_propLayers[l];
+        int outW = (inW + pl.stride - 1) / pl.stride;
+        int outH = (inH + pl.stride - 1) / pl.stride;
+        VkDescriptorSet set = (l % 2 == 0) ? g_pcSetA : g_pcSetB;
+        writeSet(set, {src, dst, &pl.w, &pl.b});
+        ConvPC cpc{ pl.inC, pl.outC, inW, inH, outW, outH, pl.stride, 1 };
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pcPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pcPL, 0, 1, &set, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_pcPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cpc), &cpc);
+        vkCmdDispatch(g_cmd, (uint32_t)((outW + 15) / 16), (uint32_t)((outH + 15) / 16), (uint32_t)pl.outC);
+        cmdBarrierRW();
+        inW = outW; inH = outH;
+        src = dst;
+        dst = (dst == &g_propA) ? &g_propB : &g_propA;
+    }
+
+    writeSet(g_phSet, {src, &g_pMixW, &g_pMixB, &g_pGeoW, &g_pGeoB, &g_pAlpW, &g_pAlpB, &g_propMap,
+                       &g_pCnfW, &g_pCnfB});
+    PropHeadPC hpc{ g_propChan, inW, inH, g_propW, g_propH, g_propHeads, g_propPool, g_propProgress };
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_phPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_phPL, 0, 1, &g_phSet, 0, nullptr);
+    vkCmdPushConstants(g_cmd, g_phPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hpc), &hpc);
+    vkCmdDispatch(g_cmd, (uint32_t)((g_propW + 7) / 8), (uint32_t)((g_propH + 7) / 8), 1);
+    flushBarrier();
+    vkEndCommandBuffer(g_cmd);
+    submitWait();
+    return 1;
+}
+
+// fp_proposer_map copies the proposal map out for the golden diff. Test-only: the generator reads
+// the device buffer directly.
+API int fp_proposer_map(float* out, int maxFloats) {
+    if (!g_hasProposer || !out) return 0;
+    int n = g_propW * g_propH * g_propHeads * 8;
+    if (n > maxFloats) return 0;
+    memcpy(out, g_propMap.map, (size_t)n * sizeof(float));
+    return n;
+}
+
+API void fp_proposer_dims(int* out4) {
+    if (!out4) return;
+    out4[0] = g_propW; out4[1] = g_propH; out4[2] = g_propHeads; out4[3] = g_propPatchSrc;
+}
+
+// fp_set_proposer_enabled turns the installed network on or off for the run, and sets the progress
+// value the head layer folds in (the candidate distribution moves through a run, so the network is
+// told where in it we are).
+API void fp_set_proposer_enabled(int on, float progress, float frac, float jitter) {
+    g_propOn = (on && g_hasProposer) ? 1 : 0;
+    g_propProgress = progress;
+    if (frac >= 0.f && frac <= 1.f) g_propFrac = frac;
+    if (jitter >= 0.f) g_propJitter = jitter;
+}
+
+// fp_set_proposer_gate selects WHICH gate decides where proposals are used: 0 keeps the hand-made
+// region gate, 1 hands the decision to the network's own confidence head. Ignored when the installed
+// blob predates that head, so an old model cannot be gated on zeros.
+API void fp_set_proposer_gate(int mode, float tau) { g_propConfGate = mode ? 1 : 0; g_propConfTau = tau; }
+
+// fp_set_coherence uploads the structure tensor's per-pixel COHERENCE (len w*h) plus the maximum
+// aspect ratio at full coherence. The generator already seeds each candidate's ANGLE from the
+// orientation map; this supplies the missing half — how confident that angle is, and therefore how
+// elongated the candidate should be. NULL clears it (the preset's single global aspect applies
+// everywhere again). Deliberately its own buffer rather than values packed into the orientation
+// map: one buffer owning two unrelated meanings is what hid the gradient-scoring bug for months.
+// params[0] = the maximum aspect ratio at full coherence. Passed by POINTER, not by value: this
+// entry point is called through Go's syscall bridge, which places every argument in an integer
+// register, while the Windows x64 ABI passes a float parameter in XMM. A by-value float would
+// therefore arrive as garbage.
+API void fp_set_coherence(const float* coh, const float* params) {
+    if (!g_device) return;
+    float aspectCap = params ? params[0] : 0.f;
+    if (!coh || aspectCap <= 1.f) { g_hasCoh = 0; g_aspectCap = 0.f; return; }
+    size_t sz = (size_t)g_w * g_h * sizeof(float);
+    ensureStaging(sz);
+    memcpy(g_staging.map, coh, sz);
+    copyBuf(g_staging.buf, g_coh.buf, sz);
+    g_hasCoh = 1;
+    g_aspectCap = aspectCap;
+}
+
 API void fp_set_kind_gate(const float* hard) {
     if (!g_device) return;
     if (!hard) { g_hasGate = 0; return; }
@@ -1548,8 +1910,21 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // 1. generate
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPL, 0, 1, &g_genSet, 0, nullptr);
+    // The proposal map is a stride-8 grid over the canvas, and its geometry units are relative to a
+    // patch of propPatchSrc pixels AT THE RESOLUTION THE NETWORK WAS TRAINED ON. The studio fits at
+    // whatever the source happens to be, so the patch is rescaled with the canvas rather than pinned
+    // to a pixel count that would mean a different fraction of the frame on every image.
+    // The patch the network's geometry refers to, in canvas pixels. It must keep the same FRACTION
+    // of the frame it had in training, not a fixed pixel count: training ran patch_src pixels on
+    // canvases whose short side was g_propTrainDim, so anything else hands the network a window of a
+    // different relative size and every extent it predicts comes out at the wrong scale -- which also
+    // costs time, since scoring a candidate is per covered pixel.
+    float propPatch = (float)g_propPatchSrc * (float)std::min(g_w, g_h) / (float)g_propTrainDim;
     GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound, g_hasGate, g_hasRampGlow, g_bigGlowKinds, g_bigGlowKind,
-              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb, g_bigGlowTau, g_bigGlowProb};
+              g_propOn, g_propW, g_propH, g_propHeads, (g_propPool - 1) / 2,
+              (g_propConfGate && g_propHasConf) ? 1 : 0, g_hasCoh,
+              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb, g_bigGlowTau, g_bigGlowProb,
+              g_propFrac, propPatch, g_propJitter, 8.0f * g_propScale, g_propConfTau, g_aspectCap};
     vkCmdPushConstants(g_cmd, g_genPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
     cmdBarrierRW();

@@ -13,10 +13,15 @@ layout(std430, binding = 4) readonly  buffer Or { float orient[]; };
 layout(std430, binding = 5) readonly  buffer Bd { float boundDist[]; };
 layout(std430, binding = 6) readonly  buffer Kg { float kindGate[]; };
 layout(std430, binding = 7) readonly  buffer Rg { float rampGlow[]; };
+layout(std430, binding = 8) readonly  buffer Pm { float prop[]; };      // proposal map, (heads*8) planes
+layout(std430, binding = 9) readonly  buffer Pk { float propKinds[]; }; // kind per head
+layout(std430, binding = 10) readonly buffer Ch { float coh[]; };       // structure-tensor coherence
 layout(push_constant) uniform PC {
     uint seedLo, seedHi;
     int n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind;
+    int hasProp, propW, propH, propHeads, propOff, propConfGate, hasCoh;
     float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb;
+    float propFrac, propPatch, propJitter, propStride, propConfTau, aspectCap; // propStride: canvas pixels per map cell
 } pc;
 
 uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -42,18 +47,80 @@ void clampExtents(float cx, float cy, inout float a, inout float b, float thetaD
     if (scale < 1.0) { a *= scale; b *= scale; }
 }
 
+// propAt fetches parameter k of head hd at the proposal-map cell covering (cx, cy).
+// propAt fetches parameter k of head hd for the location (cx, cy).
+//
+// The map is indexed by the TOP-LEFT cell of each pooled window, so the entry describing the window
+// CENTRED on (cx, cy) sits propOff cells earlier in both axes. Reading it without that shift asks the
+// network about a region offset from where the shape will actually land.
+float propAt(int hd, int k, float cx, float cy) {
+    int gx = clamp(int(cx / pc.propStride) - pc.propOff, 0, pc.propW - 1);
+    int gy = clamp(int(cy / pc.propStride) - pc.propOff, 0, pc.propH - 1);
+    return prop[(hd * 8 + k) * (pc.propW * pc.propH) + gy * pc.propW + gx];
+}
+
+// proposeCandidate writes one network-proposed shape in the wire format and returns its kind.
+// Units follow the training graph: offsets and extents are fractions of the patch the geometry is
+// normalised against, and the angle arrives as a doubled-angle sin/cos pair (an ellipse at t and
+// t+180 degrees is the same ellipse). Everything downstream is untouched -- the proposal is scored
+// by the same exact eval as a random draw, which is why a weak network costs speed, never quality.
+// jit returns a symmetric perturbation of magnitude ~pc.propJitter. Without it every candidate that
+// picks the same head at the same location is the SAME shape, so a batch of a thousand would carry
+// only propHeads distinct proposals. The network supplies the eight modes; the jitter spreads a full
+// batch around them, and the exact eval still decides which spread candidate actually wins.
+float jit(int i, inout uint ctr) {
+    return (uf(uint(i), ctr) - 0.5) * 2.0 * pc.propJitter;
+}
+
+void proposeCandidate(int i, inout uint ctr, int base, float cx, float cy) {
+    // Head by INDEX, not by lottery. The network's value is best-of-heads at a location: the heads
+    // are trained winner-take-all, so each one specialises and any single head is mediocre on its
+    // own. Drawing one at random per candidate throws that away -- measured as the proposer merely
+    // matching random search in the engine while beating it comfortably in the simulator, where all
+    // heads are always scored at every location.
+    int hd = i % pc.propHeads;
+    int kind = int(propKinds[hd] + 0.5);
+    float ps = pc.propPatch;
+    scand[base + 0] = float(kind);
+    scand[base + 7] = 0.0; scand[base + 8] = 0.0; scand[base + 9] = 0.0;
+    scand[base + 10] = propAt(hd, 6, cx, cy);
+    if (kind == 2) {
+        for (int v = 0; v < 3; v++) {
+            scand[base + 1 + v * 2] = clampf2(cx + (propAt(hd, v * 2, cx, cy) + jit(i, ctr)) * ps, 0.0, float(pc.W - 1));
+            scand[base + 2 + v * 2] = clampf2(cy + (propAt(hd, v * 2 + 1, cx, cy) + jit(i, ctr)) * ps, 0.0, float(pc.H - 1));
+        }
+        return;
+    }
+    float px = clampf2(cx + (propAt(hd, 0, cx, cy) + jit(i, ctr)) * ps, 0.0, float(pc.W - 1));
+    float py = clampf2(cy + (propAt(hd, 1, cx, cy) + jit(i, ctr)) * ps, 0.0, float(pc.H - 1));
+    float rx = max(1.0, (propAt(hd, 2, cx, cy) + jit(i, ctr)) * ps);
+    float ry = max(1.0, (propAt(hd, 3, cx, cy) + jit(i, ctr)) * ps);
+    float theta = degrees(0.5 * atan(propAt(hd, 4, cx, cy), propAt(hd, 5, cx, cy)));
+    scand[base + 1] = px; scand[base + 2] = py;
+    scand[base + 5] = theta; scand[base + 6] = 0.0;
+    if (pc.canvasPad > 0.0) {
+        float padPx = pc.canvasPad * min(float(pc.W), float(pc.H));
+        clampExtents(px, py, rx, ry, theta, float(pc.W), float(pc.H), padPx);
+    }
+    scand[base + 3] = rx; scand[base + 4] = ry;
+}
+
 void main() {
     int stride = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
     for (int i = int(gl_GlobalInvocationID.x); i < pc.n; i += stride) {
         uint ctr = 0u;
         int base = i * 11;
+        // With the proposer on, consecutive candidates form GROUPS that share one centre, so the
+        // group covers every head at that location. The centre draw is therefore keyed on the group
+        // index; the per-candidate stream still diverges afterwards, which is what spreads the jitter.
+        uint rid = (pc.hasProp != 0 && pc.propHeads > 0) ? uint(i / pc.propHeads) : uint(i);
         float total = gridCDF[pc.gw * pc.gh - 1];
         float cx, cy;
         if (total <= 0.0) {
-            cx = uf(uint(i), ctr) * float(pc.W);
-            cy = uf(uint(i), ctr) * float(pc.H);
+            cx = uf(rid, ctr) * float(pc.W);
+            cy = uf(rid, ctr) * float(pc.H);
         } else {
-            float u = uf(uint(i), ctr) * total;
+            float u = uf(rid, ctr) * total;
             int lo = 0, hi = pc.gw * pc.gh - 1;
             while (lo < hi) { int mid = (lo + hi) >> 1; if (gridCDF[mid] < u) lo = mid + 1; else hi = mid; }
             int gx = lo % pc.gw, gy = lo / pc.gw;
@@ -61,11 +128,41 @@ void main() {
             int y0 = gy * pc.H / pc.gh, y1 = (gy + 1) * pc.H / pc.gh;
             if (x1 <= x0) x1 = x0 + 1;
             if (y1 <= y0) y1 = y0 + 1;
-            cx = float(x0) + uf(uint(i), ctr) * float(x1 - x0);
-            cy = float(y0) + uf(uint(i), ctr) * float(y1 - y0);
+            cx = float(x0) + uf(rid, ctr) * float(x1 - x0);
+            cy = float(y0) + uf(rid, ctr) * float(y1 - y0);
         }
         cx = clampf2(cx, 0.0, float(pc.W - 1));
         cy = clampf2(cy, 0.0, float(pc.H - 1));
+        // Region-gated proposals. Measured on img_9: the network is BETTER than the tuned search in
+        // dark masses (-18.9 mean squared error) and clearly WORSE on contours (+97.7 on the top
+        // decile of target gradient), winning on 48% of pixels overall. The two are complements, not
+        // competitors: the engine's orientation map aligns candidates along target gradients, which
+        // is exactly the edge behaviour the network lacks, while the network sees shadow detail the
+        // linear-light score is blind to. So proposals run at full share in structureless cells and
+        // fade out where the target has real structure.
+        float pf = pc.propFrac;
+        if (pc.hasProp != 0 && pc.hasGate != 0 && pc.propConfGate == 0) {
+            int gi = int(cy) * pc.W + int(cx);
+            if (gi >= 0 && gi < pc.W * pc.H) pf *= 1.0 - clamp(kindGate[gi], 0.0, 1.0);
+        }
+        // Learned gate. The hand gate above asks what KIND OF REGION this is and fades the network
+        // out where the target has structure -- a rule written from one image's win/loss split. The
+        // network's own confidence head answers the narrower question directly: at this location, is
+        // this head's proposal better than what a uniform draw would have found? Where it says no,
+        // the candidate falls through to the random path, which costs nothing and cannot be worse.
+        if (pc.hasProp != 0 && pc.propConfGate != 0 && pc.propHeads > 0) {
+            int hd = int(uint(i) % uint(pc.propHeads));
+            // The threshold is NOT zero by default for a measured reason: the head was trained
+            // against the best of a handful of uniform draws, while the engine takes the best of
+            // roughly two thousand. Its idea of "better than random" is therefore optimistic, and
+            // the stronger the model gets the more places it wrongly claims. propConfTau raises the
+            // bar back towards the baseline the engine actually offers.
+            if (propAt(hd, 7, cx, cy) <= pc.propConfTau) pf = 0.0;
+        }
+        if (pc.hasProp != 0 && uf(uint(i), ctr) < pf) {
+            proposeCandidate(i, ctr, base, cx, cy);
+            continue;
+        }
         float emaxR = pc.maxR;
         if (pc.hasBound != 0 && pc.boundMix > 0.0) {
             int bidx = int(cy) * pc.W + int(cx);
@@ -75,9 +172,21 @@ void main() {
             }
         }
         float theta = uf(uint(i), ctr) * 360.0;
+        float aspectMax = pc.aspectMax;
         if (pc.hasOrient != 0) {
             int idx = int(cy) * pc.W + int(cx);
-            if (idx >= 0 && idx < pc.W * pc.H) theta = orient[idx] + (uf(uint(i), ctr) * 40.0 - 20.0);
+            if (idx >= 0 && idx < pc.W * pc.H) {
+                theta = orient[idx] + (uf(uint(i), ctr) * 40.0 - 20.0);
+                // Anisotropy prior (engine genCandidate): the tensor's coherence narrows the jitter
+                // and sets the elongation. It REPLACES aspectMax rather than widening it — the
+                // preset's global value is applied everywhere today, including flat regions where
+                // the seeding angle is noise.
+                if (pc.hasCoh != 0 && pc.aspectCap > 1.0) {
+                    float k = coh[idx];
+                    theta = orient[idx] + (uf(uint(i), ctr) * 40.0 - 20.0) * (1.0 - 0.75 * k);
+                    aspectMax = 1.0 + k * (pc.aspectCap - 1.0);
+                }
+            }
         }
         float alpha = 1.0;
         if (pc.allowAlpha != 0) alpha = pc.alphaMin + (1.0 - pc.alphaMin) * uf(uint(i), ctr);
@@ -109,7 +218,7 @@ void main() {
         if (kind == 1) {
             float hw = 1.0 + uf(uint(i), ctr) * (emaxR - 1.0);
             float u2 = uf(uint(i), ctr);
-            float hh = (pc.aspectMax > 1.0) ? max(0.5, hw / (1.0 + u2 * (pc.aspectMax - 1.0))) : 1.0 + u2 * (emaxR - 1.0);
+            float hh = (aspectMax > 1.0) ? max(0.5, hw / (1.0 + u2 * (aspectMax - 1.0))) : 1.0 + u2 * (emaxR - 1.0);
             scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 5] = theta; scand[base + 6] = 0.0;
             if (pc.canvasPad > 0.0) clampExtents(cx, cy, hw, hh, theta, float(pc.W), float(pc.H), padPx);
             scand[base + 3] = hw; scand[base + 4] = hh;
@@ -142,7 +251,7 @@ void main() {
         } else {
             float rx = 2.0 + uf(uint(i), ctr) * (emaxR - 2.0);
             float u2 = uf(uint(i), ctr);
-            float ry = (pc.aspectMax > 1.0) ? max(1.0, rx / (1.0 + u2 * (pc.aspectMax - 1.0))) : 2.0 + u2 * (emaxR - 2.0);
+            float ry = (aspectMax > 1.0) ? max(1.0, rx / (1.0 + u2 * (aspectMax - 1.0))) : 2.0 + u2 * (emaxR - 2.0);
             scand[base + 1] = cx; scand[base + 2] = cy; scand[base + 5] = theta; scand[base + 6] = 0.0;
             if (pc.canvasPad > 0.0) clampExtents(cx, cy, rx, ry, theta, float(pc.W), float(pc.H), padPx);
             scand[base + 3] = rx; scand[base + 4] = ry;

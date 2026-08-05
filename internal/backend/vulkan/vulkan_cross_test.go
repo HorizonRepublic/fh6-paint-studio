@@ -349,12 +349,21 @@ func TestGoldenDiffApplyGradientKind(t *testing.T) {
 	}
 }
 
-// TestGoldenDiffEvaluateGradientKindsFlagOff covers the path the greedy actually takes: the
-// glow-swap emits gradient candidates into the on-device search with SetGradients OFF, because the
-// flag only picks CUDA's eval kernel — it is not a licence to score a glow as a flat ellipse. Both
-// backends must score them with their per-pixel alpha there, and identically to the flag-on scores,
-// or the two backends pick different shapes from the same batch (they silently did until 2026-08-03,
-// when the Vulkan shader gated its gradient branch on the flag and CUDA's did not).
+// TestGoldenDiffEvaluateGradientKindsFlagOff covers the path the greedy actually takes: the glow
+// swap emits gradient candidates into the on-device search with SetGradients OFF.
+//
+// It no longer requires the two backends to AGREE there, and it no longer requires the flag to leave
+// a gradient score untouched. Both demands encoded a design that was reverted the same day it was
+// written: removing the Vulkan gate makes a glow score honestly, which is locally correct and
+// end-to-end WORSE (89876/16 against 90916/7 on img_9@1000), so the gate was restored by bisect and
+// is now deliberate. Scoring a gradient as a solid shape over-credits its coverage and lands the
+// greedy in a measurably better basin.
+//
+// What is still worth asserting on this path is that a gradient score is not garbage and that the
+// reject decision matches; the SHADER MATH of the honest branch is gated by
+// TestRefEvaluateGradientKinds against the independent pure-Go reference, which is the contract that
+// matters now that CUDA is unsupported. That the gate is LIVE — the regression that cost a day — is
+// gated by TestGradientGateIsLive, in the vulkan-only suite where it actually runs.
 func TestGoldenDiffEvaluateGradientKindsFlagOff(t *testing.T) {
 	rng := rand.New(rand.NewSource(13))
 	w, h := 37, 29
@@ -386,7 +395,6 @@ func TestGoldenDiffEvaluateGradientKindsFlagOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vulkan Evaluate: %v", err)
 	}
-	var mismatches int
 	for i := range cands {
 		rRej, gRej := rc[i].Score == rejected, gc[i].Score == rejected
 		if rRej != gRej {
@@ -395,39 +403,11 @@ func TestGoldenDiffEvaluateGradientKindsFlagOff(t *testing.T) {
 		if rRej {
 			continue
 		}
-		if !closeRel(rc[i].Score, gc[i].Score, 2e-3, 1e-2) {
-			if mismatches++; mismatches <= 10 {
-				t.Errorf("cand %d (kind %v) score: cuda=%.5f vk=%.5f", i, cands[i].Kind, rc[i].Score, gc[i].Score)
-			}
-		}
-	}
-
-	// Cross-backend agreement alone would be satisfied by both being wrong together, which is how
-	// this hid: flipping the flag must not move a gradient score on either backend.
-	ref.SetGradients(true)
-	gpu.SetGradients(true)
-	ron, _ := ref.Evaluate(cands)
-	gon, err := gpu.Evaluate(cands)
-	if err != nil {
-		t.Fatalf("vulkan Evaluate (flag on): %v", err)
-	}
-	for i := range cands {
-		if (rc[i].Score == rejected) != (ron[i].Score == rejected) {
-			t.Fatalf("cand %d (kind %v): cuda reject flipped with the gradient flag", i, cands[i].Kind)
-		}
-		if (gc[i].Score == rejected) != (gon[i].Score == rejected) {
-			t.Fatalf("cand %d (kind %v): vulkan reject flipped with the gradient flag", i, cands[i].Kind)
-		}
-		if rc[i].Score == rejected {
-			continue
-		}
-		if !closeRel(rc[i].Score, ron[i].Score, 2e-3, 1e-2) {
-			t.Fatalf("cand %d (kind %v): cuda score moved with the gradient flag: off=%.5f on=%.5f",
-				i, cands[i].Kind, rc[i].Score, ron[i].Score)
-		}
-		if !closeRel(gc[i].Score, gon[i].Score, 2e-3, 1e-2) {
-			t.Fatalf("cand %d (kind %v): vulkan score moved with the gradient flag: off=%.5f on=%.5f",
-				i, cands[i].Kind, gc[i].Score, gon[i].Score)
+		// A gradient candidate that improves the canvas must score negative on both backends. The
+		// magnitudes legitimately differ: CUDA has no equivalent of the gate.
+		if gc[i].Score > 0 && rc[i].Score < 0 {
+			t.Errorf("cand %d (kind %v): vulkan calls a gradient useless where cuda does not (vk=%.5f cuda=%.5f)",
+				i, cands[i].Kind, gc[i].Score, rc[i].Score)
 		}
 	}
 }

@@ -9,6 +9,18 @@ import "math"
 // making it stable for seeding elongated shapes along hair strands, folds, etc.
 // len = w*h.
 func OrientationMap(target []float32, w, h int) []float32 {
+	return orientationTensor(target, w, h, nil)
+}
+
+// OrientationCoherenceMap returns the same orientation field plus the per-pixel COHERENCE of the
+// structure tensor — how strongly the neighbourhood prefers that direction. Both come from one pass
+// over the same tensor, so asking for coherence costs nothing beyond the second output buffer.
+func OrientationCoherenceMap(target []float32, w, h int) (orient, coherence []float32) {
+	coherence = make([]float32, w*h)
+	return orientationTensor(target, w, h, coherence), coherence
+}
+
+func orientationTensor(target []float32, w, h int, coh []float32) []float32 {
 	lum := make([]float32, w*h)
 	for i := 0; i < w*h; i++ {
 		lum[i] = Luma(target[i*4], target[i*4+1], target[i*4+2])
@@ -78,7 +90,36 @@ func OrientationMap(target []float32, w, h int) []float32 {
 				along += 180
 			}
 			out[i] = float32(along)
+			if coh != nil {
+				coh[i] = float32(tensorCoherence(sxx, syy, sxy))
+			}
 		}
 	}
 	return out
+}
+
+// tensorCoherence is (λ₁−λ₂)/(λ₁+λ₂) of the smoothed structure tensor: 0 where the local
+// neighbourhood has no preferred direction (flat, or an isotropic corner), 1 where it is a clean
+// straight edge. The closed form avoids solving for the eigenvalues themselves.
+//
+// This is the number the ORIENTATION alone cannot supply. An angle is defined everywhere, including
+// in flat regions where it is pure noise, so seeding every candidate along it says nothing about
+// whether the region is actually anisotropic. Approximation theory is explicit that the n^-2 rate
+// belongs to elements matched to a locally ANISOTROPIC structure, and our measured slope is -0.98 —
+// isotropic — which is what makes "how elongated, and how confidently" the missing input rather than
+// "which way".
+func tensorCoherence(sxx, syy, sxy float64) float64 {
+	tr := sxx + syy
+	if tr <= 1e-12 {
+		return 0
+	}
+	d := math.Hypot(sxx-syy, 2*sxy) // λ₁−λ₂
+	c := d / tr
+	if c < 0 {
+		return 0
+	}
+	if c > 1 {
+		return 1
+	}
+	return c
 }

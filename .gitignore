@@ -70,3 +70,12 @@ GEMINI.md
 Thumbs.db
 ehthumbs.db
 desktop.ini
+
+# Frame bench-bank: 435 MB of stills sliced from local video files. Local measurement asset,
+# never committed (same rule as the vinyl catalog).
+docs/frame-bank/
+
+# Proposer training scratch: pretrained backbones, checkpoints and LoRA ensembles pulled down by the
+# training scripts. 3 GB of third-party weights — a local training asset, never committed. The
+# SHIPPED proposer is internal/aimodel/proposer.bin (2.7 MB), which is a different thing entirely.
+/models/

@@ -212,6 +212,11 @@ func PrepareFromImage(img image.Image, maxRes int) *Prepared {
 		inv := 1.0 / float64(opaqueN)
 		bg.R, bg.G, bg.B = float32(sr*inv), float32(sg*inv), float32(sb*inv)
 	}
+	if DominantBGFrac > 0 {
+		if c, ok := dominantColor(px, w, h, DominantBGFrac); ok {
+			bg = c
+		}
+	}
 	// "Has transparency" if more than ~0.5% of pixels are near-transparent —
 	// i.e. the image is a cutout with an empty background, not a solid photo.
 	hasT := transparentN*200 > w*h

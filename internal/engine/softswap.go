@@ -95,7 +95,10 @@ func softSwapStandouts(be backend.Backend, shapes []model.Shape, finalErr float6
 		ratio = f0 / gtotal
 	}
 	swdbg("F0=%.1f Gtotal=%.1f ratio=%.4f (skip<%.3f) finalErr=%.1f n=%d", f0, gtotal, ratio, standoutSkipFrac, finalErr, len(shapes))
-	if gtotal <= 0 || ratio < standoutSkipFrac {
+	// The skip gate asks whether the WHOLE frame carries enough false edge to be worth a pass. Rim
+	// aiming asks a per-shape question instead, and the offenders it finds are a few percent of the
+	// stack — a frame can be clean on average and still show them.
+	if gtotal <= 0 || (!opt.RimAim && ratio < standoutSkipFrac) {
 		return shapes, finalErr
 	}
 	targetLuma := make([]float32, w*h)
@@ -104,11 +107,21 @@ func softSwapStandouts(be backend.Backend, shapes []model.Shape, finalErr float6
 	lumaOf(target, w, h, targetLuma)
 	lumaOf(recon, w, h, curLuma)
 
+	// Aim. The original ranking scores the false-edge mass INSIDE a shape and only ever considers
+	// rectangles and triangles; the rim artefact is a property of the BOUNDARY and sits mostly on
+	// ellipses, which that ordering cannot see at all (rimsalience.go).
 	sal := shapeStandoutSalience(shapes, fe, w, h)
+	if opt.RimAim {
+		sal = shapeRimDebt(shapes, curLuma, targetLuma, w, h)
+	}
 	order := make([]int, 0, len(shapes)-1)
 	for j := 1; j < len(shapes); j++ {
 		k := model.KindFromType(shapes[j].Type)
-		if (k == model.KindRectangle || k == model.KindTriangle) && sal[j] > 0 {
+		eligible := k == model.KindRectangle || k == model.KindTriangle
+		if opt.RimAim {
+			eligible = eligible || k == model.KindEllipse
+		}
+		if eligible && sal[j] > 0 {
 			order = append(order, j)
 		}
 	}

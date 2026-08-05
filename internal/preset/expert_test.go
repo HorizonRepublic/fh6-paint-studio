@@ -91,3 +91,21 @@ func TestResolveAlphaMinSentinelKeepsModeFloor(t *testing.T) {
 		t.Errorf("Options.AlphaMin = %v, want mode floor 0.30", r.Options.AlphaMin)
 	}
 }
+
+// TestResolveCarriesGlobalColorIters pins the wiring of a preset default into Options. Three
+// quality defaults in a single day reached only one of the two consumers, so a default that is not
+// asserted to arrive is a default that may not exist. Anime and photo both ship the joint colour
+// re-solve; flat does not.
+func TestResolveCarriesGlobalColorIters(t *testing.T) {
+	for _, mode := range []string{"anime", "photo"} {
+		c := DefaultChoices()
+		c.Mode = mode
+		r := Resolve(uniformPrep(8, 8), c)
+		if r.Options.GlobalColorIters <= 0 {
+			t.Errorf("%s: Options.GlobalColorIters = %d, want the preset default", mode, r.Options.GlobalColorIters)
+		}
+		if r.Options.GlobalAlphaSweeps <= 0 {
+			t.Errorf("%s: Options.GlobalAlphaSweeps = %d, want the preset default", mode, r.Options.GlobalAlphaSweeps)
+		}
+	}
+}
