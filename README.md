@@ -29,10 +29,13 @@ See it end to end: [source photo](assets/cat/source.jpg) → [generated reconstr
 ## How to use it
 
 ### 1. Get the app
-Download the [latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases) and extract
-it - it's a `.7z` (Windows 11 opens it natively; on Windows 10 use [7-Zip](https://www.7-zip.org/)). You
-get **three files** - `fh6-paint-studio.exe`, `fh6cuda.dll` and `fh6vk.dll` - keep them in the same
-folder, and run **`fh6-paint-studio.exe`**. There's no installer.
+[**Download the latest release**](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest/download/fh6-paint-studio-windows-x64.zip)
+and extract it - it's a plain `.zip`, so Windows opens it with no extra tool. You get **two files** -
+`fh6-paint-studio.exe` and `fh6vk.dll` - keep them in the same folder, and run
+**`fh6-paint-studio.exe`**. There's no installer.
+
+That link always points at the newest build. Every release also carries a version-stamped copy of the
+same archive if you want to pin one.
 
 ### 2. Make a livery
 1. **Open any image** you like - a photo, a logo, some art, whatever caught your eye.
@@ -79,7 +82,7 @@ them. You don't have to take my word that the binaries match the source; you can
 the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh attestation verify fh6-paint-studio-<version>-windows-x64.7z --repo HorizonRepublic/fh6-paint-studio
+gh attestation verify fh6-paint-studio-<version>-windows-x64.zip --repo HorizonRepublic/fh6-paint-studio
 ```
 
 A `SHA256SUMS` file ships with each release if you'd rather just confirm the download isn't corrupted.

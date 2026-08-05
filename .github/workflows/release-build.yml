@@ -1,7 +1,7 @@
 name: Release build
 
-# Builds the Windows release (GUI exe + cross-vendor Vulkan DLL). On a release it attaches the .7z to the
-# GitHub release; on a release-touching PR it builds the same and uploads the .7z as an artifact (a
+# Builds the Windows release (GUI exe + cross-vendor Vulkan DLL). On a release it attaches the .zip to
+# the GitHub release; on a release-touching PR it builds the same and uploads the .zip as an artifact (a
 # dry-run, so a tag is never the first time the release build runs). Also dispatchable by hand.
 on:
   workflow_call:
@@ -60,29 +60,48 @@ jobs:
         shell: pwsh
         run: .\scripts\build-release.ps1 -Version "$env:VERSION"
       # Archived from inside bin\ so the files sit flat (no bin\ folder on extract).
-      - name: Package (7z)
+      #
+      # ZIP, not 7z: Windows opens it without a third-party tool on every supported version, and the
+      # code-signing service reads inside a zip container. The 7z CLI is still the zipper (-tzip) —
+      # it is already on the runner and compresses better than Compress-Archive — but the output is
+      # an ordinary deflate zip.
+      - name: Package (zip)
         shell: pwsh
         run: |
-          $archive = "fh6-paint-studio-${env:VERSION}-windows-x64.7z"
+          $archive = "fh6-paint-studio-${env:VERSION}-windows-x64.zip"
           Push-Location bin
-          7z a -mx=9 "..\$archive" fh6-paint-studio.exe fh6vk.dll
+          7z a -tzip -mx=9 "..\$archive" fh6-paint-studio.exe fh6vk.dll
           $code = $LASTEXITCODE
           Pop-Location
-          if ($code -ne 0) { throw "7z failed ($code)" }
+          if ($code -ne 0) { throw "zip failed ($code)" }
+          # A second asset under a VERSION-FREE name. GitHub's
+          # releases/latest/download/<asset> endpoint resolves the release but not the filename, so a
+          # versioned name alone gives no stable URL — every consumer that fetches automatically
+          # (code signing, mirrors, install scripts) would have to scrape the release JSON first.
+          # The versioned name stays as the human-facing download and is what Nexus publishes.
+          $stable = "fh6-paint-studio-windows-x64.zip"
+          Copy-Item $archive $stable -Force
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "STABLE=$stable"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Checksums
         shell: pwsh
         run: |
-          $sum = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          # Both assets are listed: they are byte-identical, but a verifier checks the name it
+          # actually downloaded, and a missing line reads as a failed check rather than a note.
+          $lines = @($env:ARCHIVE, $env:STABLE) | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $_"
+          }
           # LF + no BOM so `sha256sum -c` accepts it on Unix (Out-File would write CRLF).
-          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), "$sum  $env:ARCHIVE`n")
+          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), ($lines -join "`n") + "`n")
           Get-Content SHA256SUMS.txt
       # Skipped on fork PRs, where the GITHUB_TOKEN can't write id-token/attestations.
       - name: Attest build provenance
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: ${{ env.ARCHIVE }}
+          subject-path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.STABLE }}
       - name: Upload artifact (PR dry-run)
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
@@ -90,14 +109,15 @@ jobs:
           name: fh6-paint-studio-windows-x64
           path: |
             ${{ env.ARCHIVE }}
+            ${{ env.STABLE }}
             SHA256SUMS.txt
       - name: Attach to the release
         if: github.event_name != 'pull_request'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" "$env:ARCHIVE" SHA256SUMS.txt --clobber
-      # Publish the same .7z to Nexus Mods as a new file version. Only on a genuine release
+        run: gh release upload "${{ inputs.tag }}" "$env:ARCHIVE" "$env:STABLE" SHA256SUMS.txt --clobber
+      # Publish the same .zip to Nexus Mods as a new file version. Only on a genuine release
       # (push -> release-please -> this reusable workflow); manual dispatch and PR dry-runs never
       # touch Nexus, so re-attaching GitHub assets can't create a duplicate Nexus version. Runs last,
       # after the GitHub release is already populated, so a Nexus hiccup never blocks the release.
