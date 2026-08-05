@@ -95,9 +95,22 @@ Pop-Location
 if (-not $ok) { throw "cl failed building fh6vk.dll" }
 Write-Host "Built bin\fh6vk.dll" -ForegroundColor Green
 
-# --- copy DLL next to the Go package so `go test -tags vulkan` (CWD=pkg dir) finds it ---
-Copy-Item $dll (Join-Path $root "internal\backend\vulkan\fh6vk.dll") -Force
-Write-Host "Copied fh6vk.dll into internal\backend\vulkan\ (for tests)" -ForegroundColor Green
+# --- copy the DLL next to every package whose tests load it ---
+# `go test` runs with CWD set to the package directory, so each of these needs its own copy. They are
+# listed here rather than refreshed by hand because a STALE copy does not look like a stale copy: the
+# test fails with "procedure not found" for whichever export was added last, which reads as a broken
+# feature rather than an out-of-date file. Add a directory here the moment its tests touch Vulkan.
+$testCopies = @(
+    "internal\backend\vulkan",
+    "internal\engine",
+    "internal\runner",
+    "internal\ipc"
+)
+foreach ($d in $testCopies) {
+    $dest = Join-Path $root $d
+    if (Test-Path $dest) { Copy-Item $dll (Join-Path $dest "fh6vk.dll") -Force }
+}
+Write-Host "Copied fh6vk.dll into $($testCopies.Count) package dirs (for tests)" -ForegroundColor Green
 
 # --- optional: build the CLI with the vulkan backend ---
 $env:CGO_ENABLED = "0"

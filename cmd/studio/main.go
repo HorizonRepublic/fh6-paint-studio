@@ -86,6 +86,24 @@ func main() {
 func loop(w *app.Window) error {
 	th := ui.NewTheme()
 	st := ui.NewAppState(th)
+
+	// Engine driver. In-process by default — that is the behaviour this app has always had, and it is
+	// the reference the service path gets checked against. FH6_ENGINE=remote runs the engine as a
+	// separate process over the local protocol, which is the boundary the next UI will use. A failure
+	// to reach it falls back to in-process rather than leaving the user with an app that cannot
+	// generate at all: the service is an implementation detail to everyone except us.
+	drv := engineDriver(localDriver{})
+	defer drv.Close()
+	if os.Getenv("FH6_ENGINE") == "remote" {
+		if rd, err := dialEngine(os.Getenv("FH6_ENGINED")); err != nil {
+			applog.Printf("engine service unavailable (%v) — running in-process", err)
+			st.AppendLog("engine service unavailable, running in-process: " + err.Error())
+		} else {
+			drv = rd
+			applog.Printf("engine service connected")
+			st.AppendLog("engine: running as a separate service")
+		}
+	}
 	st.Version = version
 	backends := backendOptions()
 	st.SetBackends(backends)               // a picker when >1 GPU backend works (allgpu build), else a static label
@@ -282,7 +300,9 @@ func loop(w *app.Window) error {
 					curGen = curPrep
 					r := preset.Resolve(*curPrep, st.Choices())
 					st.Stats = ui.RunStats{Total: r.Options.StopAt}
-					cancelRun = runner.RunAsync(*curPrep, r, post)
+					cancelRun, _ = drv.Generate(driverRequest{
+						Prep: *curPrep, Resolved: r, Path: demoPath, MaxRes: curPrep.W, Choices: st.Choices(),
+					}, post)
 				}
 			}
 
@@ -539,7 +559,16 @@ func loop(w *app.Window) error {
 				st.ClearQuality() // drop the previous run's quality badge
 				st.Stats = ui.RunStats{Total: r.Options.StopAt}
 				st.Stats.Cap = ch.Shapes // remember the requested cap so Done can show the auto-picked optimal count
-				cancelRun = runner.RunAsync(*genPrep, r, post)
+				var runErr error
+				cancelRun, runErr = drv.Generate(driverRequest{
+					Prep: *genPrep, Resolved: r,
+					Path: st.ImgPath, MaxRes: genPrep.W, Choices: ch, Cropped: st.Cropped,
+				}, post)
+				if runErr != nil {
+					st.Phase = ui.PhaseIdle
+					tb.clear()
+					st.AppendLog("could not start: " + runErr.Error())
+				}
 			}
 			if st.CancelBtn.Clicked(gtx) && cancelRun != nil {
 				cancelRun()
