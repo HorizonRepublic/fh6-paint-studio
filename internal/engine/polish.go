@@ -128,6 +128,13 @@ type PolishOptions struct {
 	// callee must copy/convert it immediately, not retain it.
 	OnPreview func(render []float32, w, h int)
 
+	// AlphaMin floors the alpha the descent may reach. The greedy places candidates above the
+	// preset's floor (organic 0.30, shipped 2026-06-10 and seed-replicated), and the polish then
+	// optimised alpha freely down to a hard-coded 0.05 — a shipped quality default undone by the
+	// next stage. It is also a candidate mechanism for the veiling complaint, since a veil is what
+	// dozens of near-transparent layers look like. 0 = the historical 0.05.
+	AlphaMin float64
+
 	// OnProgress, if set, is called once per refinement iteration with (iter 1..Iters, total Iters).
 	// It carries NO device read, so it is cheap to fire every iteration — used by the Gaussian mode to
 	// drive a training % bar (the greedy's shape-count progress is meaningless when all glows train at
@@ -146,6 +153,15 @@ func (o PolishOptions) previewInterval() time.Duration {
 		return o.PreviewInterval
 	}
 	return 50 * time.Millisecond
+}
+
+// alphaFloor returns the lower bound the descent may push a shape's alpha to. Unset keeps the
+// historical 0.05 so every caller that does not thread a preset floor is bit-identical.
+func (o PolishOptions) alphaFloor() float64 {
+	if o.AlphaMin > 0 && o.AlphaMin < 1 {
+		return o.AlphaMin
+	}
+	return 0.05
 }
 
 // DefaultPolishOptions returns the tuned defaults from the design.
@@ -186,6 +202,10 @@ type pshape struct {
 	// triangle uses all 6 vertex coords) then col[0..3] (10 slots).
 	m, v [10]float64
 	grad [10]float64 // gradient staged by polishBackward, consumed by adamStep
+
+	// Gradient-collision diagnostic (nil unless FH6_ABSGRAD is set): {Σ per-iteration agreement,
+	// iterations counted}. See absgrad.go for what the ratio means.
+	absP *[2]float64
 }
 
 // PolishResult reports what the pass did so the caller can gate on it.
@@ -739,6 +759,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		}
 		ps = append(ps, pshape{kind: k, P: P, col: c, optGeo: optimizableGeo(k)})
 	}
+	absGradArm(ps)
 
 	render := make([]float32, w*h*4)
 	dC := make([]float64, w*h*4)
@@ -961,6 +982,7 @@ func Polish(shapes []model.Shape, target, weight []float32, w, h int, bg model.R
 		}
 	}
 	doneIters += fineDone
+	absGradReport(ps, bbx, target, w, h)
 	restoreParams(ps, bestP) // ship the best HARD point, not the final soft one
 
 	// Snap back to hard, game-representable shapes.
@@ -1260,6 +1282,7 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 		}
 		var gR, gG, gB, gA float64
 		var gP [6]float64
+		var absPx [2]float64 // Σ|per-pixel positional gradient| (absgrad.go; unused when the diag is off)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
 				p := (y*w + x) * 4
@@ -1336,10 +1359,23 @@ func polishBackward(ps []pshape, base, render, target, weight []float32, below [
 					gP[3] += dsdf * sdfg[3]
 					gP[4] += dsdf * sdfg[4]
 					gP[5] += dsdf * sdfg[5]
+					if s.absP != nil {
+						absPx[0] += math.Abs(dsdf * sdfg[0])
+						absPx[1] += math.Abs(dsdf * sdfg[1])
+					}
 				}
 			}
 		}
 		s.grad = [10]float64{gP[0], gP[1], gP[2], gP[3], gP[4], gP[5], gR, gG, gB, gA}
+		// Per-ITERATION agreement, averaged later: the ordinary sum and the absolute sum must come
+		// from the same backward pass, or the ratio compares one iteration's net against every
+		// iteration's demand.
+		if s.absP != nil {
+			if den := absPx[0] + absPx[1]; den > 0 {
+				s.absP[0] += (math.Abs(gP[0]) + math.Abs(gP[1])) / den
+				s.absP[1]++
+			}
+		}
 	}
 }
 
@@ -1397,7 +1433,7 @@ func adamStep(ps []pshape, opt PolishOptions, step int, w, h int, lrScale float6
 		for c := 0; c < 3; c++ {
 			s.col[c] = clampF64(s.col[c], 0, 1)
 		}
-		s.col[3] = clampF64(s.col[3], 0.05, 1)
+		s.col[3] = clampF64(s.col[3], opt.alphaFloor(), 1)
 	}
 }
 

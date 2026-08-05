@@ -230,6 +230,21 @@ func (s *AppState) advancedSection(gtx C) D {
 		}),
 		layout.Rigid(GapV(8).Layout),
 		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.AIFast, i18n.T("advanced.ai_fast"), &s.AIFastHint,
+				i18n.T("hint.ai_fast"))
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.NoEagle, i18n.T("advanced.no_eagle"), &s.NoEagleHint,
+				i18n.T("hint.no_eagle"))
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
+			return s.toggleRow(gtx, &s.NoFalseEdge, i18n.T("advanced.no_false_edge"), &s.NoFalseEdgeHint,
+				i18n.T("hint.no_false_edge"))
+		}),
+		layout.Rigid(GapV(8).Layout),
+		layout.Rigid(func(gtx C) D {
 			return s.toggleRow(gtx, &s.KeepInside, i18n.T("advanced.keep_inside"), &s.KeepInsideHint,
 				i18n.T("hint.keep_inside"))
 		}),

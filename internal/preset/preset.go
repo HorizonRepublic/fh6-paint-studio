@@ -7,6 +7,7 @@
 package preset
 
 import (
+	"fh6-paint-studio/internal/aimodel"
 	"fmt"
 	"math"
 	"os"
@@ -44,6 +45,20 @@ type Choices struct {
 	Boundary  *bool // nil = off (opt-in). boundary-aware radius — best on smooth photo/anime characters (smoother gradients, less veil overshoot); regresses on text/flat, so not auto-defaulted
 	Economy   bool  // OPT-IN (default off): the low-budget global-search schedule (LIVE co-adaptation / anneal at ≤~1500 shapes). Lifts quality but re-polishes ALL shapes per batch (~4x slower), so it's off by default and enabled only when the user asks for it.
 	SS        int   // preview supersample factor (UI-side; carried through Resolved.SS)
+	// AIFast cuts the candidate batch to a quarter and lets the trained proposer steer what is left.
+	// What is MEASURED is the trade: a quarter of the candidates costs 2-6% error and saves a
+	// comparable share of the wall. The network's own contribution is NOT established -- against a
+	// uniform search at the same batch it went 8:8 over four images and two seeds, after a first
+	// single-seed sweep that looked like 7:8. It is kept because it cannot hurt (every proposal is
+	// still scored exactly) and because a better model plugs in here, not because it earned its keep.
+	AIFast bool
+	// EdgeTerms switches the two polish terms that a knob scan found to be genuinely
+	// content-dependent: the contour (eagle) term and the false-edge term. Measured over 16 images,
+	// each helps on roughly half of them and hurts on the rest, with a range of about +-3% -- the
+	// only knobs in the scan whose sign is not consistent. "" keeps the preset values; "no-eagle",
+	// "no-fe" or "no-both" zeroes them. Exposed because that split is what a toggle is for: no
+	// automatic chooser survived replication at this effect size, but an eye can pick per picture.
+	EdgeTerms string
 
 	// Advanced (zero = preset/mode default, except Aspect/WeightStrength/AlphaMin = -1)
 	Random, Mutated, SampleBudget, MaxNoImprove int
@@ -98,6 +113,21 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 
 	// Quality preset -> base sample counts; explicit advanced values override.
 	random, mutated, sampleBudget, maxNI := resolveSampleCounts(c)
+	// AI proposer: the whole point is that the network's candidates are worth more, so the batch
+	// shrinks with it -- keeping the full batch would spend the same time and merely change where the
+	// candidates come from. A quarter is where the measurement put it: on the owner's bench the engine
+	// lands within ~2-3% of its full-batch error there, while a UNIFORM search at that batch is 5-9%
+	// worse. FH6_AI_BATCH overrides the divisor for A/Bs.
+	if c.AIFast {
+		div := 4
+		if v := os.Getenv("FH6_AI_BATCH"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+				div = n
+			}
+		}
+		random = maxInt(64, random/div)
+		mutated = maxInt(16, mutated/div)
+	}
 
 	cs := metric.ContentClass(prep.Pixels, w, h) // cs.Colors (palette count) feeds the flat vector/textured split
 	// Content preset is USER-EXPLICIT (anime|photo|flat). There is no auto content-classifier: classifying
@@ -228,7 +258,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		MomentSeed:        true,
 		MomentDetailStart: 0.55,
 		Polish:            sp.polish,
-		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, sp.falseEdge, sp.ssim, sp.eagle, sp.lostDetail),
+		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, feLambda(c, sp.falseEdge), sp.ssim, eagleLambda(c, sp.eagle), sp.lostDetail),
 		ShadePrepass:      sp.shadePre,
 		SmoothBase:        sp.smoothBase,
 		RegionKinds:       sp.regionKinds,
@@ -240,6 +270,11 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		RampGlow:          sp.rampGlow,
 		TermRegionWeight:  sp.termRegionW,
 		LooRefit:          sp.looRefit,
+		GlobalColorIters:  sp.globalColorIters,
+		GlobalAlphaSweeps: sp.globalAlphaSweeps,
+		ProposerBlob:      aiBlob(c.AIFast),
+		ProposerFrac:      aiFrac(c.AIFast),
+		ProposerJitter:    aiJitter(c.AIFast),
 		MergeRefit:        sp.mergeRefit,
 		AnalyticAlpha:     sp.analyticAlpha,
 		SaliencyQuota:     md.SaliencyQuota,
@@ -307,37 +342,39 @@ func resolveSampleCounts(c Choices) (random, mutated, sampleBudget, maxNI int) {
 // explicit Choices overrides. Grouped into one value so resolveShapeParams stays a single cohesive
 // resolver instead of a function returning a dozen results (an anti-pattern in its own right).
 type shapeParams struct {
-	allowAlpha    bool
-	alphaMin      float32
-	kindsCSV      string
-	kindWeights   []float32
-	wstr          float64 // edge-weight blend toward uniform; also drives the saliency map
-	aspectMax     float32
-	polish        bool
-	boundaryOn    bool
-	backfit       bool
-	iters         int
-	tau1          float64
-	falseEdge     float64
-	ssim          float64
-	eagle         float64
-	lostDetail    float64
-	shadePre      bool
-	smoothBase    bool
-	regionKinds   bool
-	glowTau       float64
-	glowProb      float64
-	bigGlowTau    float64
-	bigGlowProb   float64
-	bigGlowAll    bool
-	rampGlow      bool
-	termRegionW   bool
-	looRefit      int
-	mergeRefit    bool
-	rampWeight    float64
-	bestOf        int
-	analyticAlpha bool
-	ste           bool
+	allowAlpha        bool
+	alphaMin          float32
+	kindsCSV          string
+	kindWeights       []float32
+	wstr              float64 // edge-weight blend toward uniform; also drives the saliency map
+	aspectMax         float32
+	polish            bool
+	boundaryOn        bool
+	backfit           bool
+	iters             int
+	tau1              float64
+	falseEdge         float64
+	ssim              float64
+	eagle             float64
+	lostDetail        float64
+	shadePre          bool
+	smoothBase        bool
+	regionKinds       bool
+	glowTau           float64
+	glowProb          float64
+	bigGlowTau        float64
+	bigGlowProb       float64
+	bigGlowAll        bool
+	rampGlow          bool
+	termRegionW       bool
+	looRefit          int
+	globalColorIters  int
+	globalAlphaSweeps int
+	mergeRefit        bool
+	rampWeight        float64
+	bestOf            int
+	analyticAlpha     bool
+	ste               bool
 }
 
 // resolveShapeParams layers the explicit Choices overrides on top of the mode defaults. The
@@ -345,34 +382,36 @@ type shapeParams struct {
 // cover the override semantics (which sentinel means "unset").
 func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) shapeParams {
 	sp := shapeParams{
-		alphaMin:      md.AlphaMin,
-		kindWeights:   md.KindWeights,
-		wstr:          md.WeightStr,
-		aspectMax:     md.AspectMax,
-		boundaryOn:    md.Boundary,
-		backfit:       md.Backfit,
-		iters:         md.PolishIters,
-		tau1:          md.PolishTau1,
-		falseEdge:     md.FalseEdge,
-		ssim:          md.SSIM,
-		eagle:         md.Eagle,
-		lostDetail:    md.LostDetail,
-		shadePre:      md.ShadePre,
-		smoothBase:    md.SmoothBase,
-		regionKinds:   md.RegionKinds,
-		glowTau:       md.SmoothGlowTau,
-		glowProb:      md.SmoothGlowProb,
-		bigGlowTau:    md.BigGlowTau,
-		bigGlowProb:   md.BigGlowProb,
-		bigGlowAll:    md.BigGlowAllKinds,
-		rampGlow:      md.RampGlow,
-		termRegionW:   md.TermRegionWeight,
-		looRefit:      md.LooRefit,
-		mergeRefit:    md.MergeRefit,
-		rampWeight:    md.RampWeight,
-		bestOf:        md.BestOf,
-		analyticAlpha: md.AnalyticAlpha,
-		ste:           true,
+		alphaMin:          md.AlphaMin,
+		kindWeights:       md.KindWeights,
+		wstr:              md.WeightStr,
+		aspectMax:         md.AspectMax,
+		boundaryOn:        md.Boundary,
+		backfit:           md.Backfit,
+		iters:             md.PolishIters,
+		tau1:              md.PolishTau1,
+		falseEdge:         md.FalseEdge,
+		ssim:              md.SSIM,
+		eagle:             md.Eagle,
+		lostDetail:        md.LostDetail,
+		shadePre:          md.ShadePre,
+		smoothBase:        md.SmoothBase,
+		regionKinds:       md.RegionKinds,
+		glowTau:           md.SmoothGlowTau,
+		glowProb:          md.SmoothGlowProb,
+		bigGlowTau:        md.BigGlowTau,
+		bigGlowProb:       md.BigGlowProb,
+		bigGlowAll:        md.BigGlowAllKinds,
+		rampGlow:          md.RampGlow,
+		termRegionW:       md.TermRegionWeight,
+		looRefit:          md.LooRefit,
+		globalColorIters:  md.GlobalColorIters,
+		globalAlphaSweeps: md.GlobalAlphaSweeps,
+		mergeRefit:        md.MergeRefit,
+		rampWeight:        md.RampWeight,
+		bestOf:            md.BestOf,
+		analyticAlpha:     md.AnalyticAlpha,
+		ste:               true,
 	}
 	if c.BestOf > 0 {
 		sp.bestOf = c.BestOf
@@ -479,6 +518,29 @@ func DarkWeightParams(darkFrac float64) (clamp, cap float64) {
 	return clamp, cap
 }
 
+// PerceptualWeightExp returns the exponent of the linear-luma perceptual weight and, when non-zero,
+// the epsilon of a softened dark floor that replaces the hard clamp.
+//
+// The shipped weight is the sRGB encoding derivative squared, i.e. L^-1.1666. That is exactly right
+// for sRGB, but sRGB's 2.4 gamma is an encoding, not a model of LIGHTNESS — both CIELAB and Oklab put
+// a CUBE ROOT there, whose Gauss-Newton weight on a linear-RGB forward model is L^-4/3. The two
+// disagree most in the shadows, which is where our score is measurably blind: a proposer trained in
+// sRGB beat it by 18.9 there. With the softened floor the weight also stops being flat below the
+// clamp, which is what the content-adaptive DarkFrac switch exists to paper over.
+//
+// Default is unchanged. FH6_WEXP ("exponent,eps") pins the alternative for A/Bs, including from the
+// studio, which has no flags: FH6_WEXP=1.3333,0.0025 is the lightness model.
+func PerceptualWeightExp() (expo, eps float64) {
+	expo, eps = 1.1666, 0
+	if s := os.Getenv("FH6_WEXP"); s != "" {
+		var e, p float64
+		if n, err := fmt.Sscanf(s, "%f,%f", &e, &p); n == 2 && err == nil && e > 0 && p >= 0 {
+			expo, eps = e, p
+		}
+	}
+	return expo, eps
+}
+
 // DarkFrac measures the fraction of pixels whose LINEAR luma sits below 0.02 — the dark-dominance
 // feature DarkWeightParams keys on. pixels is the linear RGBA plane (len w*h*4).
 func DarkFrac(pixels []float32) float64 {
@@ -537,16 +599,27 @@ func buildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr
 		// Dark-zone fidelity of the sRGB-derivative weight: the clamp/cap pair bounds how much the
 		// deep shadows may dominate, keyed on dark-dominance (single source: DarkWeightParams).
 		clampY, capF := DarkWeightParams(DarkFrac(prep.Pixels))
+		expo, eps := PerceptualWeightExp()
 		wp := make([]float32, w*h)
 		var sum float64
 		for i := 0; i < w*h; i++ {
 			y := 0.2126*prep.Pixels[i*4] + 0.7152*prep.Pixels[i*4+1] + 0.0722*prep.Pixels[i*4+2]
 			yd := float64(y)
-			if yd < clampY {
-				yd = clampY // clamp the dark blow-up of the sRGB derivative
+			var f float32
+			if eps > 0 {
+				// Lightness model: a softened singularity instead of a hard clamp, so the weight is
+				// continuous through the darks rather than flat below a threshold.
+				f = float32(math.Pow(yd+eps, -expo))
+			} else {
+				// Left as the original expression, not refactored into a single pow: greedy is an
+				// argmax, so even a last-digit change in the weight moves the trajectory. Rewriting
+				// 0.4396²·y^-1.1666 with a rounded constant shifted dE 7.42 -> 7.53 on img_9.
+				if yd < clampY {
+					yd = clampY // clamp the dark blow-up of the sRGB derivative
+				}
+				d := 0.4396 * math.Pow(yd, -0.5833) // d/dlin of 1.055*lin^(1/2.4)-0.055
+				f = float32(d * d)
 			}
-			d := 0.4396 * math.Pow(yd, -0.5833) // d/dlin of 1.055*lin^(1/2.4)-0.055
-			f := float32(d * d)
 			if f > float32(capF) {
 				f = float32(capF)
 			}
@@ -627,13 +700,15 @@ type ModeDefaults struct {
 	BigGlowAllKinds bool // let the swap eat big rects/triangles too, not just ellipses
 	RampGlow        bool // ramp-aware hotter glow swap: dissolve gradient patchwork with rimless glows where metric.RampMap flags a genuine gradient (needs RegionKinds)
 
-	SaliencyQuota    float64 // reserve this budget fraction for top-detail cells (eyes/faces); 0 = off
-	TermRegionWeight bool    // region-weighted FE/EAGLE polish terms: λ × (1−HardEdgeMap) — strong in smooth zones, ~zero on line-work
-	LooRefit         int     // exact leave-one-out prune→regrow→re-polish rounds after the polish (0 = off)
-	MergeRefit       bool    // merge near-duplicate pairs inside the LOO rounds (extra slot source; needs LooRefit>0)
-	RampWeight       float64 // boost the shape-budget weight in smooth-gradient (ramp) cells by (1+this·rampMap); 0 = off
-	AnalyticAlpha    bool    // analytic per-candidate alpha: eval picks the ΔSSE-min alpha from a grid over [alphaMin, 0.75] instead of a random draw
-	BestOf           int     // full-pipeline attempts with decorrelated seeds, keep the best (≤1 = single; never defaulted >1 — owner 2026-07-20: manual only, studio Advanced / CLI -best-of)
+	SaliencyQuota     float64 // reserve this budget fraction for top-detail cells (eyes/faces); 0 = off
+	TermRegionWeight  bool    // region-weighted FE/EAGLE polish terms: λ × (1−HardEdgeMap) — strong in smooth zones, ~zero on line-work
+	LooRefit          int     // exact leave-one-out prune→regrow→re-polish rounds after the polish (0 = off)
+	GlobalColorIters  int     // joint colour re-solve over the whole frozen stack after the LOO refit (0 = off)
+	GlobalAlphaSweeps int     // closed-form alpha sweeps alternating with that colour solve (0 = off)
+	MergeRefit        bool    // merge near-duplicate pairs inside the LOO rounds (extra slot source; needs LooRefit>0)
+	RampWeight        float64 // boost the shape-budget weight in smooth-gradient (ramp) cells by (1+this·rampMap); 0 = off
+	AnalyticAlpha     bool    // analytic per-candidate alpha: eval picks the ΔSSE-min alpha from a grid over [alphaMin, 0.75] instead of a random draw
+	BestOf            int     // full-pipeline attempts with decorrelated seeds, keep the best (≤1 = single; never defaulted >1 — owner 2026-07-20: manual only, studio Advanced / CLI -best-of)
 }
 
 // ModeDefaultsFor returns the tuned defaults for a resolved preset (anime|photo|flat). palette is the
@@ -683,8 +758,35 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// glows, while 0.30/0.80 is +1.0% at 99 — photo prefers the denser pair outright. NB one
 		// image, one seed: anime carries the 3x2 replication, photo rides its direction.
 		// REVERTED 2026-08-03 evening together with anime's — see the anime case.
+		// 2026-08-04: FOUR rounds, not two. The old comment below said the rounds converge at 2; on
+		// 3000-shape runs they do not. Measured on the owner's bench at 3000 (sRGB RMSE vs the
+		// source): img_9 -2.1%, img_10 -2.0%, img_24 -1.8%, img_5 unchanged (simple content, the
+		// refit saturates earlier there). Beyond four the loop stops itself -- 6, 8 and 10 rounds
+		// produce bit-identical output -- so this is the knee, not a bigger number picked for luck.
+		// Wall pays about +27%. FH6_LOO_ROUNDS overrides for A/Bs.
 		// LOO refit (see the anime case below for the measured rationale) — photo shares it.
-		d.LooRefit = 2
+		d.LooRefit = looRounds(4)
+		// Global joint colour re-solve (2026-08-05): after the LOO refit, every layer's RGB is
+		// re-solved AT ONCE for the frozen geometry, instead of each shape keeping the colour the
+		// greedy fitted against a canvas that later shapes have since overwritten. Compositing is
+		// exactly affine in the layer colours, so this is a convex box-constrained least-squares,
+		// not a heuristic. Measured at 1000 shapes, 4 images x 2 seeds, paired: dE better on 8 of 8,
+		// mean -5.3% (img_10 -8.2%, img_24 -7.4%, img_5 -2.9%, img_9 -1.7%); hard SSE -0.9..-4.8%.
+		// SSIM slips ~0.2% on nearly all of them — the solve minimises weighted SSE and gives back a
+		// little local contrast for it; named here rather than rounded away. 100 iterations is the
+		// converged setting thanks to the Jacobi rescaling (plain FISTA needed 1000 for the same
+		// number); costs ~5s. Geometry is untouched. FH6_GCOLOR pins it.
+		d.GlobalColorIters = globalColorIters(100)
+		// Alpha rides the same frozen stack (2026-08-05). The composite is affine in ONE layer's
+		// alpha exactly as it is in its colour, so the optimum is a closed-form least-squares rather
+		// than something Adam descends toward on a soft-coverage surrogate; the sweep is gated on the
+		// preset's organic alpha floor so it cannot re-open the hole the polish used to leave.
+		// Measured 4 images x 2 seeds against the colour-only default: better-or-equal on 8 of 8 for
+		// BOTH dE and SSIM, mean dE -0.22%. Small, but an exact solve on a fixed geometry has no
+		// direction to lose in, which is why it never regresses. Two sweeps converge — four measured
+		// bit-identical. FH6_GALPHA pins it.
+		d.GlobalAlphaSweeps = globalAlphaSweeps(2)
+
 	case "flat":
 		d.WeightStr = 0
 	default: // anime
@@ -785,7 +887,33 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// with ΔE/p95/SSIM ALL better on every image, both seeds. Rounds converge at 2 (round 3
 		// prunes nothing); each round is gated end-to-end so it can never regress. Wall +30-50%
 		// (the owner: quality over time). Flat keeps BackFit instead (unmeasured overlap).
-		d.LooRefit = 2
+		// 2026-08-04: FOUR rounds, not two. The old comment below said the rounds converge at 2; on
+		// 3000-shape runs they do not. Measured on the owner's bench at 3000 (sRGB RMSE vs the
+		// source): img_9 -2.1%, img_10 -2.0%, img_24 -1.8%, img_5 unchanged (simple content, the
+		// refit saturates earlier there). Beyond four the loop stops itself -- 6, 8 and 10 rounds
+		// produce bit-identical output -- so this is the knee, not a bigger number picked for luck.
+		// Wall pays about +27%. FH6_LOO_ROUNDS overrides for A/Bs.
+		d.LooRefit = looRounds(4)
+		// Global joint colour re-solve (2026-08-05): after the LOO refit, every layer's RGB is
+		// re-solved AT ONCE for the frozen geometry, instead of each shape keeping the colour the
+		// greedy fitted against a canvas that later shapes have since overwritten. Compositing is
+		// exactly affine in the layer colours, so this is a convex box-constrained least-squares,
+		// not a heuristic. Measured at 1000 shapes, 4 images x 2 seeds, paired: dE better on 8 of 8,
+		// mean -5.3% (img_10 -8.2%, img_24 -7.4%, img_5 -2.9%, img_9 -1.7%); hard SSE -0.9..-4.8%.
+		// SSIM slips ~0.2% on nearly all of them — the solve minimises weighted SSE and gives back a
+		// little local contrast for it; named here rather than rounded away. 100 iterations is the
+		// converged setting thanks to the Jacobi rescaling (plain FISTA needed 1000 for the same
+		// number); costs ~5s. Geometry is untouched. FH6_GCOLOR pins it.
+		d.GlobalColorIters = globalColorIters(100)
+		// Alpha rides the same frozen stack (2026-08-05). The composite is affine in ONE layer's
+		// alpha exactly as it is in its colour, so the optimum is a closed-form least-squares rather
+		// than something Adam descends toward on a soft-coverage surrogate; the sweep is gated on the
+		// preset's organic alpha floor so it cannot re-open the hole the polish used to leave.
+		// Measured 4 images x 2 seeds against the colour-only default: better-or-equal on 8 of 8 for
+		// BOTH dE and SSIM, mean dE -0.22%. Small, but an exact solve on a fixed geometry has no
+		// direction to lose in, which is why it never regresses. Two sweeps converge — four measured
+		// bit-identical. FH6_GALPHA pins it.
+		d.GlobalAlphaSweeps = globalAlphaSweeps(2)
 		// Analytic per-candidate alpha (2026-07-19 night), anime only: the eval epilogue re-solves
 		// the optimal color for a 6-point alpha grid over [alphaMin, 0.75] and keeps the ΔSSE-min
 		// pair — alpha becomes exact instead of ~U(alphaMin,1), at zero wall cost (the accumulators
@@ -1130,4 +1258,86 @@ func ParseKindWeights(csv string) []float32 {
 		out = append(out, float32(v))
 	}
 	return out
+}
+
+// looRounds lets a lab A/B pin the refit depth without a rebuild, as every baked default in this
+// engine is required to. FH6_LOO_ROUNDS = an integer; anything unparseable keeps the measured value.
+// globalColorIters resolves the joint colour re-solve's iteration budget. FH6_GCOLOR pins it for
+// A/Bs from the studio, which has no flags; 0 there disables the pass entirely.
+// globalAlphaSweeps resolves the closed-form alpha sweep count. FH6_GALPHA pins it; 0 disables.
+func globalAlphaSweeps(def int) int {
+	if v := os.Getenv("FH6_GALPHA"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func globalColorIters(def int) int {
+	if v := os.Getenv("FH6_GCOLOR"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func looRounds(def int) int {
+	if v := os.Getenv("FH6_LOO_ROUNDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
+}
+
+// maxInt keeps the shrunken AI batch from collapsing to nothing on already-small presets.
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// aiBlob/aiFrac/aiJitter carry the embedded proposer into the run when the toggle is on. The share
+// is the whole batch and the spread is small: the network emits a fixed set of modes per location,
+// so a batch drawn entirely from it would otherwise carry only a handful of distinct shapes, and
+// 0.02 was the spread that measured best. Every proposal is still scored exactly, so a weak model
+// costs time and can never corrupt the output.
+func aiBlob(on bool) []byte {
+	if !on {
+		return nil
+	}
+	return aimodel.Proposer
+}
+
+func aiFrac(on bool) float64 {
+	if !on {
+		return 0
+	}
+	return 1.0
+}
+
+func aiJitter(on bool) float64 {
+	if !on {
+		return 0
+	}
+	return 0.02
+}
+
+// feLambda / eagleLambda apply the EdgeTerms switch. Zeroing a lambda is the same thing the CLI does
+// with -polish-false-edge 0 / -polish-eagle 0, which is what the scan measured.
+func feLambda(c Choices, def float64) float64 {
+	if c.EdgeTerms == "no-fe" || c.EdgeTerms == "no-both" {
+		return 0
+	}
+	return def
+}
+
+func eagleLambda(c Choices, def float64) float64 {
+	if c.EdgeTerms == "no-eagle" || c.EdgeTerms == "no-both" {
+		return 0
+	}
+	return def
 }

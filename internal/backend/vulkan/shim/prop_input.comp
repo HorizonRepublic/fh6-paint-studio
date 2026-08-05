@@ -1,0 +1,49 @@
+#version 450
+// prop_input.comp — builds the proposer's 6-channel input plane from the target and the current
+// canvas. The network was trained on DISPLAY bytes, while the engine carries linear light, so the
+// encode has to happen here; feeding linear values straight in would shift every activation and the
+// ported network would behave unlike the one that was measured.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly  buffer Tg { float target[]; };  // RGBA, w*h*4
+layout(std430, binding = 1) readonly  buffer Cv { float canvas[]; };  // RGBA, w*h*4
+layout(std430, binding = 2) writeonly buffer Ot { float dst[]; };     // planar 6 x h x w
+layout(push_constant) uniform PC { int w, h, ow, oh; float scale; } pc;
+
+float toSRGB(float v) {
+    v = clamp(v, 0.0, 1.0);
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+// The network is fed a DOWNSCALED canvas, by exactly the factor its training windows were reduced
+// by (context window -> network input). Running it at 1:1 was measured as a double failure: it sees a
+// window several times smaller than anything it was trained on, so its extents come out at the wrong
+// scale, and the sweep costs the square of the factor in time (20 s per run instead of ~1 s).
+// Box-averaging over the source footprint, matching the area resize used to build the training data.
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.ow || y >= pc.oh) return;
+    int sx0 = int(float(x) * pc.scale), sx1 = int(float(x + 1) * pc.scale);
+    int sy0 = int(float(y) * pc.scale), sy1 = int(float(y + 1) * pc.scale);
+    sx1 = max(sx1, sx0 + 1); sy1 = max(sy1, sy0 + 1);
+    sx1 = min(sx1, pc.w); sy1 = min(sy1, pc.h);
+    vec3 t = vec3(0.0), c = vec3(0.0);
+    float n = 0.0;
+    for (int sy = sy0; sy < sy1; sy++) {
+        for (int sx = sx0; sx < sx1; sx++) {
+            int si = (sy * pc.w + sx) * 4;
+            t += vec3(target[si], target[si + 1], target[si + 2]);
+            c += vec3(canvas[si], canvas[si + 1], canvas[si + 2]);
+            n += 1.0;
+        }
+    }
+    if (n <= 0.0) return;
+    t /= n; c /= n;
+    int i = y * pc.ow + x;
+    int plane = pc.ow * pc.oh;
+    for (int k = 0; k < 3; k++) {
+        dst[k * plane + i] = toSRGB(t[k]);
+        dst[(3 + k) * plane + i] = toSRGB(c[k]);
+    }
+}

@@ -150,26 +150,36 @@ type AppState struct {
 	PresetCards  []widget.Clickable
 	Alpha        widget.Bool
 	Backfit      widget.Bool
-	Boundary     widget.Bool   // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
-	KeepInside   widget.Bool   // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
-	SourceRes    widget.Bool   // fit the ENGINE at the image's original resolution instead of the working cap — maximum detail on large sources, much slower (display stays at the working size)
-	Mono         widget.Bool   // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
-	Economy      widget.Bool   // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
-	BestOfEd     widget.Editor // best-of-N seeds: rerun the WHOLE pipeline N times, keep the best (blank/1 = single run; seed spread ~6%)
-	Seed         widget.Editor
+	Boundary     widget.Bool // boundary-aware radius — smoother gradients on character/photo liveries (opt-in)
+	KeepInside   widget.Bool // generate against a transparent surround so the spill-penalty keeps every shape INSIDE the image (no edge bleed); the result is mapped back to the original size (no frame artefact)
+	SourceRes    widget.Bool // fit the ENGINE at the image's original resolution instead of the working cap — maximum detail on large sources, much slower (display stays at the working size)
+	AIFast       widget.Bool // neural candidate proposer: the engine reaches ~the same result on a
+	//                            quarter of the candidates, so generation is markedly faster for a
+	//                            small, measured error cost — a trade, hence a toggle and not a default
+	NoEagle widget.Bool // drop the contour polish term. A 16-image knob scan found it helps on
+	//                         about half the pictures and hurts on the rest, range about ±3% — one of
+	//                         only two knobs whose sign is not consistent, hence a toggle to judge by eye
+	NoFalseEdge widget.Bool   // drop the false-edge polish term; same split, same magnitude
+	Mono        widget.Bool   // MONO single-colour logo/decal: force every shape to one solid colour (auto-detected) on a clean cutout — no grey antialiased-edge shapes
+	Economy     widget.Bool   // OPT-IN economy/co-adaptation schedule at low budgets — better quality, much slower (off by default)
+	BestOfEd    widget.Editor // best-of-N seeds: rerun the WHOLE pipeline N times, keep the best (blank/1 = single run; seed spread ~6%)
+	Seed        widget.Editor
 
-	AlphaHint      Hint
-	BackfitHint    Hint
-	BoundaryHint   Hint
-	KeepInsideHint Hint
-	SourceResHint  Hint
-	MonoHint       Hint
-	EconomyHint    Hint
-	BestOfHint     Hint
-	BudgetHint     Hint
-	ModeHint       Hint
-	InkHint        Hint
-	SeedHint       Hint
+	AlphaHint       Hint
+	BackfitHint     Hint
+	BoundaryHint    Hint
+	KeepInsideHint  Hint
+	SourceResHint   Hint
+	AIFastHint      Hint
+	NoEagleHint     Hint
+	NoFalseEdgeHint Hint
+	MonoHint        Hint
+	EconomyHint     Hint
+	BestOfHint      Hint
+	BudgetHint      Hint
+	ModeHint        Hint
+	InkHint         Hint
+	SeedHint        Hint
 
 	// advanced
 	AdvClick  widget.Clickable
@@ -791,6 +801,20 @@ func (s *AppState) Choices() preset.Choices {
 		c.MonoColor = "auto"
 	}
 	c.Economy = s.Economy.Value // opt-in low-budget co-adaptation (slow); curated toggle, applied in both modes
+	// Same curated treatment: the AI proposer keeps applying when Advanced is collapsed, because a
+	// user who turned it on wants faster generations, not a setting that quietly lapses.
+	c.AIFast = s.AIFast.Value
+	// The two edge terms travel as one string so the resolver has a single place to read them.
+	switch {
+	case s.NoEagle.Value && s.NoFalseEdge.Value:
+		c.EdgeTerms = "no-both"
+	case s.NoEagle.Value:
+		c.EdgeTerms = "no-eagle"
+	case s.NoFalseEdge.Value:
+		c.EdgeTerms = "no-fe"
+	default:
+		c.EdgeTerms = ""
+	}
 	// Best-of-N seeds (Advanced, curated like Mono/Economy — keeps applying when collapsed): rerun
 	// the whole pipeline N times, keep the best final error. Clamped so a typo can't queue 40 runs.
 	if v := editorPosInt(&s.BestOfEd); v > 1 {

@@ -75,7 +75,7 @@ func randRange(rng *rand.Rand, lo, hi float32) float32 { return lo + (hi-lo)*rng
 // the livery editor natively supports 8-bit per-layer alpha). Opaque-only
 // (allowAlpha=false) is kept for cutout images, where the reconstructed object must
 // stay fully opaque.
-func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weights []float32, s *ErrorSampler, progress float32, orient []float32, allowAlpha bool, alphaMin, aspectMax float32, bc *boundaryCtx, kg *kindGate) []model.Candidate {
+func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weights []float32, s *ErrorSampler, progress float32, orient, coh []float32, aspectCap float32, allowAlpha bool, alphaMin, aspectMax float32, bc *boundaryCtx, kg *kindGate) []model.Candidate {
 	if len(kinds) == 0 {
 		kinds = []model.ShapeKind{model.KindEllipse}
 	}
@@ -109,7 +109,7 @@ func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weig
 				defer wg.Done()
 				r := rand.New(rand.NewSource(seed))
 				for i := lo; i < hi; i++ {
-					out[i] = genCandidate(r, w, h, kinds, kindCDF, s, maxR, orient, allowAlpha, alphaMin, aspectMax, progress, bc, kg)
+					out[i] = genCandidate(r, w, h, kinds, kindCDF, s, maxR, orient, coh, aspectCap, allowAlpha, alphaMin, aspectMax, progress, bc, kg)
 				}
 			}(lo, hi, seeds[wk])
 		}
@@ -117,14 +117,14 @@ func RandomShapes(rng *rand.Rand, w, h, count int, kinds []model.ShapeKind, weig
 		return out
 	}
 	for i := 0; i < count; i++ {
-		out[i] = genCandidate(rng, w, h, kinds, kindCDF, s, maxR, orient, allowAlpha, alphaMin, aspectMax, progress, bc, kg)
+		out[i] = genCandidate(rng, w, h, kinds, kindCDF, s, maxR, orient, coh, aspectCap, allowAlpha, alphaMin, aspectMax, progress, bc, kg)
 	}
 	return out
 }
 
 // genCandidate produces one error-biased, kind-weighted, orientation-seeded
 // candidate (color left zero; the backend solves the optimal color).
-func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []float32, s *ErrorSampler, maxR float32, orient []float32, allowAlpha bool, alphaMin, aspectMax, progress float32, bc *boundaryCtx, kg *kindGate) model.Candidate {
+func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []float32, s *ErrorSampler, maxR float32, orient, coh []float32, aspectCap float32, allowAlpha bool, alphaMin, aspectMax, progress float32, bc *boundaryCtx, kg *kindGate) model.Candidate {
 	x, y := s.Sample(r)
 	x = clampF(x, 0, float32(w-1))
 	y = clampF(y, 0, float32(h-1))
@@ -140,6 +140,19 @@ func genCandidate(r *rand.Rand, w, h int, kinds []model.ShapeKind, kindCDF []flo
 		idx := int(y)*w + int(x)
 		if idx >= 0 && idx < len(orient) {
 			theta = orient[idx] + randRange(r, -20, 20) // seed along edge, small jitter
+			// Coherence prior: where the structure tensor is confident the jitter narrows and the
+			// candidate is drawn elongated ALONG that direction; where it is not, the angle means
+			// nothing, so the jitter opens up and the shape stays round. Seeding orientation without
+			// this treats a flat region's noise angle as if it were an edge.
+			if coh != nil && aspectCap > 1 && idx < len(coh) {
+				k := coh[idx]
+				theta = orient[idx] + randRange(r, -20, 20)*(1-0.75*k)
+				// REPLACES the preset's global aspect rather than widening it. The global value is
+				// applied everywhere today, including flat regions where the seeding angle is noise,
+				// so taking a maximum here would leave that exact case untouched and make the prior
+				// a no-op wherever the preset is already permissive.
+				aspectMax = 1 + k*(aspectCap-1)
+			}
 		}
 	}
 	alpha := float32(1)
@@ -244,7 +257,7 @@ func randomShapeOfKind(rng *rand.Rand, kind model.ShapeKind, cx, cy, maxR, w, h,
 
 // RandomEllipses is a Segment-1 compatibility wrapper for ellipse-only generation.
 func RandomEllipses(rng *rand.Rand, w, h, count int, s *ErrorSampler, progress float32) []model.Candidate {
-	return RandomShapes(rng, w, h, count, []model.ShapeKind{model.KindEllipse}, nil, s, progress, nil, false, 1, 0, nil, nil)
+	return RandomShapes(rng, w, h, count, []model.ShapeKind{model.KindEllipse}, nil, s, progress, nil, nil, 0, false, 1, 0, nil, nil)
 }
 
 // MutateShape perturbs the geometry of a base candidate per kind (color is

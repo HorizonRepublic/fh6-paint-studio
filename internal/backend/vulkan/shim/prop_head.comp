@@ -1,0 +1,88 @@
+#version 450
+// prop_head.comp — turns the trunk's feature map into the proposal map the generator samples from.
+//
+// In training, a 64x64 patch went through a trunk of total stride 8 and was then averaged globally,
+// i.e. over exactly 8x8 feature cells. Sliding that same 8x8 average with stride 1 over the whole
+// feature map therefore produces, at every position, the identical pooled vector the patch form
+// would have produced for the patch centred there. The linear layers that follow become 1x1
+// convolutions. This equality is what makes one canvas-wide pass legitimate, and it is checked
+// numerically against the torch model before this shader is trusted.
+//
+// Output per location: one block per head of (6 geometry + alpha + CONFIDENCE), already squashed into
+// the same ranges the training graph used, so the generator can consume them without knowing anything
+// about the network. Confidence is the head's predicted advantage over what uniform sampling finds
+// here, left unsquashed: the generator compares it against zero, so its sign is the whole message.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) readonly  buffer F  { float feat[]; };   // planar C x fh x fw
+layout(std430, binding = 1) readonly  buffer Wm { float wmix[]; };   // (4w) x (4w+1)
+layout(std430, binding = 2) readonly  buffer Bm { float bmix[]; };
+layout(std430, binding = 3) readonly  buffer Wg { float wgeo[]; };   // (heads*6) x (4w)
+layout(std430, binding = 4) readonly  buffer Bg { float bgeo[]; };
+layout(std430, binding = 5) readonly  buffer Wa { float walp[]; };   // heads x (4w)
+layout(std430, binding = 6) readonly  buffer Ba { float balp[]; };
+layout(std430, binding = 7) writeonly buffer Ot { float prop[]; };   // (heads*8) x ph x pw
+layout(std430, binding = 8) readonly  buffer Wc { float wcnf[]; };   // heads x (4w)
+layout(std430, binding = 9) readonly  buffer Bc { float bcnf[]; };
+layout(push_constant) uniform PC {
+    int chan, fw, fh, pw, ph, heads, pool;
+    float progress;
+} pc;
+
+float silu(float v) { return v / (1.0 + exp(-v)); }
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.pw || y >= pc.ph) return;
+
+    // Pooled trunk vector for this location, plus the run's progress as the extra input the mix
+    // layer was trained with (the candidate distribution moves with progress, so the network is
+    // told where in the run it is).
+    float inv = 1.0 / float(pc.pool * pc.pool);
+    float pooled[192];
+    int c = min(pc.chan, 192);
+    for (int i = 0; i < c; i++) {
+        float s = 0.0;
+        int plane = i * pc.fh * pc.fw;
+        for (int dy = 0; dy < pc.pool; dy++) {
+            int row = plane + (y + dy) * pc.fw + x;
+            for (int dx = 0; dx < pc.pool; dx++) s += feat[row + dx];
+        }
+        pooled[i] = s * inv;
+    }
+
+    float mixed[192];
+    for (int o = 0; o < c; o++) {
+        float s = bmix[o];
+        int wo = o * (c + 1);
+        for (int i = 0; i < c; i++) s += pooled[i] * wmix[wo + i];
+        s += pc.progress * wmix[wo + c];
+        mixed[o] = silu(s);
+    }
+
+    int stride = pc.ph * pc.pw;
+    int base = y * pc.pw + x;
+    for (int hd = 0; hd < pc.heads; hd++) {
+        for (int k = 0; k < 6; k++) {
+            int o = hd * 6 + k;
+            float s = bgeo[o];
+            int wo = o * c;
+            for (int i = 0; i < c; i++) s += mixed[i] * wgeo[wo + i];
+            // Same squashing as the training graph: centres inside the patch, extents a bounded
+            // fraction of it, angle as a doubled-angle sin/cos pair.
+            float v;
+            if (k < 2)      v = tanh(s) * 0.5;
+            else if (k < 4) v = 1.0 / (1.0 + exp(-s)) * 0.5 + 0.01;
+            else            v = tanh(s);
+            prop[(hd * 8 + k) * stride + base] = v;
+        }
+        float sa = balp[hd];
+        int wa = hd * c;
+        for (int i = 0; i < c; i++) sa += mixed[i] * walp[wa + i];
+        prop[(hd * 8 + 6) * stride + base] = (1.0 / (1.0 + exp(-sa))) * 0.7 + 0.30;
+        float sc = bcnf[hd];
+        for (int i = 0; i < c; i++) sc += mixed[i] * wcnf[wa + i];
+        prop[(hd * 8 + 7) * stride + base] = sc;
+    }
+}

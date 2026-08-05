@@ -171,3 +171,50 @@ func itoa(n int) string {
 	}
 	return string(d)
 }
+
+// TestPolishHonoursAlphaFloor pins the fix for the floor the descent used to ignore: the greedy
+// places candidates above the preset's organic alpha floor, and the polish optimised alpha freely
+// down to a hard-coded 0.05. The target here is the background itself, so every shape is pure cost
+// and the descent's cheapest move is to fade them all out - exactly the case the floor must survive.
+func TestPolishHonoursAlphaFloor(t *testing.T) {
+	w, h := 24, 20
+	bg := model.RGBA{R: 0.2, G: 0.5, B: 0.7, A: 1}
+	target := make([]float32, w*h*4)
+	weight := make([]float32, w*h)
+	for i := 0; i < w*h; i++ {
+		target[i*4+0], target[i*4+1], target[i*4+2], target[i*4+3] = bg.R, bg.G, bg.B, 1
+		weight[i] = 1
+	}
+	var shapes []model.Shape
+	for i := 0; i < 4; i++ {
+		c := model.Candidate{
+			Kind:  model.KindEllipse,
+			P:     [6]float32{float32(4 + 5*i), 10, 4, 3, 0, 0},
+			Color: model.RGBA{R: 0.9, G: 0.1, B: 0.1, A: 0.6},
+		}
+		shapes = append(shapes, c.ToShape(0))
+	}
+	const floor = 0.3
+	pr := Polish(shapes, target, weight, w, h, bg, false, PolishOptions{
+		Iters: 150, Tau0: 2.0, Tau1: 0.15,
+		LRPos: 0.5, LRRad: 0.5, LRAng: 0.5, LRColor: 0.01, LRAlpha: 0.05,
+		GradClip: 8, AlphaMin: floor,
+	})
+	for i, s := range pr.Shapes {
+		if a := float64(s.Color[3]) / 255; a < floor-1.0/255 {
+			t.Errorf("shape %d alpha = %.4f, below the floor %.2f the polish was given", i, a, floor)
+		}
+	}
+}
+
+// TestPolishAlphaFloorUnsetKeepsHistoricalBound guards the compatibility half of the same fix: a
+// caller that threads no floor must still get the 0.05 bound, so every path that has not been
+// measured with a floor stays bit-identical.
+func TestPolishAlphaFloorUnsetKeepsHistoricalBound(t *testing.T) {
+	if got := (PolishOptions{}).alphaFloor(); got != 0.05 {
+		t.Errorf("unset alphaFloor() = %v, want the historical 0.05", got)
+	}
+	if got := (PolishOptions{AlphaMin: 0.3}).alphaFloor(); got != 0.3 {
+		t.Errorf("alphaFloor() = %v, want the threaded 0.3", got)
+	}
+}

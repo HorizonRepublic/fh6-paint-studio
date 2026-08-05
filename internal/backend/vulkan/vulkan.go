@@ -17,6 +17,7 @@ package vulkan
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"unsafe"
 
@@ -67,9 +68,11 @@ type Vulkan struct {
 	procSearchRand *windows.Proc
 	procSearchMom  *windows.Proc
 	procSetOrient  *windows.Proc
+	procSetCoh     *windows.Proc
 	procSetBound   *windows.Proc
 	// joint-polish device primitives
 	procGradients, procSetMasks,
+	procSetProp, procPropOn, procPropGate, procRunProp, procPropMap, procPropDims,
 	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolLD, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procBigGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
 }
@@ -115,6 +118,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		procSearchRand:  proc("fp_search_random"),
 		procSearchMom:   proc("fp_search_moment"),
 		procSetOrient:   proc("fp_set_orient"),
+		procSetCoh:      proc("fp_set_coherence"),
 		procSetBound:    proc("fp_set_boundary_dist"),
 		procPolSetup:    proc("fp_polish_setup"),
 		procPolSTE:      proc("fp_set_polish_ste"),
@@ -141,6 +145,12 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procBigGlow, _ = dll.FindProc("fp_set_big_glow")        // optional: size-conditioned glow swap
 	g.procAlphaGrid, _ = dll.FindProc("fp_set_alpha_grid")    // optional: analytic-alpha grid in the eval epilogue
 	g.procTermW, _ = dll.FindProc("fp_set_term_weight")       // optional: region-weighted FE/EAGLE map
+	g.procSetProp, _ = dll.FindProc("fp_set_proposer")        // optional: neural candidate proposer weights
+	g.procPropOn, _ = dll.FindProc("fp_set_proposer_enabled") // optional: enable + progress + batch share
+	g.procPropGate, _ = dll.FindProc("fp_set_proposer_gate")  // optional: learned gate instead of the region gate
+	g.procRunProp, _ = dll.FindProc("fp_run_proposer")        // optional: refresh the proposal map
+	g.procPropMap, _ = dll.FindProc("fp_proposer_map")        // test-only: read the map back
+	g.procPropDims, _ = dll.FindProc("fp_proposer_dims")      // test-only: map dimensions
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -159,6 +169,83 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	}
 	g.uploadMasks()
 	return g, nil
+}
+
+// SetProposer installs the trained candidate proposer (the blob written by export_weights.py), or
+// clears it with nil. false = the DLL predates the feature, so the caller keeps the random search.
+//
+// The network only ever narrows WHICH candidates get scored; each one is still scored exactly by the
+// same eval, so a weak or stale network costs wall-clock and cannot damage the result.
+func (g *Vulkan) SetProposer(blob []byte) bool {
+	if g.procSetProp == nil {
+		return false
+	}
+	if len(blob) == 0 {
+		r, _, _ := g.procSetProp.Call(0, 0)
+		return r != 0
+	}
+	r, _, _ := g.procSetProp.Call(uintptr(unsafe.Pointer(&blob[0])), uintptr(len(blob)))
+	runtime.KeepAlive(blob)
+	return r != 0
+}
+
+// SetProposerGate switches the decision of WHERE proposals are used from the hand-made region gate
+// to the network's own confidence head. Reports false on a shim that predates the head.
+func (g *Vulkan) SetProposerGate(on bool, tau float32) bool {
+	if g.procPropGate == nil {
+		return false
+	}
+	v := uintptr(0)
+	if on {
+		v = 1
+	}
+	g.procPropGate.Call(v, uintptr(math.Float32bits(tau)))
+	return true
+}
+
+// SetProposerEnabled turns the installed network on for the run. frac is the share of each candidate
+// batch drawn from it; the rest stays uniform-random, so the search never loses the exploration that
+// covers whatever the network is wrong about. jitter spreads the batch around each proposal -- the
+// network emits a fixed set of modes per location, so without it every candidate that picks the same
+// head is the same shape and a large batch carries only a handful of distinct proposals.
+func (g *Vulkan) SetProposerEnabled(on bool, progress, frac, jitter float32) bool {
+	if g.procPropOn == nil {
+		return false
+	}
+	v := uintptr(0)
+	if on {
+		v = 1
+	}
+	g.procPropOn.Call(v, uintptr(math.Float32bits(progress)), uintptr(math.Float32bits(frac)),
+		uintptr(math.Float32bits(jitter)))
+	return true
+}
+
+// RunProposer refreshes the proposal map from the current canvas. The canvas moves slowly between
+// adjacent shapes, so the caller refreshes every N steps rather than every step.
+func (g *Vulkan) RunProposer(progress float32) bool {
+	if g.procRunProp == nil {
+		return false
+	}
+	r, _, _ := g.procRunProp.Call(uintptr(math.Float32bits(progress)))
+	return r != 0
+}
+
+// ProposerMap reads the proposal map back. Test-only: the generator consumes it on the device.
+func (g *Vulkan) ProposerMap() ([]float32, [4]int32, bool) {
+	var dims [4]int32
+	if g.procPropMap == nil || g.procPropDims == nil {
+		return nil, dims, false
+	}
+	g.procPropDims.Call(uintptr(unsafe.Pointer(&dims[0])))
+	n := int(dims[0]) * int(dims[1]) * int(dims[2]) * 8
+	if n <= 0 {
+		return nil, dims, false
+	}
+	out := make([]float32, n)
+	r, _, _ := g.procPropMap.Call(uintptr(unsafe.Pointer(&out[0])), uintptr(n))
+	runtime.KeepAlive(out)
+	return out, dims, int(r) == n
 }
 
 func fptr(s []float32) uintptr {
@@ -589,6 +676,26 @@ func b2i32(b bool) int32 {
 		return 1
 	}
 	return 0
+}
+
+// SetCoherence uploads the structure tensor's per-pixel coherence and the maximum aspect ratio at
+// full coherence, so the on-device generator can decide how ELONGATED a candidate should be rather
+// than applying one global aspect everywhere. A nil map (or cap <= 1) clears it. Returns false when
+// the DLL predates the export, which lets the caller keep the host path instead of silently running
+// without the prior.
+func (g *Vulkan) SetCoherence(coh []float32, aspectCap float32) bool {
+	if g.procSetCoh == nil {
+		return false
+	}
+	p := [1]float32{aspectCap}
+	if len(coh) != g.w*g.h || aspectCap <= 1 {
+		g.procSetCoh.Call(0, 0)
+		return true
+	}
+	g.procSetCoh.Call(fptr(coh), fptr(p[:]))
+	runtime.KeepAlive(coh)
+	runtime.KeepAlive(p[:])
+	return true
 }
 
 // SetOrient uploads the per-pixel edge-orientation map (degrees, len w*h) for the on-device

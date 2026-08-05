@@ -1,0 +1,82 @@
+#version 450
+// conv3x3.comp — one 3x3 convolution layer of the candidate proposer, with the BatchNorm already
+// folded into the weights and an optional SiLU. The whole trunk is six dispatches of this shader
+// ping-ponging between two buffers, which keeps the port to ONE piece of GLSL to get right.
+//
+// Feature maps are planar: index = (c * H + y) * W + x. Weights are [outC][inC][3][3].
+//
+// Why the network runs over the whole canvas at all: the engine cannot afford a forward pass per
+// candidate, so the trunk runs once and every candidate location reads its proposal out of the
+// resulting map. That is only equivalent to per-patch inference because every operator here is
+// translation-equivariant — convolution and a folded BatchNorm are, which is why the training script
+// had to move off GroupNorm.
+//
+// TILED through shared memory, because this shader decides whether the feature is usable on a weak
+// GPU at all. The naive form re-read every input pixel nine times from global memory and cost ~150 ms
+// per canvas sweep on an RTX 5080 — which would be over a second on the cards this has to run on.
+// Here each workgroup stages its input tile (plus a one-pixel halo) once per input channel and every
+// thread reads its nine taps out of shared memory.
+
+#define TILE 16
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+layout(std430, binding = 0) readonly  buffer In  { float src[]; };
+layout(std430, binding = 1) writeonly buffer Out { float dst[]; };
+layout(std430, binding = 2) readonly  buffer W   { float wt[]; };
+layout(std430, binding = 3) readonly  buffer B   { float bs[]; };
+layout(push_constant) uniform PC {
+    int inC, outC, inW, inH, outW, outH, stride, act;
+} pc;
+
+// Worst case is stride 2: a TILE-wide output tile spans TILE*2 input pixels plus the 3x3 halo.
+shared float tile[(TILE * 2 + 2) * (TILE * 2 + 2)];
+
+float silu(float v) { return v / (1.0 + exp(-v)); }
+
+void main() {
+    int ox = int(gl_GlobalInvocationID.x);
+    int oy = int(gl_GlobalInvocationID.y);
+    int oc = int(gl_GlobalInvocationID.z);
+    int lx = int(gl_LocalInvocationID.x);
+    int ly = int(gl_LocalInvocationID.y);
+
+    // Origin of this workgroup's input tile. Padding is 1 in the training graph, so the window for
+    // output (ox, oy) starts at ox*stride - 1.
+    int tileX = int(gl_WorkGroupID.x) * TILE * pc.stride - 1;
+    int tileY = int(gl_WorkGroupID.y) * TILE * pc.stride - 1;
+    int tileW = TILE * pc.stride + 2;
+
+    bool live = (ox < pc.outW && oy < pc.outH && oc < pc.outC);
+    float acc = live ? bs[oc] : 0.0;
+    int wbase = oc * pc.inC * 9;
+
+    for (int ic = 0; ic < pc.inC; ic++) {
+        // Stage the tile cooperatively: TILE*TILE threads walk the (TILE*stride+2)^2 window.
+        int plane = ic * pc.inH * pc.inW;
+        int total = tileW * tileW;
+        for (int i = ly * TILE + lx; i < total; i += TILE * TILE) {
+            int tx = i % tileW, ty = i / tileW;
+            int sx = tileX + tx, sy = tileY + ty;
+            float v = 0.0; // zero padding outside the map, matching the training graph
+            if (sx >= 0 && sx < pc.inW && sy >= 0 && sy < pc.inH) v = src[plane + sy * pc.inW + sx];
+            tile[i] = v;
+        }
+        barrier();
+
+        if (live) {
+            int bx = lx * pc.stride, by = ly * pc.stride;
+            int wo = wbase + ic * 9;
+            for (int ky = 0; ky < 3; ky++) {
+                int row = (by + ky) * tileW + bx;
+                acc += tile[row]     * wt[wo + ky * 3]
+                     + tile[row + 1] * wt[wo + ky * 3 + 1]
+                     + tile[row + 2] * wt[wo + ky * 3 + 2];
+            }
+        }
+        barrier(); // the next channel overwrites the tile, so no thread may still be reading it
+    }
+
+    if (!live) return;
+    if (pc.act != 0) acc = silu(acc);
+    dst[(oc * pc.outH + oy) * pc.outW + ox] = acc;
+}

@@ -22,7 +22,7 @@ func TestKindGateForcesEllipseInSmoothRegions(t *testing.T) {
 	glowTau, glowProb := resolveSmoothGlow(0, 0)
 	kgSmooth := &kindGate{hard: flat, w: w, h: h, tau: glowTau, prob: glowProb}
 	sawGlow := false
-	for _, c := range RandomShapes(rng, w, h, 100, kinds, nil, s, 0, nil, false, 1, 0, nil, kgSmooth) {
+	for _, c := range RandomShapes(rng, w, h, 100, kinds, nil, s, 0, nil, nil, 0, false, 1, 0, nil, kgSmooth) {
 		switch c.Kind {
 		case model.KindEllipse:
 		case model.KindGlow:
@@ -41,7 +41,7 @@ func TestKindGateForcesEllipseInSmoothRegions(t *testing.T) {
 	}
 	kgHard := &kindGate{hard: ones, w: w, h: h, tau: glowTau, prob: glowProb}
 	sawTri, sawRect := false, false
-	for _, c := range RandomShapes(rng, w, h, 200, kinds, nil, s, 0, nil, false, 1, 0, nil, kgHard) {
+	for _, c := range RandomShapes(rng, w, h, 200, kinds, nil, s, 0, nil, nil, 0, false, 1, 0, nil, kgHard) {
 		switch c.Kind {
 		case model.KindTriangle:
 			sawTri = true

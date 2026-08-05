@@ -161,7 +161,14 @@ func scoreGeometryJSON(be backend.Backend, jsonPath string, target []float32, w,
 			c = model.Candidate{Kind: model.KindFromType(s.Type), P: model.ParamsFromShape(s)}
 		}
 		if len(s.Color) >= 4 {
-			c.Color = model.RGBA{R: float32(s.Color[0]) / 255, G: float32(s.Color[1]) / 255, B: float32(s.Color[2]) / 255, A: float32(s.Color[3]) / 255}
+			// DecChan, not a raw /255: the stored byte is sRGB and the backend composites in the
+			// WORKING space, so skipping the decode brightens every layer under linear light. The
+			// error that introduces grows with the stack, which is why this mode's SSE used to RISE
+			// as shapes were added while an independent RMSE fell. Alpha is stored straight.
+			c.Color = model.RGBA{
+				R: model.DecChan(s.Color[0]), G: model.DecChan(s.Color[1]),
+				B: model.DecChan(s.Color[2]), A: float32(s.Color[3]) / 255,
+			}
 		} else {
 			c.Color.A = 1
 		}

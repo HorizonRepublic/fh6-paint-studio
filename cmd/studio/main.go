@@ -133,6 +133,9 @@ func loop(w *app.Window) error {
 	if prefs.KeepInside != nil {
 		st.KeepInside.Value = *prefs.KeepInside
 	}
+	if prefs.AIFast != nil {
+		st.AIFast.Value = *prefs.AIFast
+	}
 	if prefs.SourceRes != nil {
 		st.SourceRes.Value = *prefs.SourceRes
 	}
@@ -199,9 +202,10 @@ func loop(w *app.Window) error {
 		on := st.SoundOn.Value
 		keep := st.KeepInside.Value
 		srcRes := st.SourceRes.Value
+		aiFast := st.AIFast.Value
 		chk := st.AutoUpdate.Value
 		c := studioConfig{SoundOnDone: &on, Preset: st.Mode.Value(), Budget: st.BudgetShapes(),
-			KeepInside: &keep, SourceRes: &srcRes, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
+			KeepInside: &keep, SourceRes: &srcRes, AIFast: &aiFast, CheckUpdates: &chk, LastUpdateCheck: lastUpdateCheck,
 			LastSeenVersion: st.LastSeen, Locale: i18n.Current()}
 		if winW >= 960 && winH >= 640 {
 			c.WindowW, c.WindowH = winW, winH
@@ -807,6 +811,9 @@ func loop(w *app.Window) error {
 				savePrefs()
 			}
 			if st.SourceRes.Update(gtx) { // persist the "use source resolution" toggle the moment it changes
+				savePrefs()
+			}
+			if st.AIFast.Update(gtx) { // persist the AI-proposer toggle the moment it changes
 				savePrefs()
 			}
 			if st.InjectLayersErr { // clear the red FH6-layers highlight once a valid count is entered
