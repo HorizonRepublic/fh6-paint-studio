@@ -30,6 +30,17 @@ class _InjectPopoverState extends State<InjectPopover> {
   );
 
   @override
+  void initState() {
+    super.initState();
+    // Opening the panel is the user saying "I want to inject", so it must not
+    // open showing the last write's verdict. Deferred past the first frame
+    // because this notifies listeners and the tree is still building.
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => widget.studio.clearInjectResult(),
+    );
+  }
+
+  @override
   void dispose() {
     _layers.dispose();
     super.dispose();
