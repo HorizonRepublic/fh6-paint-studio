@@ -52,7 +52,7 @@ func TestGenerateOverTheWire(t *testing.T) {
 	ch := preset.DefaultChoices()
 	ch.Shapes = 12
 	ch.Mode = "flat"
-	_, err := c.Generate(GenerateParams{Path: src, MaxRes: 64, Choices: ch, Output: out}, func(u Update) {
+	_, err := c.Generate(GenerateParams{Path: src, DisplayRes: 64, Choices: ch, Output: out}, func(u Update) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch u.Kind {
@@ -87,6 +87,11 @@ func TestGenerateOverTheWire(t *testing.T) {
 		if d.GeometryPath != out {
 			t.Errorf("done geometry path = %q, want %q", d.GeometryPath, out)
 		}
+		// The dimensions the geometry is expressed in have to travel with it: a client that has to
+		// re-derive them from the source file gets a cropped or high-resolution run wrong.
+		if d.Width <= 0 || d.Height <= 0 {
+			t.Errorf("done carried dimensions %dx%d", d.Width, d.Height)
+		}
 		if _, err := os.Stat(out); err != nil {
 			t.Errorf("geometry not written: %v", err)
 		}
@@ -109,6 +114,74 @@ func TestGenerateOverTheWire(t *testing.T) {
 	}
 	if frameW == 0 || frameH == 0 {
 		t.Errorf("frame arrived with dimensions %dx%d", frameW, frameH)
+	}
+}
+
+// TestRegionAndSurroundSurviveTheWire pins the two things a client cannot verify for itself.
+//
+// A REGION is an absolute rectangle, and a service that ignored it would return a completely
+// convincing reconstruction of the wrong part of the picture — the failure gives no signal at all.
+// The keep-inside SURROUND is the mirror case: the engine fits a larger, padded image, and if the
+// padding is not taken back off the geometry, every shape is offset by the border width.
+//
+// Both are asserted through the dimensions the run reports, because those are what a client uses to
+// export and inject: they must describe the region the user asked for, with no surround in them.
+func TestRegionAndSurroundSurviveTheWire(t *testing.T) {
+	defer func(prev bool) { model.LinearLight = prev }(model.LinearLight)
+	model.LinearLight = true
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.png")
+	writeTestImage(t, src, 64, 48)
+
+	cli, srv := net.Pipe()
+	go func() { _ = NewServer(srv, srv).Serve() }()
+	c := NewClient(cli, cli)
+	go func() { _ = c.Listen() }()
+
+	ch := preset.DefaultChoices()
+	ch.Shapes = 8
+	ch.Mode = "flat"
+
+	done := make(chan DoneEvent, 1)
+	failed := make(chan error, 1)
+	_, err := c.Generate(GenerateParams{
+		Path:       src,
+		Region:     &[4]int{16, 8, 32, 32},
+		DisplayRes: 32,
+		KeepInside: true,
+		Choices:    ch,
+	}, func(u Update) {
+		switch u.Kind {
+		case "done":
+			done <- u.Done
+		case "failed":
+			failed <- u.Err
+		}
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	select {
+	case d := <-done:
+		if d.Width != 32 || d.Height != 32 {
+			t.Errorf("run reported %dx%d, want the requested region's 32x32 with no surround left in it",
+				d.Width, d.Height)
+		}
+		if d.Geometry == nil || len(d.Geometry.Shapes) == 0 {
+			t.Fatal("done carried no geometry")
+		}
+		// Shape 0 is the base rectangle covering the whole fitted canvas, surround included. Once the
+		// surround is subtracted it starts OUTSIDE the region, at minus the border width; left at zero
+		// it would mean every shape in the document is offset by that border.
+		if x := d.Geometry.Shapes[0].Data[0]; x >= 0 {
+			t.Errorf("base rect starts at x=%.1f, want a negative origin — the surround was not taken back off", x)
+		}
+	case err := <-failed:
+		t.Fatalf("run failed: %v", err)
+	case <-time.After(4 * time.Minute):
+		t.Fatal("timed out")
 	}
 }
 

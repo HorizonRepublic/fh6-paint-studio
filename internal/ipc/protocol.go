@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 
+	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -102,8 +103,76 @@ type (
 		ElapsedMs    int64           `json:"elapsedMs"`
 		Geometry     *model.Geometry `json:"geometry,omitempty"`
 		GeometryPath string          `json:"geometryPath,omitempty"` // written only when the client asked
+
+		// Width/Height are the dimensions the geometry is expressed in — the working image, with any
+		// keep-inside surround already removed. A client needs them to export or inject, and deriving
+		// them from the source file would be wrong for a cropped or high-resolution fit.
+		Width  int `json:"width"`
+		Height int `json:"height"`
+
+		// DeltaE/SSIM score the finished render against the source. Measured where the fit happened,
+		// which the client cannot reproduce without the padded target, so it travels with the result.
+		DeltaE float64 `json:"deltaE,omitempty"`
+		SSIM   float64 `json:"ssim,omitempty"`
 	}
 )
+
+// Library requests. The library is the daemon's because it is an on-disk FORMAT — geometry, preview,
+// thumbnail and metadata in one directory — and a second implementation of that format in a second
+// language is a second thing to keep in step. A client asks for entries and bytes.
+type (
+	// LibraryImage is raw straight-alpha RGBA, w*h*4 bytes, base64 in JSON. Raw rather than PNG so a
+	// client needs no encoder to save a generation: it already has these pixels, they came from a
+	// preview frame. Sent once per save, so the encoding overhead does not matter here the way it
+	// does on the twenty-frames-a-second path.
+	LibraryImage struct {
+		W   int    `json:"w"`
+		H   int    `json:"h"`
+		Pix []byte `json:"pix"`
+	}
+
+	// LibrarySaveParams stores one finished design. The daemon derives the id, the shape count and
+	// the thumbnail; the caller supplies what only it knows — what the user called it, what settings
+	// produced it.
+	LibrarySaveParams struct {
+		Shapes  []model.Shape `json:"shapes"`
+		Entry   library.Entry `json:"entry"`
+		Preview LibraryImage  `json:"preview"`
+		// Replace deletes every existing entry with the same NAME first. Manual designs are saved by
+		// name and may be overwritten; an auto-saved generation never is.
+		Replace bool `json:"replace,omitempty"`
+	}
+
+	// LibraryImageParams asks for one stored PNG. Which is "thumb" or "preview".
+	LibraryImageParams struct {
+		ID    string `json:"id"`
+		Which string `json:"which"`
+	}
+)
+
+// InjectParams is a write into the LIVE game process. It is the one request here with a side effect
+// outside this program, so it carries everything the write needs explicitly — the shapes, the
+// dimensions they are expressed in, the template's layer count and the canvas scale — rather than
+// letting the daemon infer any of it from a previous run. An injection derived from stale state
+// writes plausible garbage into someone's artwork.
+type InjectParams struct {
+	Shapes []model.Shape `json:"shapes"`
+	Width  int           `json:"width"`
+	Height int           `json:"height"`
+	Layers int           `json:"layers"` // exact template layer count of the open FH6 group
+	Scale  float64       `json:"scale,omitempty"`
+}
+
+// InjectState says whether an injection can be attempted at all.
+//
+// Elevated describes the DAEMON, not the client: the daemon is the process that opens the game's
+// memory, so its token is the one that matters. A daemon spawned by the client inherits the client's
+// elevation, which is why elevating the UI still works — but the answer has to come from the side
+// that does the writing.
+type InjectState struct {
+	Available bool `json:"available"`
+	Elevated  bool `json:"elevated"`
+}
 
 // WriteJSON frames and writes one JSON message.
 func WriteJSON(w io.Writer, v any) error {

@@ -8,15 +8,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"fh6-paint-studio/internal/engine"
-	"fh6-paint-studio/internal/imageio"
+	"fh6-paint-studio/internal/inject"
 	"fh6-paint-studio/internal/ipc"
-	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/runner"
+	"fh6-paint-studio/internal/session"
 )
 
 // The studio is on its way off Gio, so the engine has to stop being a library it links against.
@@ -27,63 +26,89 @@ import (
 // reference: any difference in behaviour between them is a bug in the boundary, and having both
 // behind one interface is what makes that difference observable instead of theoretical.
 type engineDriver interface {
-	// Generate starts a run. prep and resolved are what the local engine needs; path and choices are
-	// what a remote one needs, since it re-loads the image itself. Callers have both at the call
-	// site, and passing both keeps the interface honest about that rather than hiding a re-decode.
-	Generate(req driverRequest, onEvent func(runner.Event)) (cancel func(), err error)
+	// Generate starts a run described in the user's terms. Both drivers prepare it the same way —
+	// locally that is a direct call, remotely it is the same call on the other side of the socket —
+	// so a run cannot come out different depending on where the engine happens to live.
+	Generate(req session.Request, onEvent func(runner.Event)) (cancel func(), err error)
+
+	// Inject writes the shapes into the running game. It BLOCKS, and the caller runs it off the UI
+	// goroutine. This is on the driver rather than called directly because the write has to happen in
+	// whichever process holds the Windows handles — and once the UI is Flutter, that is not the UI.
+	Inject(p ipc.InjectParams, onLog func(string)) error
+
+	// InjectState reports whether an injection is possible where the WRITING happens.
+	InjectState() ipc.InjectState
+
+	// Library is the saved-generation store, which lives wherever the engine does.
+	Library() libraryAPI
+
+	// Presets is the custom-preset store, on the same terms.
+	Presets() presetsAPI
+
 	// Close releases anything the driver owns. Safe on a driver that never started a run.
 	Close()
 }
 
-// driverRequest is one run, described both ways: as the loaded pixels the in-process engine wants,
-// and as the source + settings a separate process needs to reproduce them.
-type driverRequest struct {
-	Prep     imageio.Prepared
-	Resolved preset.Resolved
-
-	Path    string         // source image on disk
-	MaxRes  int            // the working resolution the prep was built at
-	Crop    *[4]float64    // fractional crop, nil for the whole image
-	Choices preset.Choices // what the user set, before Resolve
-
-	// Cropped says the working image is a REGION of the file, whether or not Crop expresses it. The
-	// studio tracks its crop as an absolute rectangle in raw-file coordinates while the protocol
-	// carries a fraction, so the two can disagree — and a driver that silently ran the whole image
-	// there would return a perfectly plausible reconstruction of the wrong thing. The remote driver
-	// refuses instead.
-	Cropped bool
-}
-
 // localDriver runs the engine in this process — the behaviour the studio has always had.
-type localDriver struct{}
-
-func (localDriver) Generate(req driverRequest, onEvent func(runner.Event)) (func(), error) {
-	return runner.RunAsync(req.Prep, req.Resolved, onEvent), nil
+type localDriver struct {
+	lib  libraryAPI
+	pres presetsAPI
 }
 
-func (localDriver) Close() {}
+func newLocalDriver() *localDriver {
+	return &localDriver{lib: openLocalLibrary(), pres: openLocalPresets()}
+}
+
+func (d *localDriver) Library() libraryAPI { return d.lib }
+func (d *localDriver) Presets() presetsAPI { return d.pres }
+
+func (*localDriver) Generate(req session.Request, onEvent func(runner.Event)) (func(), error) {
+	run, err := session.Prepare(req)
+	if err != nil {
+		return nil, err
+	}
+	return run.Start(onEvent), nil
+}
+
+func (*localDriver) Inject(p ipc.InjectParams, onLog func(string)) error {
+	return inject.Apply(p.Shapes, p.Width, p.Height, p.Layers, p.Scale, onLog)
+}
+
+func (*localDriver) InjectState() ipc.InjectState {
+	return ipc.InjectState{Available: inject.NewFH6().Available(), Elevated: inject.Elevated()}
+}
+
+func (*localDriver) Close() {}
 
 // remoteDriver talks to an engined process over the loopback protocol.
 type remoteDriver struct {
 	cmd  *exec.Cmd
 	conn net.Conn
 	cli  *ipc.Client
+	lib  libraryAPI
+	pres presetsAPI
 }
 
-// dialEngine spawns the daemon and connects to it. The daemon prints its address and token as the
-// first line of stdout, so there is no port to configure and no race on a fixed one — several
+// engineIdleTimeout stops a spawned service that nobody connects to. The studio connects within
+// milliseconds, so anything reaching this means the studio died on the way — and an engine process
+// left holding the GPU is worse than a slow start.
+const engineIdleTimeout = 30 * time.Second
+
+// dialEngine spawns the engine service and connects to it. By default it spawns THIS binary with the
+// --engine-service subcommand, which is why the release is two files rather than three; FH6_ENGINED
+// points at a separate engined.exe instead. Either way the service prints its address and token as
+// the first line of stdout, so there is no port to configure and no race on a fixed one — several
 // studios can run side by side.
 func dialEngine(exePath string) (*remoteDriver, error) {
+	args := []string{"-idle-timeout", engineIdleTimeout.String()}
 	if exePath == "" {
 		self, err := os.Executable()
 		if err != nil {
 			return nil, err
 		}
-		exePath = filepath.Join(filepath.Dir(self), "engined.exe")
+		exePath, args = self, []string{"--engine-service"}
 	}
-	// The daemon exits on its own if the studio dies before connecting, so a crash at startup cannot
-	// leave an orphan holding the GPU.
-	cmd := exec.Command(exePath, "-idle-timeout", "30s")
+	cmd := exec.Command(exePath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -130,20 +155,23 @@ func dialEngine(exePath string) (*remoteDriver, error) {
 	return d, nil
 }
 
-func (d *remoteDriver) Generate(req driverRequest, onEvent func(runner.Event)) (func(), error) {
+func (d *remoteDriver) Generate(req session.Request, onEvent func(runner.Event)) (func(), error) {
 	// The final canvas arrives as the LAST frame, one message before done. Hold it so the Done event
 	// the UI receives carries a canvas exactly as the in-process runner's does — otherwise every
 	// consumer of Done would need a second code path just for the remote driver.
-	if req.Cropped && req.Crop == nil {
-		return nil, fmt.Errorf("the engine service cannot run a crop it was not given: the studio's crop is an absolute rectangle and the protocol takes a fraction")
-	}
 	var canvas frameHolder
-	return d.cli.Generate(ipc.GenerateParams{
-		Path:    req.Path,
-		MaxRes:  req.MaxRes,
-		Crop:    req.Crop,
-		Choices: req.Choices,
-	}, func(u ipc.Update) {
+	p := ipc.GenerateParams{
+		Path:       req.Path,
+		DisplayRes: req.DisplayRes,
+		SourceRes:  req.SourceRes,
+		KeepInside: req.KeepInside,
+		Choices:    req.Choices,
+	}
+	if req.Region != nil {
+		r := *req.Region
+		p.Region = &[4]int{r.Min.X, r.Min.Y, r.Dx(), r.Dy()}
+	}
+	return d.cli.Generate(p, func(u ipc.Update) {
 		switch u.Kind {
 		case "log":
 			onEvent(runner.Log{Line: u.Line})
@@ -166,7 +194,14 @@ func (d *remoteDriver) Generate(req driverRequest, onEvent func(runner.Event)) (
 			if u.Done.Geometry != nil {
 				res.Shapes = u.Done.Geometry.Shapes
 			}
-			onEvent(runner.Done{Result: res, Canvas: canvas.get(), Backend: u.Done.Backend})
+			ev := runner.Done{
+				Result: res, Canvas: canvas.get(), Backend: u.Done.Backend,
+				Width: u.Done.Width, Height: u.Done.Height,
+			}
+			if u.Done.DeltaE > 0 || u.Done.SSIM > 0 {
+				ev.Quality = &runner.Quality{DeltaE: u.Done.DeltaE, SSIM: u.Done.SSIM}
+			}
+			onEvent(ev)
 		}
 	})
 }
@@ -189,6 +224,38 @@ func (f *frameHolder) get() *image.NRGBA {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.img
+}
+
+func (d *remoteDriver) Inject(p ipc.InjectParams, onLog func(string)) error {
+	return d.cli.Inject(p, onLog)
+}
+
+// InjectState asks the SERVICE, not this process. The service is a child, so it inherits this
+// process's elevation and today the two always agree — but the answer belongs to the side that
+// opens the game's memory, and the day the service is started some other way it will differ.
+func (d *remoteDriver) InjectState() ipc.InjectState {
+	var st ipc.InjectState
+	if err := d.cli.Call("inject.state", nil, &st); err != nil {
+		return ipc.InjectState{}
+	}
+	return st
+}
+
+// Library talks to the daemon's store. The root is fetched once at connect time so the "open the
+// folder" button can stay a plain string in the UI.
+func (d *remoteDriver) Library() libraryAPI {
+	if d.lib == nil {
+		root, _ := d.cli.LibraryRoot()
+		d.lib = &remoteLibrary{cli: d.cli, root: root}
+	}
+	return d.lib
+}
+
+func (d *remoteDriver) Presets() presetsAPI {
+	if d.pres == nil {
+		d.pres = &remotePresets{cli: d.cli}
+	}
+	return d.pres
 }
 
 func (d *remoteDriver) Close() {

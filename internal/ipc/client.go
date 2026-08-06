@@ -6,6 +6,10 @@ import (
 	"image"
 	"io"
 	"sync"
+
+	"fh6-paint-studio/internal/library"
+	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/userpreset"
 )
 
 // Client is the UI side of the protocol. It exists so a UI can be written against the same shape of
@@ -113,6 +117,10 @@ func (c *Client) route(resp Response) {
 		_ = json.Unmarshal(resp.Result, &p)
 		c.deliver(resp.ID, Update{Kind: "done", Done: p})
 		c.forget(resp.ID)
+	case "ok":
+		// The terminal event for a streaming call that produces narration and then simply succeeds.
+		c.deliver(resp.ID, Update{Kind: "ok"})
+		c.forget(resp.ID)
 	case "failed":
 		c.deliver(resp.ID, Update{Kind: "failed", Err: fmt.Errorf("%s", resp.Error)})
 		c.forget(resp.ID)
@@ -140,12 +148,7 @@ func (c *Client) forget(id int32) {
 // after the run has finished; the daemon answers with a failed event for an unknown run, which the
 // handler no longer receives.
 func (c *Client) Generate(p GenerateParams, onUpdate func(Update)) (cancel func(), err error) {
-	c.mu.Lock()
-	c.nextID++
-	id := c.nextID
-	c.handler[id] = onUpdate
-	c.mu.Unlock()
-
+	id := c.claim(onUpdate)
 	if err := c.request(Request{ID: id, Method: "generate"}, p); err != nil {
 		c.forget(id)
 		return nil, err
@@ -157,6 +160,145 @@ func (c *Client) Generate(p GenerateParams, onUpdate func(Update)) (cancel func(
 		c.mu.Unlock()
 		_ = c.request(Request{ID: cid, Method: "cancel"}, map[string]int32{"runId": id})
 	}, nil
+}
+
+// Inject writes the shapes into the running game. It BLOCKS until the write finishes or fails,
+// streaming the injector's narration to onLog, because there is nothing useful a caller can do
+// while a live process is being written to.
+func (c *Client) Inject(p InjectParams, onLog func(string)) error {
+	done := make(chan error, 1)
+	id := c.claim(func(u Update) {
+		switch u.Kind {
+		case "log":
+			if onLog != nil {
+				onLog(u.Line)
+			}
+		case "ok":
+			done <- nil
+		case "failed":
+			done <- u.Err
+		}
+	})
+	if err := c.request(Request{ID: id, Method: "inject"}, p); err != nil {
+		c.forget(id)
+		return err
+	}
+	return <-done
+}
+
+// Call makes a one-shot request and decodes the result into out. Used for the small queries a UI
+// needs before it can decide what to show — which backends exist, what the defaults are, whether an
+// injection is even possible here.
+func (c *Client) Call(method string, params, out any) error {
+	res := make(chan Update, 1)
+	id := c.claim(func(u Update) {
+		switch u.Kind {
+		case "result", "failed":
+			res <- u
+		}
+	})
+	if err := c.request(Request{ID: id, Method: method}, params); err != nil {
+		c.forget(id)
+		return err
+	}
+	u := <-res
+	c.forget(id)
+	if u.Err != nil {
+		return u.Err
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal([]byte(u.Line), out)
+}
+
+// LibraryRoot returns the daemon's library directory. Informational — see the server side.
+func (c *Client) LibraryRoot() (string, error) {
+	var out struct {
+		Root string `json:"root"`
+	}
+	err := c.Call("library.root", nil, &out)
+	return out.Root, err
+}
+
+// LibraryList returns every saved generation, newest first.
+func (c *Client) LibraryList() ([]library.Entry, error) {
+	var out struct {
+		Entries []library.Entry `json:"entries"`
+	}
+	err := c.Call("library.list", nil, &out)
+	return out.Entries, err
+}
+
+// LibraryGeometry loads a saved design's shapes.
+func (c *Client) LibraryGeometry(id string) (model.Geometry, error) {
+	var g model.Geometry
+	err := c.Call("library.geometry", map[string]string{"id": id}, &g)
+	return g, err
+}
+
+// LibraryImage returns a stored PNG: which is "thumb" or "preview".
+func (c *Client) LibraryImage(id, which string) ([]byte, error) {
+	var out struct {
+		PNG []byte `json:"png"`
+	}
+	err := c.Call("library.image", LibraryImageParams{ID: id, Which: which}, &out)
+	return out.PNG, err
+}
+
+// LibrarySave stores a finished design and returns the entry the daemon actually wrote — the id and
+// shape count are assigned there, so the caller must use what comes back rather than what it sent.
+func (c *Client) LibrarySave(p LibrarySaveParams) (library.Entry, error) {
+	var out struct {
+		Entry library.Entry `json:"entry"`
+	}
+	err := c.Call("library.save", p, &out)
+	return out.Entry, err
+}
+
+// LibraryDelete removes a saved generation.
+func (c *Client) LibraryDelete(id string) error {
+	return c.Call("library.delete", map[string]string{"id": id}, nil)
+}
+
+// LibraryRename renames one and returns the updated entry.
+func (c *Client) LibraryRename(id, name string) (library.Entry, error) {
+	var out struct {
+		Entry library.Entry `json:"entry"`
+	}
+	err := c.Call("library.rename", map[string]string{"id": id, "name": name}, &out)
+	return out.Entry, err
+}
+
+// PresetList returns the user's saved custom presets.
+func (c *Client) PresetList() ([]userpreset.Preset, error) {
+	var out struct {
+		Presets []userpreset.Preset `json:"presets"`
+	}
+	err := c.Call("presets.list", nil, &out)
+	return out.Presets, err
+}
+
+// PresetSave stores one and returns it with the id the daemon assigned.
+func (c *Client) PresetSave(p userpreset.Preset) (userpreset.Preset, error) {
+	var out struct {
+		Preset userpreset.Preset `json:"preset"`
+	}
+	err := c.Call("presets.save", p, &out)
+	return out.Preset, err
+}
+
+// PresetDelete removes one.
+func (c *Client) PresetDelete(id string) error {
+	return c.Call("presets.delete", map[string]string{"id": id}, nil)
+}
+
+func (c *Client) claim(h func(Update)) int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextID++
+	c.handler[c.nextID] = h
+	return c.nextID
 }
 
 func (c *Client) request(req Request, params any) error {

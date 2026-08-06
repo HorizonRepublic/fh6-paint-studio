@@ -66,6 +66,23 @@ Write-Host "Building $dll ($(if ($Release) { 'FAT — release' } else { 'native 
 if ($LASTEXITCODE -ne 0) { throw "nvcc failed ($LASTEXITCODE)" }
 Write-Host "Built bin\fh6cuda.dll" -ForegroundColor Green
 
+# --- copy the DLL next to every package whose tests load it ---
+# `go test` runs with CWD set to the package directory, so each of these needs its own copy. A stale
+# copy does not look stale: the test fails with "procedure not found" for whichever export was added
+# last, which reads as a broken feature rather than an out-of-date file. Add a directory here the
+# moment its tests reach a backend.
+$testCopies = @(
+    "internal\backend\cuda",
+    "internal\engine",
+    "internal\runner",
+    "internal\ipc"
+)
+foreach ($d in $testCopies) {
+    $dest = Join-Path $root $d
+    if (Test-Path $dest) { Copy-Item $dll (Join-Path $dest "fh6cuda.dll") -Force }
+}
+Write-Host "Copied fh6cuda.dll into $($testCopies.Count) package dirs (for tests)" -ForegroundColor Green
+
 # --- ensure x/sys dep, then build bin\fh6paint-cuda.exe ---
 $env:CGO_ENABLED = "0"
 Push-Location $root
