@@ -29,10 +29,12 @@ See it end to end: [source photo](assets/cat/source.jpg) → [generated reconstr
 ## How to use it
 
 ### 1. Get the app
-[**Download the latest release**](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest/download/fh6-paint-studio-windows-x64.zip)
-and extract it - it's a plain `.zip`, so Windows opens it with no extra tool. You get **two files** -
-`fh6-paint-studio.exe` and `fh6vk.dll` - keep them in the same folder, and run
-**`fh6-paint-studio.exe`**. There's no installer.
+[**Download the latest release**](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest/download/fh6-paint-studio-windows-x64.7z)
+and extract it. You get one folder - keep everything in it together and run **`fh6_paint_studio.exe`**
+from inside. There's no installer.
+
+It's a `.7z` archive: Windows 11 extracts it as-is, Windows 10 needs
+[7-Zip](https://www.7-zip.org/) or WinRAR.
 
 That link always points at the newest build. Every release also carries a version-stamped copy of the
 same archive if you want to pin one.
@@ -58,8 +60,10 @@ same archive if you want to pin one.
    placeholders the app overwrites. *Tip:* build a placeholder template once, save it, then re-import
    it and hit **Ungroup** whenever you need a fresh canvas.
 7. Back in **FH6 Paint Studio → Library**, set the **FH6 layers** count, then click **Inject into FH6**.
-   - If nothing happens, **run the app as administrator** (memory injection needs it - there's a
-     *Run as admin* button in the app).
+   - No administrator rights needed, and the app never asks for any: the game is an ordinary
+     process owned by you, which Windows lets you write to. If the injection is refused, you are
+     almost certainly on the Microsoft Store / Game Pass build, which runs sandboxed - the Steam
+     build works.
 8. **Save the vinyl in-game - this step is required.** Right after injecting it may look rough or
    incomplete: the editor doesn't redraw every shape until the vinyl is **saved and reloaded**. Save
    it, reopen it, and it renders correctly - then apply it to your car.
@@ -82,7 +86,7 @@ them. You don't have to take my word that the binaries match the source; you can
 the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh attestation verify fh6-paint-studio-<version>-windows-x64.zip --repo HorizonRepublic/fh6-paint-studio
+gh attestation verify fh6-paint-studio-<version>-windows-x64.7z --repo HorizonRepublic/fh6-paint-studio
 ```
 
 A `SHA256SUMS` file ships with each release if you'd rather just confirm the download isn't corrupted.

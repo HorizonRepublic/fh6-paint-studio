@@ -1,0 +1,80 @@
+name: Publish to Nexus Mods
+
+# Deliberately manual, and deliberately separate from the release build.
+#
+# Nexus scans every upload through VirusTotal and quarantines what trips it, so a release must be
+# looked at before it is published there, not after. This workflow therefore does NOT build anything:
+# it downloads the archive that is already attached to a GitHub release — the exact bytes the owner
+# downloaded and checked — and hands that file to Nexus. Building here would publish a binary nobody
+# had seen, which is the whole thing this split exists to prevent.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose attached archive to publish (e.g. v2.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish a released archive to Nexus
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The versioned asset, not the version-free copy: Nexus records a file name per version, and
+      # "fh6-paint-studio-windows-x64.7z" would make every version on the page look identical.
+      - name: Download the released archive
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ inputs.tag }}'
+          $archive = "fh6-paint-studio-$($tag.TrimStart('v'))-windows-x64.7z"
+          gh release download $tag --repo ${{ github.repository }} --pattern $archive --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "no such release, or it has no $archive attached" }
+          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The release published a checksum file; verifying against it here proves the bytes going to
+      # Nexus are the bytes that were built and attested, and catches a truncated download before it
+      # becomes a broken mod page.
+      - name: Verify the checksum
+        shell: pwsh
+        run: |
+          $want = (Select-String -Path SHA256SUMS.txt -Pattern ([regex]::Escape($env:ARCHIVE)) |
+              Select-Object -First 1).Line.Split(' ')[0]
+          if (-not $want) { throw "SHA256SUMS.txt has no line for $env:ARCHIVE" }
+          $got = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "checksum mismatch: release says $want, download is $got" }
+          Write-Host "checksum OK: $got"
+
+      - name: Nexus version string
+        shell: pwsh
+        run: |
+          $v = '${{ inputs.tag }}'.TrimStart('v')
+          "NEXUS_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Publish to Nexus Mods
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.10
+        with:
+          api_key: ${{ secrets.NEXUS_API_KEY }}
+          file_id: "7536650"
+          filename: ${{ env.ARCHIVE }}
+          version: ${{ env.NEXUS_VERSION }}
+          display_name: ${{ env.NEXUS_VERSION }}
+          # The changelog is NOT posted to the mod page. Release notes are generated from every
+          # commit since the last tag, and on the way to a real release that is a wall of text
+          # nobody reads on a Nexus page — the link to the GitHub release is the honest amount of
+          # detail for a mod listing.
+          description: "Changelog: https://github.com/${{ github.repository }}/releases/tag/${{ inputs.tag }}"
+          # Keep the mod page's version in step with the file that was just published, so the Nexus
+          # header stops lagging a release behind.
+          update_mod_version: true
+          archive_existing_version: true
+          # Standalone tool, not a mod-manager mod: make the new file the primary download and hide
+          # the Vortex/mod-manager download button so users always grab the manual archive.
+          primary_mod_manager_download: true
+          allow_mod_manager_download: false

@@ -1,11 +1,11 @@
 # build-client-release.ps1 -- cut the distributable release: the Flutter client + the engine service
-# + the Vulkan shim, staged clean and zipped.
+# + the Vulkan shim, staged clean and packed.
 #
 #   powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 [-Version <x.y.z>] [-Out <dir>] [-SkipDLL]
 #
-# The product is the Flutter client talking to engined over a loopback socket, so the release is that
-# pair plus the shim the engine loads. The Gio studio has its own script (build-release.ps1) and is
-# not part of this one.
+# The product is the Flutter client talking to engined over the pipes between them, so the release is
+# that pair plus the shim the engine loads. The Gio studio has its own script (build-release.ps1) and
+# is not part of this one.
 #
 # The staging directory is built from scratch every time rather than cleaned in place: a release
 # folder that accumulates logs, preference files and yesterday's binaries is how a stray file ends up
@@ -26,25 +26,50 @@ try {
     if ($SkipDLL -and (Test-Path $vkdll)) {
         Write-Host "Reusing the existing shim: $vkdll" -ForegroundColor Yellow
     } else {
-        & (Join-Path $PSScriptRoot 'build-vulkan.ps1')
+        & (Join-Path $PSScriptRoot 'build-vulkan.ps1') -Version $Version
         if ($LASTEXITCODE -ne 0) { throw "Vulkan shim build failed" }
     }
 
-    # 2) Version resources for both Go binaries, so neither ships nameless.
+    # 2) Version resources for the Go binaries, so none of them ships nameless.
     & (Join-Path $PSScriptRoot 'gen-winres.ps1') -Version $Version
     if ($LASTEXITCODE -ne 0) { throw "version resources failed" }
 
     # 3) The engine service. No console window: it is a child process and a flashing console on
     # every launch is not something a user should have to look at.
+    #
+    # Stripped (-s -w), the same as the studio and as every release up to 1.4.0. Shipping the symbol
+    # table and full DWARF was tried instead, on the theory that a scanner should be able to read
+    # every function name rather than guess: measured 2026-08-06, it COST a detection. The same
+    # engined built both ways, packed alone and scanned the same hour, went 2/75 with symbols and
+    # 1/75 without -- MaxSecure's generic heuristic fires on the symbol-carrying build. The binary
+    # repeats every injector API name three times there and carries 129 strings naming the injector
+    # package against 3 when stripped, so a keyword-density heuristic sees forty times the evidence.
+    #
+    # Do NOT drop -w while keeping -s. Go's default DWARF is zlib'd into eight sections named
+    # /4 /19 /32 /46 /65 /78 /95 /112 -- numeric COFF string-table references, unreadable without
+    # parsing the format -- five at entropy 7.99, together 23% of the file. That is the packed-binary
+    # signature. If debug info is ever wanted again it has to be -compressdwarf=false.
+    # Pinned to the toolchain go.mod asks for, which is what CI installs (setup-go with
+    # go-version-file). Without this Go silently prefers a NEWER toolchain if one is installed
+    # locally, so a local release build and the CI release build are different binaries -- we shipped
+    # go1.26.3 locally while CI shipped go1.26.1 and never noticed.
+    $goDirective = (Select-String -Path (Join-Path $root 'go.mod') -Pattern '^go\s+(\S+)').Matches[0].Groups[1].Value
+    $env:GOTOOLCHAIN = "go$goDirective"
     $env:CGO_ENABLED = "0"
     $env:GOAMD64 = "v1"
     & go build -tags vulkan -trimpath -ldflags "-s -w -H windowsgui" -o (Join-Path $root "bin\engined.exe") ./cmd/engined
     if ($LASTEXITCODE -ne 0) { throw "engined build failed" }
 
-    # 4) The client.
+    # 4) The client. The previous build's assets are cleared first: `flutter build` leaves whatever it
+    # wrote last time in place and the staging step below copies the directory wholesale, so an asset
+    # a former build needed would ship in a release that does not need it.
+    $built = Join-Path $root 'client\build\windows\x64\runner\Release'
+    if (Test-Path (Join-Path $built 'data')) { Remove-Item -Recurse -Force (Join-Path $built 'data') }
     Push-Location (Join-Path $root 'client')
     try {
-        & flutter build windows --release
+        # --build-name carries the release version into the runner's version resource; without it
+        # the shipped exe claims pubspec's placeholder 1.0.0 forever.
+        & flutter build windows --release --build-name=$Version --build-number=0
         if ($LASTEXITCODE -ne 0) { throw "flutter build failed" }
     } finally { Pop-Location }
 
@@ -53,37 +78,142 @@ try {
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force $stage | Out-Null
 
-    $built = Join-Path $root 'client\build\windows\x64\runner\Release'
-    Copy-Item (Join-Path $built '*.exe') $stage
-    Copy-Item (Join-Path $built '*.dll') $stage
+    # Named, not wildcarded. `flutter build` does not clean its output directory, so the Release
+    # folder still holds whatever earlier runs left there -- at the time of writing, an engined.exe
+    # from a build two versions old. A `*.exe` copy picks that up, and the only thing that kept it
+    # out of the release was the explicit copy two lines later happening to overwrite it. Name what
+    # ships instead of naming what to sweep.
+    Copy-Item (Join-Path $built 'fh6_paint_studio.exe') $stage
+    Copy-Item (Join-Path $built 'flutter_windows.dll') $stage
+    Get-ChildItem (Join-Path $built '*_plugin.dll') | ForEach-Object { Copy-Item $_.FullName $stage }
     Copy-Item (Join-Path $built 'data') $stage -Recurse
     Copy-Item (Join-Path $root 'bin\engined.exe') $stage
     Copy-Item $vkdll $stage
+
+    # Our own licence. Every binary's version resource claims MIT; the text has to travel with them
+    # for that claim to mean anything, and mod hosts ask for an explicit permissions statement.
+    Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
+
+    # The client and both Flutter plugins import msvcp140 / vcruntime140 / vcruntime140_1. We ship
+    # none of them, so on a machine without the VC++ runtime the app dies at launch with a
+    # missing-DLL box -- which reads to the user as a broken download or an antivirus having eaten
+    # something, not as a missing prerequisite. Say it in the drop.
+    $readme = @"
+FH6 Paint Studio $Version
+
+Unpack the whole folder and run fh6_paint_studio.exe. Keep the files together:
+the app will not start without data\ and engined.exe beside it.
+
+REQUIREMENT
+  Microsoft Visual C++ Redistributable (2015-2022, x64).
+  Most machines already have it. If the app does not start and Windows names a
+  missing vcruntime140.dll or msvcp140.dll, install it from Microsoft:
+  https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+WHAT IT DOES
+  Turns a picture into a Forza Horizon vinyl and, on request, writes the result
+  into the running game so you can see it on the car. It needs no administrator
+  rights and asks for none. It makes no network connections.
+
+LICENCE
+  LICENSE.txt covers this software. THIRD-PARTY-NOTICES.txt carries the notices
+  of the libraries it is built on, which their licences require to travel with it.
+"@
+    [IO.File]::WriteAllText((Join-Path $stage 'README.txt'),
+        ($readme -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
+
+    # Directories Flutter leaves behind with nothing in them (a package whose assets were all
+    # dropped still gets its folder). An empty directory in the archive is a folder entry that
+    # serves nothing and reads as leftovers.
+    do {
+        $empty = Get-ChildItem $stage -Recurse -Directory |
+            Where-Object { -not (Get-ChildItem $_.FullName -Force) }
+        $empty | Remove-Item -Force
+    } while ($empty)
+
+
+    $7z = @('7z.exe', (Join-Path $env:ProgramFiles '7-Zip\7z.exe')) |
+        Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+    if (-not $7z) { throw "7-Zip not found; install it or add 7z.exe to PATH" }
+
+    # The third-party licence texts. Flutter buries them in a gzip blob inside the asset tree, which
+    # is both invisible to anyone who wants to read them and a compressed archive nested inside the
+    # release -- something mod hosts reject on sight, because a nested archive cannot be scanned.
+    # They are a CONDITION of using the libraries in here (MIT and BSD both require the notice to
+    # travel with every copy), so they are unpacked to plain text at the top level, not dropped.
+    $noticesZ = Join-Path $stage 'data\flutter_assets\NOTICES.Z'
+    if (Test-Path $noticesZ) {
+        # 7-Zip does the gunzip. It is already a dependency of this script, and leaning on it beats
+        # hand-driving .NET streams from Windows PowerShell, which will not bind GZipStream's
+        # methods here at all.
+        & $7z e -tgzip -so $noticesZ 2>$null |
+            Set-Content (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Encoding utf8
+        if ($LASTEXITCODE -ne 0) { throw "could not unpack $noticesZ" }
+        Remove-Item -Force $noticesZ
+    }
+
+    # Flutter's blob covers the Flutter half only. The engine links Go modules whose licences say
+    # the same thing about travelling with the binary, and none of them appear in it -- so they are
+    # appended here, read out of the module cache for whatever the engine actually links rather than
+    # from a hand-kept list that would rot.
+    $notices = Join-Path $stage 'THIRD-PARTY-NOTICES.txt'
+    $goMods = & go list -deps -tags vulkan -f '{{if .Module}}{{.Module.Path}}{{end}}' ./cmd/engined |
+        Sort-Object -Unique | Where-Object { $_ -and $_ -ne 'fh6-paint-studio' }
+    foreach ($m in $goMods) {
+        $dir = & go list -m -f '{{.Dir}}' $m
+        if (-not $dir) { throw "no module cache entry for $m; cannot ship its licence" }
+        $lic = Get-ChildItem $dir -File | Where-Object { $_.Name -match '^(LICENSE|LICENCE|COPYING)' } |
+            Select-Object -First 1
+        if (-not $lic) { throw "no licence file in $dir for $m" }
+        Add-Content $notices "`n$('=' * 78)`n$m`n$('=' * 78)`n" -Encoding utf8
+        Add-Content $notices (Get-Content $lic.FullName -Raw) -Encoding utf8
+    }
+
+    # The Material icon font, which we ship none of: not one Icons.* reference exists in the client,
+    # every glyph in the interface is drawn. Flutter emits the font anyway because the material
+    # package declares it in FontManifest, and the icon tree-shaker does not subset a font nothing
+    # references. Removing the declaration with it keeps the manifest honest.
+    Remove-Item -Recurse -Force (Join-Path $stage 'data\flutter_assets\fonts') -ErrorAction SilentlyContinue
+    $fm = Join-Path $stage 'data\flutter_assets\FontManifest.json'
+    # WriteAllText with a BOM-less encoding, not Set-Content -Encoding utf8: Windows PowerShell
+    # writes a BOM, and Dart's jsonDecode throws on one. The app would fail to start.
+    if (Test-Path $fm) { [IO.File]::WriteAllText($fm, '[]', (New-Object Text.UTF8Encoding $false)) }
 
     # Anything the app WROTE beside itself while it was being tested is not part of the release.
     Get-ChildItem $stage -Recurse -Include *.log, *.log.1, client.json, native_assets.json |
         Remove-Item -Force -ErrorAction SilentlyContinue
 
-    # 6) Zip it, replacing any previous one.
-    $zip = Join-Path $Out "fh6-paint-studio-$Version.zip"
-    if (Test-Path $zip) { Remove-Item -Force $zip }
-    Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+    # 6) Pack it, replacing any previous one. 7z, matching what CI attaches to the release: scanners
+    # look inside a zip far more readily than a 7z, and a local archive that differs from the shipped
+    # one is a local archive nobody can compare against.
+    $archive = Join-Path $Out "fh6-paint-studio-$Version.7z"
+    if (Test-Path $archive) { Remove-Item -Force $archive }
+    # -mx=7, not -mx=9. The staged files are byte-identical either way -- this only changes how the
+    # container is encoded -- but the two archives scan differently: measured 2026-08-06 on the same
+    # stage, -mx=9 came back 2/75 and -mx=7 came back 1/75, the difference being Bkav. That engine's
+    # verdict is not stable on unchanged bytes (see the handoff memory), so treat this as the setting
+    # that happened to land clean and re-scan the artefact before every release rather than trusting
+    # the flag. The 200 KB it costs is not worth arguing about.
+    & $7z a -t7z -mx=7 $archive $stage | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "7z failed ($LASTEXITCODE)" }
 
-    # Checksums beside the zip. One antivirus engine out of seventy calls this
+    # Checksums beside the archive. One antivirus engine out of seventy calls this
     # unsigned binary a generic malware hash, and it always will until the build
     # is signed -- so the least we can do is let a suspicious user verify that
     # the file they downloaded is the file we built.
+    # Written with WriteAllText and LF endings, not Set-Content: Windows PowerShell puts a BOM on a
+    # utf8 file, and `sha256sum -c` treats the BOM as part of the first hash and rejects the line.
+    # A checksum file nobody can check is worse than none.
     $sums = Join-Path $Out "fh6-paint-studio-$Version.sha256"
-    Get-FileHash $zip -Algorithm SHA256 |
-        ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
-        Set-Content $sums -Encoding utf8
-    Get-ChildItem $stage -Recurse -File |
+    $lines = @(Get-FileHash $archive -Algorithm SHA256 |
+        ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) })
+    $lines += @(Get-ChildItem $stage -Recurse -File |
         Get-FileHash -Algorithm SHA256 |
-        ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), $_.Path.Substring($stage.Length + 1) } |
-        Add-Content $sums -Encoding utf8
+        ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), $_.Path.Substring($stage.Length + 1) })
+    [IO.File]::WriteAllText($sums, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
 
-    $size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+    $size = [math]::Round((Get-Item $archive).Length / 1MB, 1)
     Write-Host ""
-    Write-Host "Release $Version -> $zip ($size MB)" -ForegroundColor Green
+    Write-Host "Release $Version -> $archive ($size MB)" -ForegroundColor Green
     Get-ChildItem $stage | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 2) } } | Format-Table
 } finally { Pop-Location }
