@@ -127,12 +127,31 @@ func TestAlphaOverride(t *testing.T) {
 	}
 }
 
+// The engine emits a background rectangle as shape 0, so what it may PLACE is one below the
+// requested budget: the rectangle is an in-game layer like any other. Get this wrong and a full
+// panel asks for 3001 layers, one more than the group holds, and the injector drops the last shape.
 func TestShapeClamp(t *testing.T) {
 	c := DefaultChoices()
 	c.Mode = "photo"
 	c.Shapes = 5000
-	if got := Resolve(fixture(false), c).Options.StopAt; got != MaxShapes {
-		t.Errorf("StopAt = %d, want clamp to %d", got, MaxShapes)
+	if got := Resolve(fixture(false), c).Options.StopAt; got != MaxShapes-1 {
+		t.Errorf("StopAt = %d, want clamp to %d", got, MaxShapes-1)
+	}
+}
+
+func TestPlaceBudgetLeavesRoomForTheBackground(t *testing.T) {
+	for _, req := range []int{1, 2, 100, MaxShapes, MaxShapes + 1} {
+		got := PlaceBudget(req)
+		if got < 1 {
+			t.Errorf("PlaceBudget(%d) = %d, want at least one shape", req, got)
+		}
+		if total := got + 1; total > req && req > 1 {
+			t.Errorf("PlaceBudget(%d) = %d — %d shapes with the background, over the request", req, got, total)
+		}
+		if total := got + 1; total > MaxShapes {
+			t.Errorf("PlaceBudget(%d) = %d — %d shapes with the background, over the group ceiling %d",
+				req, got, total, MaxShapes)
+		}
 	}
 }
 

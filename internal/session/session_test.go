@@ -123,16 +123,18 @@ func TestHybridReservesInkBudget(t *testing.T) {
 	ch.InkRatio = 0.20
 	run := prepare(t, Request{Path: src, DisplayRes: DisplayRes, Choices: ch})
 
-	want := preset.InkBudget(ch.InkRatio, ch.Shapes)
+	want := preset.InkBudget(ch.InkRatio, preset.PlaceBudget(ch.Shapes))
 	if want <= 0 {
 		t.Fatalf("test setup: InkBudget returned %d", want)
 	}
 	if run.Ink != want {
 		t.Errorf("reserved %d ink lines, want %d", run.Ink, want)
 	}
-	if got := run.Resolved.Options.StopAt; got != ch.Shapes-want {
-		t.Errorf("fill budget %d, want %d — ink plus fill must not exceed the requested %d",
-			got, ch.Shapes-want, ch.Shapes)
+	// The +1 is the background rectangle the engine emits as shape 0. It occupies an in-game layer
+	// like any other, so fill plus ink plus background has to land ON the request, not one over it.
+	if got := run.Resolved.Options.StopAt; got+want+1 != ch.Shapes {
+		t.Errorf("fill budget %d, want %d — fill plus ink plus the background must equal the requested %d",
+			got, ch.Shapes-want-1, ch.Shapes)
 	}
 }
 
