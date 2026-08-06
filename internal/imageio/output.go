@@ -279,18 +279,6 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 	}
 }
 
-// RenderFH6ImageSkip is RenderFH6Image with one shape index omitted (the editor's drag base: every
-// shape except the one being dragged).
-func RenderFH6ImageSkip(shapes []model.Shape, transparentBG bool, w, h, skip int) *image.NRGBA {
-	if skip < 0 || skip >= len(shapes) {
-		return RenderFH6Image(shapes, transparentBG, w, h, 1)
-	}
-	rest := make([]model.Shape, 0, len(shapes)-1)
-	rest = append(rest, shapes[:skip]...)
-	rest = append(rest, shapes[skip+1:]...)
-	return RenderFH6Image(rest, transparentBG, w, h, 1)
-}
-
 // RenderFH6ImageSkipSet renders every shape EXCEPT those whose index is in skip, preserving order. It
 // backs the live group-drag composite: the skipped (selected) shapes are re-composited on top each frame.
 func RenderFH6ImageSkipSet(shapes []model.Shape, transparentBG bool, w, h int, skip map[int]bool) *image.NRGBA {

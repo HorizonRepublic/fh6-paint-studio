@@ -87,10 +87,10 @@ class Studio extends ChangeNotifier {
   /// The saved run currently on the canvas, if it came from the library.
   String? selectedRunId;
 
-  /// Whether an injection is possible where the WRITING happens — the engine's
-  /// process, not this one.
+  /// Whether an injection can be attempted at all here. Nothing about
+  /// privileges: writing the game's memory needs none, and the app has never
+  /// run elevated.
   bool injectAvailable = false;
-  bool injectElevated = false;
   bool injecting = false;
 
   /// True once a write has landed, until the next one starts. The injector
@@ -160,9 +160,7 @@ class Studio extends ChangeNotifier {
     _engine = await EngineClient.spawn(executable);
     choices = await _engine!.defaults();
     _restore();
-    final st = await _engine!.injectState();
-    injectAvailable = st['available'] as bool? ?? false;
-    injectElevated = st['elevated'] as bool? ?? false;
+    injectAvailable = Platform.isWindows;
     await refreshLibrary();
     await refreshPresets();
     _note('info', 'engine service connected');

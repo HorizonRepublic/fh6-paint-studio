@@ -2,7 +2,6 @@ package metric
 
 import (
 	"math"
-	"sort"
 
 	"fh6-paint-studio/internal/model"
 )
@@ -240,17 +239,4 @@ func smoothSRGB(target []float32, w, h int) []float32 {
 		}
 	}
 	return out
-}
-
-// RegionOrder returns region labels sorted by descending pixel count.
-func (s *Segments) RegionOrder() []int32 {
-	if s == nil {
-		return nil
-	}
-	ids := make([]int32, s.N)
-	for i := range ids {
-		ids[i] = int32(i)
-	}
-	sort.SliceStable(ids, func(a, b int) bool { return s.Size[ids[a]] > s.Size[ids[b]] })
-	return ids
 }

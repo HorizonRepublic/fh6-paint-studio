@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"image"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime/pprof"
@@ -554,81 +553,12 @@ func main() {
 	if userSet["weight-v2"] {
 		useV2 = *weightV2
 	}
-	var weight []float32
-	if *weighted {
-		if useV2 {
-			weight = metric.WeightMapV2(prep.Pixels, prep.W, prep.H)
-		} else {
-			weight = metric.WeightMap(prep.Pixels, prep.W, prep.H)
-		}
-	}
-	// Weight-strength blend toward uniform (w'=(1-s)+s*w). The edge weight over-fits
-	// contours; softening it improves both image-space SSE and SSIM (metric-probe). s=1
-	// keeps legacy behavior, s=0 = uniform (== -weighted=false). Applies to both greedy and
-	// polish (one weight buffer feeds the whole pipeline).
-	if weight != nil && *weightStrength < 1 {
-		s := float32(math.Max(0, math.Min(1, *weightStrength)))
-		for i := range weight {
-			weight[i] = (1 - s) + s*weight[i]
-		}
-	}
-	// -linear PERCEPTUAL WEIGHT: composite in linear (correct, no in-game pop) but minimise a
-	// PERCEPTUAL error, by weighting each pixel's linear-SSE by (d sRGB/d linear)Р вЂ™Р вЂ . The sRGB EOTF
-	// is steep in darks / flat in brights, so this up-weights shadow detail and down-weights bright
-	// regions exactly as perception does Р Р†Р вЂљРІР‚Сњ making the analytic weighted-mean optimal colour solve
-	// for the sRGB-displayed result while the blend stays linear. Without it, plain linear-SSE
-	// biases colours bright and smooths detail.
-	if model.LinearLight {
-		if weight == nil {
-			weight = make([]float32, prep.W*prep.H)
-			for i := range weight {
-				weight[i] = 1
-			}
-		}
-		darkClamp, darkCap := presetpkg.DarkWeightParams(presetpkg.DarkFrac(prep.Pixels))
-		expo, eps := presetpkg.PerceptualWeightExp()
-		wp := make([]float32, prep.W*prep.H)
-		var sum float64
-		for i := 0; i < prep.W*prep.H; i++ {
-			y := float64(0.2126*prep.Pixels[i*4] + 0.7152*prep.Pixels[i*4+1] + 0.0722*prep.Pixels[i*4+2])
-			var f float32
-			if eps > 0 {
-				f = float32(math.Pow(y+eps, -expo))
-			} else {
-				if y < darkClamp {
-					y = darkClamp // clamp the dark blow-up of the sRGB derivative
-				}
-				d := 0.4396 * math.Pow(y, -0.5833) // d/dlin of 1.055*lin^(1/2.4)-0.055
-				f = float32(d * d)
-			}
-			if f > float32(darkCap) {
-				f = float32(darkCap)
-			}
-			wp[i] = f
-			sum += float64(f)
-		}
-		mean := float32(sum / float64(len(wp)))
-		if mean > 0 {
-			for i := range weight {
-				weight[i] *= wp[i] / mean // normalised so the overall weight scale is ~unchanged
-			}
-		}
-	}
-	// Ramp-weight boost (mirrors preset.buildWeightMap for studio parity): up-weight smooth-gradient
-	// cells so the sampler spends more budget there — fewer standout facets in gradients.
-	if *rampWeight > 0 {
-		if weight == nil {
-			weight = make([]float32, prep.W*prep.H)
-			for i := range weight {
-				weight[i] = 1
-			}
-		}
-		rm := metric.RampMap(prep.Pixels, prep.W, prep.H)
-		b := float32(*rampWeight)
-		for i := range weight {
-			weight[i] *= 1 + b*rm[i]
-		}
-	}
+	// The saliency weight comes from the engine's own builder, not a copy of it: this is the map that
+	// decides which pixels the fit cares about, and the CLI exists to measure what the product does.
+	// presetpkg, not preset: the -preset FLAG shadows the package name here, which is part of why
+	// this file grew its own copy of the weight map in the first place.
+	weight := presetpkg.BuildWeightMap(*prep, prep.W, prep.H,
+		presetpkg.Choices{Weighted: weighted}, useV2, *weightStrength, *rampWeight)
 	applog.Printf("content mode: %s (alpha=%v alphaMin=%.2f aspectMax=%.1f weightV2=%v wstr=%.2f preprocess=%s posterize=%d polish=%v | flat=%.2f ramp=%.2f edge=%.2f palette=%d)",
 		resolvedMode, allowAlpha, alphaMin, aspectMax, *weighted && useV2, *weightStrength, preMode, *posterize, *polish, cs.FlatFrac, cs.RampFrac, cs.EdgeFrac, cs.Colors)
 

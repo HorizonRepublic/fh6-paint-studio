@@ -40,15 +40,6 @@ class RunHandle {
   void cancel() => _cancel();
 }
 
-Map<String, dynamic>? _tryDecode(String line) {
-  try {
-    final v = jsonDecode(line);
-    return v is Map<String, dynamic> ? v : null;
-  } catch (_) {
-    return null;
-  }
-}
-
 String _detail(StringBuffer diagnostics) {
   final text = diagnostics.toString().trim();
   return text.isEmpty ? '' : ' — it said: $text';
@@ -62,102 +53,55 @@ class EngineException implements Exception {
 }
 
 class EngineClient {
-  EngineClient._(this._socket, this._process);
+  EngineClient._(this._process);
 
-  final Socket _socket;
-  final Process? _process;
+  final Process _process;
 
   final _reader = MessageReader();
   final _handlers = <int, void Function(Update)>{};
   int _nextId = 0;
   bool _closed = false;
 
-  /// Spawns the service and connects to it.
+  /// Spawns the service and talks to it over its own pipes.
   ///
   /// [executable] is the studio or `engined` binary. Passing the studio with
-  /// `--engine-service` is the normal case — that is why the release ships two
-  /// files rather than three.
+  /// `--engine-service` is the normal case.
+  ///
+  /// No socket, no port, no token: the OS gives a parent and its child a
+  /// private channel that nothing else on the machine can reach, so there is
+  /// nothing to authenticate and nothing to configure. It also means the engine
+  /// cannot outlive us — when this process goes the pipe closes and its next
+  /// read ends it.
   static Future<EngineClient> spawn(
     String executable, {
-    // The idle timeout matters more than it looks: without it a service whose
-    // client dies before connecting waits for a client forever, and every crash
-    // leaves a process holding the GPU. The studio binary ignores the flag and
-    // uses its own constant; engined honours it.
-    List<String> args = const ['--engine-service', '-idle-timeout', '30s'],
-    Duration timeout = const Duration(seconds: 20),
+    List<String> args = const ['--engine-service'],
   }) async {
     final process = await Process.start(executable, args);
 
     // Keep the service's stderr. Bounded so a chatty service cannot grow it
     // without limit, and consumed either way so it cannot fill its pipe and
-    // block the child.
+    // block the child. stdout carries the protocol now, so stderr is the only
+    // place a human-readable complaint can appear — including the usage text a
+    // binary prints when it rejects its arguments.
     final diagnostics = StringBuffer();
     process.stderr.transform(utf8.decoder).listen((s) {
       if (diagnostics.length < 4096) diagnostics.write(s);
     });
 
-    final lines = process.stdout
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
-
-    // Scan for the announcement rather than assuming it is line one, so anything
-    // the service logs to stdout before it cannot break the handshake.
-    Map<String, dynamic>? hello;
-    try {
-      await for (final line in lines.timeout(timeout)) {
-        final decoded = _tryDecode(line);
-        if (decoded != null && decoded['addr'] is String) {
-          hello = decoded;
-          break;
-        }
-      }
-    } on TimeoutException {
-      process.kill();
-      throw EngineException(
-        'the engine service did not announce itself within $timeout'
-        '${_detail(diagnostics)}',
-      );
-    }
-    if (hello == null) {
-      // The stream ended without an announcement. This is the failure that
-      // gives no clue on its own — a binary that rejects its arguments prints
-      // usage to stderr and nothing at all to stdout — so the reason it did
-      // print has to be carried into the error.
-      final code = await process.exitCode;
-      throw EngineException(
-        'the engine service exited (code $code) without announcing itself'
-        '${_detail(diagnostics)}',
-      );
-    }
-
-    final addr = (hello['addr'] as String).split(':');
-    final socket = await Socket.connect(
-      addr[0],
-      int.parse(addr[1]),
-      timeout: timeout,
+    final client = EngineClient._(process);
+    client._listen();
+    unawaited(
+      process.exitCode.then(
+        (code) => client._failAll(
+          'the engine service exited (code $code)${_detail(diagnostics)}',
+        ),
+      ),
     );
-    final client = EngineClient._(socket, process);
-    client._listen();
-    await client._hello(hello['token'] as String);
-    return client;
-  }
-
-  /// Connects to a service someone else started. Useful in development: leave
-  /// the engine running and restart the UI as often as you like.
-  static Future<EngineClient> connect(
-    String host,
-    int port,
-    String token,
-  ) async {
-    final socket = await Socket.connect(host, port);
-    final client = EngineClient._(socket, null);
-    client._listen();
-    await client._hello(token);
     return client;
   }
 
   void _listen() {
-    _socket.listen(
+    _process.stdout.listen(
       (chunk) {
         for (final msg in _reader.add(chunk)) {
           _dispatch(msg);
@@ -222,11 +166,6 @@ class EngineClient {
     }
   }
 
-  Future<void> _hello(String token) async {
-    final res = await call('hello', {'token': token});
-    if (res == null) throw EngineException('the service refused the handshake');
-  }
-
   int _claim(void Function(Update) handler) {
     final id = ++_nextId;
     _handlers[id] = handler;
@@ -235,7 +174,7 @@ class EngineClient {
 
   void _send(int id, String method, [Object? params]) {
     if (_closed) throw EngineException('the connection is closed');
-    _socket.add(
+    _process.stdin.add(
       encodeJson(<String, dynamic>{
         'id': id,
         'method': method,
@@ -294,6 +233,10 @@ class EngineClient {
   /// Writes shapes into the running game. Completes when the write finishes;
   /// there is deliberately no cancel, because stopping halfway through a live
   /// layer table leaves the user's vinyl half-overwritten.
+  ///
+  /// No elevation anywhere in this path. The game is an ordinary process owned
+  /// by the same user at the same integrity level, and Windows grants a
+  /// full-access handle to that freely.
   Future<void> inject({
     required List<dynamic> shapes,
     required int width,
@@ -352,9 +295,6 @@ class EngineClient {
     });
     return completer.future;
   }
-
-  Future<Map<String, dynamic>> injectState() async =>
-      await call('inject.state') ?? const {};
 
   Future<Map<String, dynamic>> defaults() async => await call('defaults') ?? {};
 
@@ -429,7 +369,12 @@ class EngineClient {
 
   Future<void> close() async {
     _failAll('closed by the client');
-    await _socket.close();
-    _process?.kill();
+    // Closing stdin is the polite ask: the service's next read fails, it
+    // returns and exits on its own. The kill is the backstop for one that does
+    // not.
+    try {
+      await _process.stdin.close();
+    } catch (_) {}
+    _process.kill();
   }
 }

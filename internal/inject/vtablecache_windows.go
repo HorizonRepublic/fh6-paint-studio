@@ -26,8 +26,22 @@ type locationCache struct {
 	Count      int    `json:"count"`
 }
 
+// locationCachePath keeps the hint in the app's own directory, never %TEMP%.
+//
+// What lands in this file is another process's pid, its module base and two live object addresses.
+// Dropping that into the most-watched directory on the system, moments after opening a handle to a
+// running game, is the exact sequence a sandbox scores as staging — and it is a pure speed hint that
+// every path re-validates before use, so it has no business being anywhere so conspicuous.
 func locationCachePath() string {
-	return filepath.Join(os.TempDir(), "fh6-paint-studio-vtable.json")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, "FH6PaintStudio")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "vtable-cache.json")
 }
 
 // loadCache returns the cached (vtable, group) iff it was saved for this exact running process (same

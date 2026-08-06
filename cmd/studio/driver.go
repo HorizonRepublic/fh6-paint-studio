@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"image"
-	"net"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -36,8 +34,8 @@ type engineDriver interface {
 	// whichever process holds the Windows handles — and once the UI is Flutter, that is not the UI.
 	Inject(p ipc.InjectParams, onLog func(string)) error
 
-	// InjectState reports whether an injection is possible where the WRITING happens.
-	InjectState() ipc.InjectState
+	// InjectState reports whether an injection is possible at all here.
+	InjectState() injectState
 
 	// Library is the saved-generation store, which lives wherever the engine does.
 	Library() libraryAPI
@@ -74,33 +72,37 @@ func (*localDriver) Inject(p ipc.InjectParams, onLog func(string)) error {
 	return inject.Apply(p.Shapes, p.Width, p.Height, p.Layers, p.Scale, onLog)
 }
 
-func (*localDriver) InjectState() ipc.InjectState {
-	return ipc.InjectState{Available: inject.NewFH6().Available(), Elevated: inject.Elevated()}
+func (*localDriver) InjectState() injectState {
+	return injectState{Available: inject.NewFH6().Available()}
 }
 
 func (*localDriver) Close() {}
 
+// injectState says whether an injection can be attempted here at all. There is nothing about
+// privileges in it: the game is an ordinary same-user process and writing it needs none.
+type injectState struct {
+	Available bool
+}
+
 // remoteDriver talks to an engined process over the loopback protocol.
 type remoteDriver struct {
 	cmd  *exec.Cmd
-	conn net.Conn
+	in   io.WriteCloser
+	out  io.ReadCloser
 	cli  *ipc.Client
 	lib  libraryAPI
 	pres presetsAPI
 }
 
-// engineIdleTimeout stops a spawned service that nobody connects to. The studio connects within
-// milliseconds, so anything reaching this means the studio died on the way — and an engine process
-// left holding the GPU is worse than a slow start.
-const engineIdleTimeout = 30 * time.Second
-
-// dialEngine spawns the engine service and connects to it. By default it spawns THIS binary with the
-// --engine-service subcommand, which is why the release is two files rather than three; FH6_ENGINED
-// points at a separate engined.exe instead. Either way the service prints its address and token as
-// the first line of stdout, so there is no port to configure and no race on a fixed one — several
-// studios can run side by side.
+// dialEngine spawns the engine service and talks to it over its own pipes. By default it spawns THIS
+// binary with the --engine-service subcommand, which is why the release is two files rather than
+// three; FH6_ENGINED points at a separate engined.exe instead.
+//
+// No socket, no port, no token. The OS gives a parent and its child a private channel that nothing
+// else on the machine can reach, so there is nothing to authenticate and nothing to configure —
+// and several studios can run side by side without arguing over a port.
 func dialEngine(exePath string) (*remoteDriver, error) {
-	args := []string{"-idle-timeout", engineIdleTimeout.String()}
+	var args []string
 	if exePath == "" {
 		self, err := os.Executable()
 		if err != nil {
@@ -113,44 +115,16 @@ func dialEngine(exePath string) (*remoteDriver, error) {
 	if err != nil {
 		return nil, err
 	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", exePath, err)
 	}
 
-	line, err := bufio.NewReader(stdout).ReadString('\n')
-	if err != nil {
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("engine daemon did not announce itself: %w", err)
-	}
-	var hello struct {
-		Addr  string `json:"addr"`
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal([]byte(line), &hello); err != nil {
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("engine daemon said %q: %w", line, err)
-	}
-
-	conn, err := net.DialTimeout("tcp", hello.Addr, 5*time.Second)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		return nil, err
-	}
-	if err := ipc.WriteJSON(conn, ipc.Request{
-		ID: 1, Method: "hello", Params: json.RawMessage(`{"token":"` + hello.Token + `"}`),
-	}); err != nil {
-		conn.Close()
-		_ = cmd.Process.Kill()
-		return nil, err
-	}
-	if _, _, err := ipc.Read(conn); err != nil { // the handshake reply; a rejection closes the conn
-		conn.Close()
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("engine daemon refused the handshake: %w", err)
-	}
-
-	d := &remoteDriver{cmd: cmd, conn: conn, cli: ipc.NewClient(conn, conn)}
+	d := &remoteDriver{cmd: cmd, in: stdin, out: stdout, cli: ipc.NewClient(stdout, stdin)}
 	go func() { _ = d.cli.Listen() }()
 	return d, nil
 }
@@ -226,19 +200,17 @@ func (f *frameHolder) get() *image.NRGBA {
 	return f.img
 }
 
+// Inject happens HERE, never over the socket. The service deliberately cannot write another
+// process's memory — that is the whole point of it being a plain compute daemon — so both drivers
+// do the write in the studio's own process, which is where the Windows handles and the user's
+// elevation already are.
+// Inject goes over the protocol, so the write happens wherever the engine does.
 func (d *remoteDriver) Inject(p ipc.InjectParams, onLog func(string)) error {
 	return d.cli.Inject(p, onLog)
 }
 
-// InjectState asks the SERVICE, not this process. The service is a child, so it inherits this
-// process's elevation and today the two always agree — but the answer belongs to the side that
-// opens the game's memory, and the day the service is started some other way it will differ.
-func (d *remoteDriver) InjectState() ipc.InjectState {
-	var st ipc.InjectState
-	if err := d.cli.Call("inject.state", nil, &st); err != nil {
-		return ipc.InjectState{}
-	}
-	return st
+func (*remoteDriver) InjectState() injectState {
+	return injectState{Available: inject.NewFH6().Available()}
 }
 
 // Library talks to the daemon's store. The root is fetched once at connect time so the "open the
@@ -259,8 +231,13 @@ func (d *remoteDriver) Presets() presetsAPI {
 }
 
 func (d *remoteDriver) Close() {
-	if d.conn != nil {
-		d.conn.Close()
+	// Closing our end of its stdin is how the service is asked to stop: the read fails, Serve
+	// returns and the process exits on its own. The kill below is the backstop for one that does not.
+	if d.in != nil {
+		_ = d.in.Close()
+	}
+	if d.out != nil {
+		_ = d.out.Close()
 	}
 	if d.cmd != nil && d.cmd.Process != nil {
 		_ = d.cmd.Process.Kill()

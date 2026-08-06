@@ -146,11 +146,6 @@ func (s *Server) libraryMethod(req Request) bool {
 	return true
 }
 
-// SetPresetRoot points the custom-preset store at a directory instead of the default.
-func (s *Server) SetPresetRoot(root string) {
-	s.presetOnce.Do(func() { s.presets = userpreset.Open(root) })
-}
-
 func (s *Server) presetStore() (*userpreset.Store, error) {
 	s.presetOnce.Do(func() {
 		root, err := userpreset.DefaultRoot()

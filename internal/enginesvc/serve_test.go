@@ -1,83 +1,69 @@
 package enginesvc
 
 import (
-	"encoding/json"
+	"go/parser"
+	"go/token"
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"fh6-paint-studio/internal/ipc"
 )
 
-// The handshake is the only thing standing between the port and GPU work, and both of its outcomes
-// are silent from the outside: an accepted client just proceeds, a rejected one just sees a closed
-// connection. Neither shows up in a run, so they get covered here.
-func TestHandshake(t *testing.T) {
-	const token = "0123456789abcdef"
-
-	t.Run("accepts the right token", func(t *testing.T) {
-		err := exchange(t, token, ipc.Request{
-			ID: 1, Method: "hello", Params: json.RawMessage(`{"token":"` + token + `"}`),
-		})
+// The service must not listen on anything. It used to bind 127.0.0.1 and guard the port with a
+// token, which is the only reason it ever needed a CSPRNG — and a background process holding an
+// open port is a shape worth not having. The client spawns it, so the pipes the OS already set up
+// between them are private by construction.
+func TestServiceOpensNoPort(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	banned := []string{`"net"`, `"crypto/rand"`, `"crypto/`}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, f, nil, parser.ImportsOnly)
 		if err != nil {
-			t.Fatalf("handshake rejected a valid client: %v", err)
+			t.Fatalf("%s: %v", f, err)
 		}
-	})
-
-	t.Run("refuses a wrong token", func(t *testing.T) {
-		if err := exchange(t, token, ipc.Request{
-			ID: 1, Method: "hello", Params: json.RawMessage(`{"token":"not-it"}`),
-		}); err == nil {
-			t.Fatal("handshake accepted a client with the wrong token")
+		for _, imp := range parsed.Imports {
+			for _, b := range banned {
+				if strings.HasPrefix(imp.Path.Value, b) {
+					t.Errorf("%s imports %s; the service neither listens nor needs a token", f, imp.Path.Value)
+				}
+			}
 		}
-	})
-
-	t.Run("refuses a client that opens with something else", func(t *testing.T) {
-		if err := exchange(t, token, ipc.Request{ID: 1, Method: "generate"}); err == nil {
-			t.Fatal("handshake accepted a request that was not a hello — that is GPU work from an unknown caller")
-		}
-	})
-}
-
-// A connection that opens and says nothing must not hold the single client slot: the service serves
-// one client at a time, so a silent socket would otherwise lock out the real UI.
-func TestHandshakeDeadlineFreesTheSlot(t *testing.T) {
-	srv, cli := net.Pipe()
-	defer cli.Close()
-
-	done := make(chan error, 1)
-	go func() { done <- handshake(srv, "token") }()
-
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("a silent client completed the handshake")
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("a silent client held the connection open past the deadline")
 	}
 }
 
-func exchange(t *testing.T, token string, req ipc.Request) error {
-	t.Helper()
-	srv, cli := net.Pipe()
-	defer srv.Close()
-	defer cli.Close()
+// And it must actually answer over whatever streams it is handed, since that is now the only way in.
+func TestServeAnswersOverTheStreams(t *testing.T) {
+	srvConn, cliConn := net.Pipe()
+	defer cliConn.Close()
+
+	go func() { _ = serve(srvConn, srvConn, Options{LibraryRoot: t.TempDir()}) }()
+
+	cli := ipc.NewClient(cliConn, cliConn)
+	go func() { _ = cli.Listen() }()
 
 	done := make(chan error, 1)
-	go func() { done <- handshake(srv, token) }()
-
-	if err := ipc.WriteJSON(cli, req); err != nil {
-		t.Fatalf("write hello: %v", err)
-	}
-	// Drain whatever the server replies so its write cannot block on an unread pipe.
-	go func() { _, _, _ = ipc.Read(cli) }()
-
+	go func() {
+		var out struct {
+			Backends []string `json:"backends"`
+		}
+		done <- cli.Call("backends", nil, &out)
+	}()
 	select {
 	case err := <-done:
-		return err
+		if err != nil {
+			t.Fatalf("the service did not answer over its streams: %v", err)
+		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("handshake never returned")
-		return nil
+		t.Fatal("the service never answered")
 	}
 }

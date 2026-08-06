@@ -9,8 +9,6 @@ import (
 	"fh6-paint-studio/internal/stylize"
 	_ "fh6-paint-studio/internal/stylize/fill"   // register the "fill" engine
 	_ "fh6-paint-studio/internal/stylize/glow"   // register the "glow" engine
-	_ "fh6-paint-studio/internal/stylize/shade"  // register the "shade" engine
-	_ "fh6-paint-studio/internal/stylize/spark"  // register the "spark" engine
 	_ "fh6-paint-studio/internal/stylize/stroke" // register the "stroke" engine
 )
 

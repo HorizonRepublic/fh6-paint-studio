@@ -295,6 +295,5 @@
   "status.error": "エラー — ログを確認",
   "status.generating": "生成中…",
   "status.ready": "準備完了",
-  "status.ready_open": "準備完了 — 画像を開いて開始",
-  "status.run_as_admin": "管理者として実行"
+  "status.ready_open": "準備完了 — 画像を開いて開始"
 }

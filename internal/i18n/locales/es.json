@@ -295,6 +295,5 @@
   "status.error": "Error — consulta el registro",
   "status.generating": "Generando…",
   "status.ready": "Listo",
-  "status.ready_open": "Listo — abre una imagen para empezar",
-  "status.run_as_admin": "Ejecutar como administrador"
+  "status.ready_open": "Listo — abre una imagen para empezar"
 }

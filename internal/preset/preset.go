@@ -79,10 +79,17 @@ type Choices struct {
 	RampWeight                                  float64 // -1 = mode default; >=0 overrides the smooth-gradient weight boost
 }
 
-// DefaultChoices returns the GUI's starting configuration (matches the CLI flag defaults).
+// DefaultChoices returns the product's starting configuration (and matches the CLI flag defaults).
+//
+// Quality is "quality", not "balanced", and that difference is 50x the search: PresetCounts gives
+// balanced 1000 random candidates with no sample budget, quality 50000 with 32000. The Gio studio
+// used to overwrite this field with "quality" on its way past, so the number here never mattered —
+// until the client became the thing that ships, and it takes this struct verbatim. Every run the
+// product has made through the new client has been searching a fiftieth of what every measurement,
+// benchmark and tuned default in this repo was established on.
 func DefaultChoices() Choices {
 	return Choices{
-		Shapes: 1000, Mode: "anime", Quality: "balanced", Seed: 1, SS: 1,
+		Shapes: 1000, Mode: "anime", Quality: "quality", Seed: 1, SS: 1,
 		Grid: 48, Aspect: -1, WeightStrength: -1, AlphaMin: -1, Overdraw: 1, RampWeight: -1,
 	}
 }
@@ -118,7 +125,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 	// candidates come from. A quarter is where the measurement put it: on the owner's bench the engine
 	// lands within ~2-3% of its full-batch error there, while a UNIFORM search at that batch is 5-9%
 	// worse. FH6_AI_BATCH overrides the divisor for A/Bs.
-	if c.AIFast {
+	if c.AIFast && aimodel.Present() {
 		div := 4
 		if v := os.Getenv("FH6_AI_BATCH"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n >= 1 {
@@ -174,7 +181,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 
 	sp := resolveShapeParams(md, c, flatMode, transparent)
 
-	weight := buildWeightMap(prep, w, h, c, flatMode || transparent, sp.wstr, sp.rampWeight)
+	weight := BuildWeightMap(prep, w, h, c, flatMode || transparent, sp.wstr, sp.rampWeight)
 
 	compact := true
 	if c.Compact != nil {
@@ -558,12 +565,17 @@ func DarkFrac(pixels []float32) float64 {
 	return float64(dark) / float64(n)
 }
 
-// buildWeightMap produces the per-pixel saliency weight. It optionally builds an edge-saliency map
+// BuildWeightMap produces the per-pixel saliency weight.
+//
+// Exported because the CLI needs the SAME map, and it used to have its own copy of these ~75 lines.
+// The copies agreed, expression for expression -- but nothing held them that way, and a weight map
+// that drifts is invisible: nothing crashes, no test fails, the engine simply starts caring about
+// different pixels. That is exactly how the dark-weight bug happened once already. It optionally builds an edge-saliency map
 // (richer dilated V2 for flat/cutout, Sobel for smooth content), blends it toward uniform by
 // weight-strength, then — under linear-light output — multiplies in the perceptual sRGB-derivative
 // weight. Returns nil only when saliency weighting is off AND linear-light is off (the engine then
 // treats the run as uniform).
-func buildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr, rampWeight float64) []float32 {
+func BuildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr, rampWeight float64) []float32 {
 	weighted := true
 	if c.Weighted != nil {
 		weighted = *c.Weighted
@@ -1300,7 +1312,10 @@ func maxInt(a, b int) int {
 	return b
 }
 
-// aiBlob/aiFrac/aiJitter carry the embedded proposer into the run when the toggle is on. The share
+// aiBlob/aiFrac/aiJitter carry the proposer into the run when the toggle is on AND the build has a
+// model at all -- it lives behind the `aimodel` tag and is absent from the release. Without it the
+// toggle must do nothing: shrinking the batch with no network to steer what remains is worse than
+// leaving the search alone. The share
 // is the whole batch and the spread is small: the network emits a fixed set of modes per location,
 // so a batch drawn entirely from it would otherwise carry only a handful of distinct shapes, and
 // 0.02 was the spread that measured best. Every proposal is still scored exactly, so a weak model
@@ -1313,14 +1328,14 @@ func aiBlob(on bool) []byte {
 }
 
 func aiFrac(on bool) float64 {
-	if !on {
+	if !on || !aimodel.Present() {
 		return 0
 	}
 	return 1.0
 }
 
 func aiJitter(on bool) float64 {
-	if !on {
+	if !on || !aimodel.Present() {
 		return 0
 	}
 	return 0.02

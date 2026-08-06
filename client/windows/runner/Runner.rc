@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.horizonrepublic" "\0"
-            VALUE "FileDescription", "fh6_paint_studio" "\0"
+            VALUE "CompanyName", "Horizon Republic" "\0"
+            VALUE "FileDescription", "FH6 Paint Studio - image-to-vinyl livery generator" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "fh6_paint_studio" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.horizonrepublic. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Horizon Republic. MIT License." "\0"
             VALUE "OriginalFilename", "fh6_paint_studio.exe" "\0"
-            VALUE "ProductName", "fh6_paint_studio" "\0"
+            VALUE "ProductName", "FH6 Paint Studio" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

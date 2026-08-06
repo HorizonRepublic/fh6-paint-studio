@@ -125,14 +125,22 @@ func Prepare(req Request) (*Run, error) {
 
 	run.Resolved = preset.Resolve(run.Prep, req.Choices)
 	if preset.IsHybridMode(req.Choices.Mode) {
-		if ink := preset.InkBudget(req.Choices.InkRatio, req.Choices.Shapes); ink > 0 {
+		// A client that says nothing about the split gets the mode's own. The Gio studio always sent
+		// an explicit ratio, so this never mattered until a client arrived that does not — and the
+		// symptom was silent: "Line art" drew its badge, asked for zero ink lines, and produced a
+		// plain fill. DefaultInkRatio is 0 for every mode that has no ink, so nothing else moves.
+		ratio := req.Choices.InkRatio
+		if ratio == 0 {
+			ratio = preset.DefaultInkRatio(req.Choices.Mode)
+		}
+		if ink := preset.InkBudget(ratio, req.Choices.Shapes); ink > 0 {
 			run.Ink = ink
 			run.Resolved.Options.StopAt = req.Choices.Shapes - ink
 			if run.Resolved.Options.StopAt < 1 {
 				run.Resolved.Options.StopAt = 1
 			}
 			run.Notes = append(run.Notes, fmt.Sprintf("%s: %d ink lines + %d fill (%.0f%% lines)",
-				req.Choices.Mode, ink, run.Resolved.Options.StopAt, req.Choices.InkRatio*100))
+				req.Choices.Mode, ink, run.Resolved.Options.StopAt, ratio*100))
 		}
 	}
 	return run, nil

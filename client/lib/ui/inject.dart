@@ -116,12 +116,6 @@ class _InjectPopoverState extends State<InjectPopover> {
                       onChanged: studio.setInjectScale,
                     ),
                   ),
-                  if (!studio.injectElevated)
-                    _Warning(
-                      'The engine is not running as administrator. Writing to '
-                      "the game's memory needs it — restart elevated if the "
-                      'injection is refused.',
-                    ),
                 ],
               ),
             ),

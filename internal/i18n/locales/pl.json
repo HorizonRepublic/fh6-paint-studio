@@ -295,6 +295,5 @@
   "status.error": "Błąd — zobacz dziennik",
   "status.generating": "Generowanie…",
   "status.ready": "Gotowe",
-  "status.ready_open": "Gotowe — otwórz obraz, aby zacząć",
-  "status.run_as_admin": "Uruchom jako administrator"
+  "status.ready_open": "Gotowe — otwórz obraz, aby zacząć"
 }

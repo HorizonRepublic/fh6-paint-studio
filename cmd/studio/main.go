@@ -68,7 +68,7 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--engine-service" {
 		applog.Init("engined.log")
 		defer applog.Close()
-		if err := enginesvc.Serve(enginesvc.Options{IdleTimeout: engineIdleTimeout}); err != nil {
+		if err := enginesvc.Serve(enginesvc.Options{}); err != nil {
 			fmt.Fprintln(os.Stderr, "engine service:", err)
 			os.Exit(1)
 		}
@@ -121,9 +121,6 @@ func loop(w *app.Window) error {
 	st.SetBackends(backends)               // a picker when >1 GPU backend works (allgpu build), else a static label
 	runner.BackendPreference = backends[0] // default to the system's preferred (CUDA where present, else Vulkan)
 	st.UpdateCheckEnabled = updateCheckEnabled
-	// Elevation is asked of the DRIVER, not of this process: the injection happens wherever the
-	// engine runs, and that is the process whose token has to be able to open the game.
-	st.Elevated = drv.InjectState().Elevated
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
@@ -389,13 +386,6 @@ func loop(w *app.Window) error {
 			}
 
 			// Handle action buttons (their click areas come from the previous frame).
-			if st.ElevateBtn.Clicked(gtx) {
-				if err := inject.RelaunchElevated(); err != nil {
-					st.Toast = "Could not elevate: " + err.Error()
-				} else {
-					return nil // the elevated instance has launched; exit this one
-				}
-			}
 			// Open from the side-panel button OR the clickable empty-state preview card.
 			if (st.OpenBtn.Clicked(gtx) || st.PreviewOpen.Clicked(gtx)) && !opening && !picking {
 				// Run the native dialog on a worker goroutine so the event loop returns immediately (the

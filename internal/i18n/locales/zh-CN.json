@@ -295,6 +295,5 @@
   "status.error": "错误 — 请查看日志",
   "status.generating": "正在生成…",
   "status.ready": "就绪",
-  "status.ready_open": "就绪 — 打开图片以开始",
-  "status.run_as_admin": "以管理员身份运行"
+  "status.ready_open": "就绪 — 打开图片以开始"
 }

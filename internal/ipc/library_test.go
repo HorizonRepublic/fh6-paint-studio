@@ -165,18 +165,22 @@ func TestUnknownMethodFails(t *testing.T) {
 	}
 }
 
-// InjectState must answer even where injection is impossible, so a UI can disable the button with a
-// reason instead of failing at the moment the user clicks it.
-func TestInjectStateAnswers(t *testing.T) {
+// Injection is served here, and it must refuse a request that cannot be carried out safely. Both
+// refusals are silent from the outside — a bad request just fails — and neither shows up in a run,
+// so they are covered here. A write with no layer count would walk a live layer table in another
+// process with no idea where to stop.
+func TestInjectRefusesIncompleteRequests(t *testing.T) {
 	c, stop := testClient(t)
 	defer stop()
 
-	var st InjectState
-	if err := c.Call("inject.state", nil, &st); err != nil {
-		t.Fatalf("inject.state: %v", err)
+	for name, params := range map[string]InjectParams{
+		"no shapes": {Width: 100, Height: 100, Layers: 4},
+		"no layers": {Shapes: []model.Shape{{Type: model.TypeRotatedEllipse}}, Width: 100, Height: 100},
+	} {
+		if err := c.Call("inject", params, nil); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
-	// Availability is platform-dependent; that it ANSWERED is the contract.
-	_ = st
 }
 
 // testClient wires a client to a server whose library lives in a temp directory. Pointing the store

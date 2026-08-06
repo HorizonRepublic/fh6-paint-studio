@@ -1,0 +1,41 @@
+// Version resource for fh6vk.dll.
+//
+// The shim shipped nameless for a long time: no company, no description, no version. An unsigned
+// DLL with an empty resource is the shape heuristic scanners like least, and this one sits beside a
+// binary that talks to a game process — the pair should not look anonymous.
+//
+// build-vulkan.ps1 writes fh6vk_version.h (gitignored) right before calling rc. It is a generated
+// header rather than /d arguments because rc.exe cannot take a QUOTED string on the command line —
+// FH6VK_VER_STRING has to arrive already spelled as a string literal.
+
+#include <winver.h>
+#include "fh6vk_version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION FH6VK_VER_MAJOR,FH6VK_VER_MINOR,FH6VK_VER_PATCH,0
+ PRODUCTVERSION FH6VK_VER_MAJOR,FH6VK_VER_MINOR,FH6VK_VER_PATCH,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS__WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Horizon Republic"
+            VALUE "FileDescription", "FH6 Paint Studio Vulkan compute shim"
+            VALUE "FileVersion", FH6VK_VER_STRING
+            VALUE "InternalName", "fh6vk"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Horizon Republic. MIT License."
+            VALUE "OriginalFilename", "fh6vk.dll"
+            VALUE "ProductName", "FH6 Paint Studio"
+            VALUE "ProductVersion", FH6VK_VER_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

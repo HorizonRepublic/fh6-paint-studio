@@ -3,7 +3,7 @@
 // Package vulkan is the cross-vendor GPU backend: a second implementation of
 // backend.Backend (alongside internal/backend/cuda) that mirrors the CPU reference
 // (internal/backend/cpu). It drives fh6vk.dll (built from internal/backend/vulkan/shim
-// by scripts/build-vulkan.ps1) through golang.org/x/sys/windows + syscall — no cgo, so
+// by scripts/build-vulkan.ps1) through the standard library's syscall package — no cgo, so
 // the Go build stays CGO_ENABLED=0 and the DLL is the only native artifact.
 //
 // Build the DLL first (scripts/build-vulkan.ps1), then build Go with -tags vulkan. The
@@ -19,13 +19,12 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"syscall"
 	"unsafe"
 
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
-
-	"golang.org/x/sys/windows"
 )
 
 // candStride/resStride are the flat wire formats shared with shim.cpp (== shim.cu):
@@ -55,26 +54,26 @@ type Vulkan struct {
 	outBuf  []float32
 
 	masksOn       bool // word atlas uploaded — bank words score/composite/polish on device
-	dll           *windows.DLL
-	procEval      *windows.Proc
-	procApply     *windows.Proc
-	procGrid      *windows.Proc
-	procReadCanv  *windows.Proc
-	procReset     *windows.Proc
-	procFree      *windows.Proc
-	procLastError *windows.Proc
-	procSampleBud *windows.Proc
+	dll           *syscall.DLL
+	procEval      *syscall.Proc
+	procApply     *syscall.Proc
+	procGrid      *syscall.Proc
+	procReadCanv  *syscall.Proc
+	procReset     *syscall.Proc
+	procFree      *syscall.Proc
+	procLastError *syscall.Proc
+	procSampleBud *syscall.Proc
 	// on-device search
-	procSearchRand *windows.Proc
-	procSearchMom  *windows.Proc
-	procSetOrient  *windows.Proc
-	procSetCoh     *windows.Proc
-	procSetBound   *windows.Proc
+	procSearchRand *syscall.Proc
+	procSearchMom  *syscall.Proc
+	procSetOrient  *syscall.Proc
+	procSetCoh     *syscall.Proc
+	procSetBound   *syscall.Proc
 	// joint-polish device primitives
 	procGradients, procSetMasks,
 	procSetProp, procPropOn, procPropGate, procRunProp, procPropMap, procPropDims,
 	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolLD, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procBigGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
-	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *windows.Proc
+	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *syscall.Proc
 }
 
 var _ backend.Backend = (*Vulkan)(nil)
@@ -92,11 +91,11 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 			weight[i] = 1
 		}
 	}
-	dll, err := windows.LoadDLL("fh6vk.dll")
+	dll, err := syscall.LoadDLL("fh6vk.dll")
 	if err != nil {
 		return nil, fmt.Errorf("load fh6vk.dll (build it with scripts/build-vulkan.ps1): %w", err)
 	}
-	proc := func(name string) *windows.Proc {
+	proc := func(name string) *syscall.Proc {
 		p, perr := dll.FindProc(name)
 		if perr != nil && err == nil {
 			err = perr

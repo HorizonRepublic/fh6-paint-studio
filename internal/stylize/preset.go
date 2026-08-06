@@ -21,12 +21,3 @@ var presetRegistry = map[string]Preset{}
 
 // RegisterPreset adds a preset recipe under its name (Open/Closed: register, never edit existing).
 func RegisterPreset(p Preset) { presetRegistry[p.Name] = p }
-
-// Presets returns the registered preset names (for the studio picker / CLI listing).
-func Presets() []string {
-	names := make([]string, 0, len(presetRegistry))
-	for n := range presetRegistry {
-		names = append(names, n)
-	}
-	return names
-}

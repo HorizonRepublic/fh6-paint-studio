@@ -8,12 +8,13 @@ import (
 	"math"
 	"runtime"
 	"strings"
+	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
-// Native process-memory access for the FH6 injector, built on golang.org/x/sys/windows (no cgo).
+// Native process-memory access for the FH6 injector, on the standard library's syscall package plus
+// the four declarations at the bottom of this file. No cgo, and deliberately no
+// golang.org/x/sys/windows -- see the comment there for why.
 
 const (
 	memCommit    = 0x1000
@@ -29,8 +30,11 @@ const (
 )
 
 var (
-	modKernel32        = windows.NewLazySystemDLL("kernel32.dll")
-	procVirtualQueryEx = modKernel32.NewProc("VirtualQueryEx")
+	modKernel32            = syscall.NewLazyDLL("kernel32.dll")
+	procVirtualQueryEx     = modKernel32.NewProc("VirtualQueryEx")
+	procReadProcessMemory  = modKernel32.NewProc("ReadProcessMemory")
+	procWriteProcessMemory = modKernel32.NewProc("WriteProcessMemory")
+	procModule32FirstW     = modKernel32.NewProc("Module32FirstW")
 )
 
 // memBasicInfo mirrors MEMORY_BASIC_INFORMATION (x64 layout, 48 bytes).
@@ -48,26 +52,26 @@ type memBasicInfo struct {
 
 // proc is an open handle to the target process.
 type proc struct {
-	h   windows.Handle
+	h   syscall.Handle
 	pid uint32
 }
 
 // findProcess returns the pid + name of the first running process matching any of names.
 func findProcess(names []string) (uint32, string, error) {
-	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	snap, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return 0, "", err
 	}
-	defer windows.CloseHandle(snap)
+	defer syscall.CloseHandle(snap)
 
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
 		want[strings.ToLower(n)] = true
 	}
-	var e windows.ProcessEntry32
+	var e syscall.ProcessEntry32
 	e.Size = uint32(unsafe.Sizeof(e))
-	for err = windows.Process32First(snap, &e); err == nil; err = windows.Process32Next(snap, &e) {
-		name := windows.UTF16ToString(e.ExeFile[:])
+	for err = syscall.Process32First(snap, &e); err == nil; err = syscall.Process32Next(snap, &e) {
+		name := syscall.UTF16ToString(e.ExeFile[:])
 		if want[strings.ToLower(name)] {
 			return e.ProcessID, name, nil
 		}
@@ -75,54 +79,27 @@ func findProcess(names []string) (uint32, string, error) {
 	return 0, "", fmt.Errorf("game process not found (looked for %s) — start FH6 first", strings.Join(names, ", "))
 }
 
-// enableDebugPrivilege turns on SeDebugPrivilege for our own token. Without it, even an elevated process
-// is refused OpenProcess on most foreign processes; with it (and elevation) the game opens. Returns nil
-// only when the privilege was actually granted, which requires the app to be running elevated.
-func enableDebugPrivilege() error {
-	var tok windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &tok); err != nil {
-		return err
-	}
-	defer tok.Close()
-	var luid windows.LUID
-	name, err := windows.UTF16PtrFromString("SeDebugPrivilege")
-	if err != nil {
-		return err
-	}
-	if err := windows.LookupPrivilegeValue(nil, name, &luid); err != nil {
-		return err
-	}
-	tp := windows.Tokenprivileges{PrivilegeCount: 1}
-	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
-	// AdjustTokenPrivileges succeeds even when the privilege is not held; ERROR_NOT_ALL_ASSIGNED is then
-	// surfaced as the returned error, which is exactly the "not elevated" case we want to detect.
-	return windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil)
-}
-
-func processElevated() bool {
-	return windows.GetCurrentProcessToken().IsElevated()
-}
-
 func openProc(pid uint32, write bool) (*proc, error) {
-	debugOK := enableDebugPrivilege() == nil
-	access := uint32(windows.PROCESS_QUERY_INFORMATION | windows.PROCESS_VM_READ)
+	access := uint32(syscall.PROCESS_QUERY_INFORMATION | processVMRead)
 	if write {
-		access |= windows.PROCESS_VM_OPERATION | windows.PROCESS_VM_WRITE
+		access |= processVMOperation | processVMWrite
 	}
-	h, err := windows.OpenProcess(access, false, pid)
+
+	// No privilege is requested, and none is needed. The game is an ordinary process owned by the
+	// same user at the same integrity level, and Windows grants a full-access handle to those
+	// freely — which is why this has always worked without the app ever being elevated. When it does
+	// fail, the reason is the Microsoft Store build, which runs sandboxed and refuses a handle to an
+	// administrator just as readily; asking for privileges would be a detour to the same dead end.
+	h, err := syscall.OpenProcess(access, false, pid)
 	if err != nil {
-		hint := "run the app as administrator (right-click the exe → Run as administrator)"
-		if processElevated() && debugOK {
-			hint = "the app is elevated with SeDebugPrivilege but the game still refused — it is likely the Microsoft Store / Game Pass build, which runs sandboxed; the Steam build injects normally"
-		}
-		return nil, fmt.Errorf("OpenProcess(pid %d): %w — %s", pid, err, hint)
+		return nil, fmt.Errorf("OpenProcess(pid %d): %w — if this is the Microsoft Store / Game Pass build of the game it runs sandboxed and cannot be written to; the Steam build injects normally", pid, err)
 	}
 	return &proc{h: h, pid: pid}, nil
 }
 
 func (p *proc) close() {
 	if p.h != 0 {
-		windows.CloseHandle(p.h)
+		syscall.CloseHandle(p.h)
 		p.h = 0
 	}
 }
@@ -133,7 +110,7 @@ func (p *proc) read(addr uintptr, n int) ([]byte, error) {
 	}
 	buf := make([]byte, n)
 	var nread uintptr
-	if err := windows.ReadProcessMemory(p.h, addr, &buf[0], uintptr(n), &nread); err != nil {
+	if err := readProcessMemory(p.h, addr, &buf[0], uintptr(n), &nread); err != nil {
 		return nil, err
 	}
 	if int(nread) != n {
@@ -149,7 +126,7 @@ func (p *proc) write(addr uintptr, data []byte) error {
 		return nil
 	}
 	var nw uintptr
-	if err := windows.WriteProcessMemory(p.h, addr, &data[0], uintptr(len(data)), &nw); err != nil {
+	if err := writeProcessMemory(p.h, addr, &data[0], uintptr(len(data)), &nw); err != nil {
 		return err
 	}
 	if int(nw) != len(data) {
@@ -210,14 +187,14 @@ func isReadable(protect uint32) bool {
 // moduleBase returns the load address (image base) of the target's main module — needed to turn
 // the RTTI CompleteObjectLocator's image-relative offsets into absolute addresses.
 func (p *proc) moduleBase() (uintptr, bool) {
-	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE|windows.TH32CS_SNAPMODULE32, p.pid)
+	snap, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPMODULE|syscall.TH32CS_SNAPMODULE32, p.pid)
 	if err != nil {
 		return 0, false
 	}
-	defer windows.CloseHandle(snap)
-	var me windows.ModuleEntry32
+	defer syscall.CloseHandle(snap)
+	var me moduleEntry32
 	me.Size = uint32(unsafe.Sizeof(me))
-	if err := windows.Module32First(snap, &me); err != nil {
+	if err := module32First(snap, &me); err != nil {
 		return 0, false
 	}
 	return me.ModBaseAddr, true // first module is always the .exe
@@ -277,4 +254,56 @@ func (p *proc) iterRegions(typeFilter uint32, writableOnly bool, fn func(region)
 		}
 		addr = next
 	}
+}
+
+// The access rights, the struct and the three calls the standard library does not surface.
+//
+// Declared here rather than taken from golang.org/x/sys/windows. Importing that package links its
+// ENTIRE Win32 name table into the binary -- CryptProtectData, AdjustTokenPrivileges,
+// CreateProcessAsUserW, CreateServiceW, NtCreateFile and hundreds more this program never calls --
+// and pulls in net with a DNS resolver besides. All of it lands in .rdata where a string triage
+// finds it, and a memory-write API reached through GetProcAddress reads worse than one declared in
+// the import table. These are the four we actually use.
+const (
+	processVMOperation = 0x0008
+	processVMRead      = 0x0010
+	processVMWrite     = 0x0020
+)
+
+// moduleEntry32 mirrors MODULEENTRY32W (x64 layout).
+type moduleEntry32 struct {
+	Size         uint32
+	ModuleID     uint32
+	ProcessID    uint32
+	GlblcntUsage uint32
+	ProccntUsage uint32
+	ModBaseAddr  uintptr
+	ModBaseSize  uint32
+	Module       syscall.Handle
+	ModuleName   [256]uint16
+	ExePath      [260]uint16
+}
+
+func readProcessMemory(h syscall.Handle, addr uintptr, buf *byte, n uintptr, read *uintptr) error {
+	r, _, err := procReadProcessMemory.Call(uintptr(h), addr, uintptr(unsafe.Pointer(buf)), n, uintptr(unsafe.Pointer(read)))
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func writeProcessMemory(h syscall.Handle, addr uintptr, buf *byte, n uintptr, written *uintptr) error {
+	r, _, err := procWriteProcessMemory.Call(uintptr(h), addr, uintptr(unsafe.Pointer(buf)), n, uintptr(unsafe.Pointer(written)))
+	if r == 0 {
+		return err
+	}
+	return nil
+}
+
+func module32First(snap syscall.Handle, me *moduleEntry32) error {
+	r, _, err := procModule32FirstW.Call(uintptr(snap), uintptr(unsafe.Pointer(me)))
+	if r == 0 {
+		return err
+	}
+	return nil
 }

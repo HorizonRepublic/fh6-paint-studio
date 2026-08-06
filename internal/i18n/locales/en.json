@@ -295,6 +295,5 @@
   "status.error": "Error — see log",
   "status.generating": "Generating…",
   "status.ready": "Ready",
-  "status.ready_open": "Ready — open an image to start",
-  "status.run_as_admin": "Run as admin"
+  "status.ready_open": "Ready — open an image to start"
 }

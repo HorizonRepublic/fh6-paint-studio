@@ -76,11 +76,7 @@ class AboutSheet extends StatelessWidget {
                   _Row(
                     context.s('aboutInjection'),
                     studio.injectAvailable
-                        ? context.s(
-                            studio.injectElevated
-                                ? 'injReady'
-                                : 'injNotElevated',
-                          )
+                        ? context.s('injReady')
                         : context.s('injUnavailable'),
                   ),
                   _Row(context.s('savedRuns'), '${studio.entries.length}'),

@@ -263,10 +263,6 @@ type AppState struct {
 	InjectHint       Hint          // explains the FH6-template-layers field (the inject footgun)
 	InjectGuideClick widget.Clickable
 	InjectGuideOpen  bool // the "How injecting works" steps are expanded
-	ElevateBtn       widget.Clickable
-	Elevated         bool        // process is running as administrator (set by main at startup)
-	Shield           image.Image // system UAC shield icon (nil if unavailable)
-	ShieldOp         paint.ImageOp
 
 	// preview interaction
 	Wipe        widget.Float
@@ -559,10 +555,6 @@ func NewAppState(th *Theme) *AppState {
 	s.LogList.ScrollToEnd = true
 	s.AutoUpdate.Value = true // overridden by the saved preference
 	s.AboutList.Axis = layout.Vertical
-	if img := loadShield(); img != nil {
-		s.Shield = img
-		s.ShieldOp = paint.NewImageOp(img)
-	}
 	s.PresetNameEd.SingleLine = true
 	s.ExpGroups[0].open = true // the smoothness/crispness group is open by default
 	s.baseMode = s.Mode.Value()

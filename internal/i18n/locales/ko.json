@@ -295,6 +295,5 @@
   "status.error": "오류 — 로그 확인",
   "status.generating": "생성 중…",
   "status.ready": "준비됨",
-  "status.ready_open": "준비됨 — 이미지를 열어 시작하세요",
-  "status.run_as_admin": "관리자 권한으로 실행"
+  "status.ready_open": "준비됨 — 이미지를 열어 시작하세요"
 }

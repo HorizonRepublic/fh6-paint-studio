@@ -295,6 +295,5 @@
   "status.error": "Hata — günlüğe bak",
   "status.generating": "Oluşturuluyor…",
   "status.ready": "Hazır",
-  "status.ready_open": "Hazır — başlamak için bir görsel aç",
-  "status.run_as_admin": "Yönetici olarak çalıştır"
+  "status.ready_open": "Hazır — başlamak için bir görsel aç"
 }

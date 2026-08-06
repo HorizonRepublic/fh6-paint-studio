@@ -295,6 +295,5 @@
   "status.error": "Erro — veja o log",
   "status.generating": "Gerando…",
   "status.ready": "Pronto",
-  "status.ready_open": "Pronto — abra uma imagem para começar",
-  "status.run_as_admin": "Executar como administrador"
+  "status.ready_open": "Pronto — abra uma imagem para começar"
 }

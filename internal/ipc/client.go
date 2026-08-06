@@ -162,9 +162,9 @@ func (c *Client) Generate(p GenerateParams, onUpdate func(Update)) (cancel func(
 	}, nil
 }
 
-// Inject writes the shapes into the running game. It BLOCKS until the write finishes or fails,
-// streaming the injector's narration to onLog, because there is nothing useful a caller can do
-// while a live process is being written to.
+// Inject writes shapes into the running game. It blocks until the write finishes; there is
+// deliberately no cancel, because stopping halfway through a live layer table leaves the user's
+// vinyl half-overwritten.
 func (c *Client) Inject(p InjectParams, onLog func(string)) error {
 	done := make(chan error, 1)
 	id := c.claim(func(u Update) {

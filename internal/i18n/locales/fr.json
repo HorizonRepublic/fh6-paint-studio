@@ -295,6 +295,5 @@
   "status.error": "Erreur — voir le journal",
   "status.generating": "Génération…",
   "status.ready": "Prêt",
-  "status.ready_open": "Prêt — ouvrez une image pour commencer",
-  "status.run_as_admin": "Exécuter en admin"
+  "status.ready_open": "Prêt — ouvrez une image pour commencer"
 }

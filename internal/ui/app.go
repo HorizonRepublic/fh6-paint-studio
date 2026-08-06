@@ -122,12 +122,6 @@ func (s *AppState) topBar(gtx C) D {
 					layout.Rigid(s.viewTabs),
 					layout.Flexed(1, func(gtx C) D { return D{Size: image.Pt(gtx.Constraints.Max.X, 0)} }),
 				}
-				if !s.Elevated {
-					children = append(children,
-						layout.Rigid(func(gtx C) D { return s.adminButton(gtx) }),
-						layout.Rigid(GapH(10).Layout),
-					)
-				}
 				if s.Backend != nil { // engine picker only when >1 backend works; no static label (it lives in About)
 					children = append(children,
 						layout.Rigid(func(gtx C) D {

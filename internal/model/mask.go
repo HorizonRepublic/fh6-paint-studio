@@ -32,20 +32,6 @@ func RegisterMaskWord(word uint16, nativeW, nativeH float32) ShapeKind {
 	return KindMaskBase + ShapeKind(i)
 }
 
-// MaskCount returns how many words the bank registered. Zero until the maskbank
-// package's init has run, which is the only thing that populates the registry.
-func MaskCount() int { return len(maskWords) }
-
-// MaskWordAt returns the i-th registered word, for enumerating the bank. The
-// order is the registration order, which the bank fixes, so an index is a
-// stable name for a word across runs.
-func MaskWordAt(i int) (uint16, bool) {
-	if i < 0 || i >= len(maskWords) {
-		return 0, false
-	}
-	return maskWords[i], true
-}
-
 // IsMask reports whether a kind is a registered mask word.
 func IsMask(kind ShapeKind) bool {
 	return kind >= KindMaskBase && int(kind-KindMaskBase) < len(maskWords)

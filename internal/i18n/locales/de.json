@@ -295,6 +295,5 @@
   "status.error": "Fehler — siehe Log",
   "status.generating": "Generiere…",
   "status.ready": "Bereit",
-  "status.ready_open": "Bereit — öffne ein Bild zum Start",
-  "status.run_as_admin": "Als Admin ausführen"
+  "status.ready_open": "Bereit — öffne ein Bild zum Start"
 }

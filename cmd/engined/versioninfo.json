@@ -22,5 +22,6 @@
   "VarFileInfo": {
     "Translation": { "LangID": "0409", "CharsetID": "04B0" }
   },
-  "IconPath": "../studio/icon.ico"
+  "IconPath": "../studio/icon.ico",
+  "ManifestPath": "engined.manifest"
 }

@@ -153,7 +153,7 @@ type (
 // InjectParams is a write into the LIVE game process. It is the one request here with a side effect
 // outside this program, so it carries everything the write needs explicitly — the shapes, the
 // dimensions they are expressed in, the template's layer count and the canvas scale — rather than
-// letting the daemon infer any of it from a previous run. An injection derived from stale state
+// letting the engine infer any of it from a previous run. An injection derived from stale state
 // writes plausible garbage into someone's artwork.
 type InjectParams struct {
 	Shapes []model.Shape `json:"shapes"`
@@ -161,17 +161,6 @@ type InjectParams struct {
 	Height int           `json:"height"`
 	Layers int           `json:"layers"` // exact template layer count of the open FH6 group
 	Scale  float64       `json:"scale,omitempty"`
-}
-
-// InjectState says whether an injection can be attempted at all.
-//
-// Elevated describes the DAEMON, not the client: the daemon is the process that opens the game's
-// memory, so its token is the one that matters. A daemon spawned by the client inherits the client's
-// elevation, which is why elevating the UI still works — but the answer has to come from the side
-// that does the writing.
-type InjectState struct {
-	Available bool `json:"available"`
-	Elevated  bool `json:"elevated"`
 }
 
 // WriteJSON frames and writes one JSON message.

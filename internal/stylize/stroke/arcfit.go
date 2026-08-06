@@ -272,15 +272,3 @@ func crossSign(u, v [2]float64) int {
 }
 
 func sub(a, b [2]float64) [2]float64 { return [2]float64{a[0] - b[0], a[1] - b[1]} }
-
-// ArcDemandStart / ArcDemandReport are temporary debug hooks for measuring matcher demand.
-func ArcDemandStart() { arcStats = &arcStatsT{} }
-
-func ArcDemandReport() (runs, placed, noSweep, noWidth, noBow int, failed [][3]float64) {
-	st := arcStats
-	arcStats = nil
-	if st == nil {
-		return
-	}
-	return st.runs, st.placed, st.noSweep, st.noWidth, st.noBow, st.failed
-}

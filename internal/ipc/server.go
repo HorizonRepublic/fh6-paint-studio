@@ -83,8 +83,6 @@ func (s *Server) dispatch(req Request) {
 		s.generate(req)
 	case "cancel":
 		s.cancel(req)
-	case "inject.state":
-		s.reply(req.ID, InjectState{Available: inject.NewFH6().Available(), Elevated: inject.Elevated()})
 	case "inject":
 		s.inject(req)
 	case "shapes.catalog":
@@ -210,6 +208,11 @@ func (s *Server) emit(id int32, ev runner.Event, start time.Time, output string)
 // lines. It runs on its own goroutine: the write takes seconds and blocking here would stop the
 // server reading, so the client would look hung for the whole operation.
 //
+// It needs no privilege and asks for none. The game is an ordinary process owned by the same user at
+// the same integrity level, and Windows grants a full-access handle to that freely — this has always
+// worked without the app being elevated, and the one case where it fails (the sandboxed Microsoft
+// Store build) refuses an administrator just as readily.
+//
 // There is deliberately no cancel. The write walks a live layer table in another process's memory;
 // stopping halfway leaves the user's vinyl half-overwritten, which is worse than finishing.
 func (s *Server) inject(req Request) {
@@ -222,6 +225,10 @@ func (s *Server) inject(req Request) {
 	}
 	if len(p.Shapes) == 0 {
 		s.fail(req.ID, fmt.Errorf("inject needs shapes"))
+		return
+	}
+	if p.Layers <= 0 {
+		s.fail(req.ID, fmt.Errorf("inject needs the template layer count"))
 		return
 	}
 	go func() {

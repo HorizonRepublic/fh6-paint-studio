@@ -18,7 +18,6 @@ Future<void> main(List<String> args) async {
   stdout.writeln('backends: ${await client.backends()}');
   stdout.writeln('defaults: ${(await client.defaults()).keys.toList()}');
   stdout.writeln('library: ${(await client.libraryList()).length} entries');
-  stdout.writeln('inject: ${await client.injectState()}');
 
   // A real run. The frame path is the part that cannot be checked any other
   // way: preview pixels arrive as raw binary alongside JSON on one socket, and a
@@ -58,8 +57,16 @@ Future<void> main(List<String> args) async {
   // frozen canvas rather than an error.
   final frame = await client.render(
     shapes: [
-      {'type': 1, 'data': [0, 0, 64, 48], 'color': [20, 20, 24, 255]},
-      {'type': 16, 'data': [32, 24, 12, 8, 30], 'color': [200, 90, 120, 255]},
+      {
+        'type': 1,
+        'data': [0, 0, 64, 48],
+        'color': [20, 20, 24, 255],
+      },
+      {
+        'type': 16,
+        'data': [32, 24, 12, 8, 30],
+        'color': [200, 90, 120, 255],
+      },
     ],
     width: 64,
     height: 48,
