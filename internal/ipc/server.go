@@ -8,10 +8,15 @@ import (
 	"sync"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/imageio"
+	"fh6-paint-studio/internal/inject"
+	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/runner"
+	"fh6-paint-studio/internal/session"
+	"fh6-paint-studio/internal/userpreset"
 )
 
 // Server answers one client connection. One connection, not many: the engine holds a GPU context
@@ -28,6 +33,14 @@ type Server struct {
 
 	mu   sync.Mutex // serialises writes: events arrive from run goroutines
 	runs map[int32]func()
+
+	storeOnce sync.Once
+	store     *library.Store
+	storeErr  error
+
+	presetOnce sync.Once
+	presets    *userpreset.Store
+	presetErr  error
 }
 
 // NewServer wires a server to a duplex connection.
@@ -70,21 +83,44 @@ func (s *Server) dispatch(req Request) {
 		s.generate(req)
 	case "cancel":
 		s.cancel(req)
+	case "inject.state":
+		s.reply(req.ID, InjectState{Available: inject.NewFH6().Available(), Elevated: inject.Elevated()})
+	case "inject":
+		s.inject(req)
+	case "shapes.catalog":
+		s.shapesMethod(req)
+	case "render":
+		s.render(req)
 	default:
-		s.fail(req.ID, fmt.Errorf("unknown method %q", req.Method))
+		if !s.libraryMethod(req) && !s.presetMethod(req) {
+			s.fail(req.ID, fmt.Errorf("unknown method %q", req.Method))
+		}
 	}
 }
 
 // GenerateParams is the client's run request. The image is named by PATH rather than sent: the
 // daemon has to decode it anyway, and shipping a 20 MB PNG through the socket to hand it straight
 // back to the decoder buys nothing.
+//
+// Everything here is stated in the user's terms — which file, which region of it, which preset —
+// and none of it in the engine's. The daemon owns the fit resolution, the transparent surround and
+// the hybrid ink split, so a client cannot get a run subtly wrong by reproducing them differently,
+// and a client that cannot decode images at all is still a first-class client.
 type GenerateParams struct {
-	Path    string          `json:"path"`
-	MaxRes  int             `json:"maxRes"`
-	Crop    *[4]float64     `json:"crop,omitempty"` // fractional x,y,w,h of the source; nil = whole image
-	Choices preset.Choices  `json:"choices"`
-	Output  string          `json:"output,omitempty"` // where to write the geometry; empty = do not write
-	Extra   json.RawMessage `json:"-"`
+	Path string `json:"path"`
+
+	// Region is an absolute rectangle in the raw file's coordinates: x, y, w, h. Nil means the whole
+	// image. Absolute rather than fractional because a crop composed onto a previous crop makes "a
+	// fraction of what" ambiguous, and the wrong answer to that is a convincing reconstruction of the
+	// wrong part of the picture.
+	Region *[4]int `json:"region,omitempty"`
+
+	DisplayRes int  `json:"displayRes,omitempty"` // what the client shows the source at; 0 = the default
+	SourceRes  bool `json:"sourceRes,omitempty"`  // fit at the source's own resolution
+	KeepInside bool `json:"keepInside,omitempty"` // bound every shape to the content rectangle
+
+	Choices preset.Choices `json:"choices"`
+	Output  string         `json:"output,omitempty"` // where to write the geometry; empty = do not write
 }
 
 func (s *Server) generate(req Request) {
@@ -95,30 +131,27 @@ func (s *Server) generate(req Request) {
 			return
 		}
 	}
-	if p.Path == "" {
-		s.fail(req.ID, fmt.Errorf("generate needs a path"))
-		return
-	}
-	if p.MaxRes <= 0 {
-		p.MaxRes = 1100
-	}
 
-	var prep *imageio.Prepared
-	var err error
-	if p.Crop != nil {
-		c := *p.Crop
-		prep, _, err = imageio.LoadRegionAutoCropped(p.Path, p.MaxRes, c[0], c[1], c[2], c[3])
-	} else {
-		prep, _, err = imageio.LoadAutoCropped(p.Path, p.MaxRes)
+	sr := session.Request{
+		Path:       p.Path,
+		DisplayRes: p.DisplayRes,
+		SourceRes:  p.SourceRes,
+		KeepInside: p.KeepInside,
+		Choices:    p.Choices,
 	}
+	if p.Region != nil {
+		r := *p.Region
+		rect := image.Rect(r[0], r[1], r[0]+r[2], r[1]+r[3])
+		sr.Region = &rect
+	}
+	run, err := session.Prepare(sr)
 	if err != nil {
 		s.fail(req.ID, err)
 		return
 	}
-	resolved := preset.Resolve(*prep, p.Choices)
 
 	start := time.Now()
-	cancel := runner.RunAsync(*prep, resolved, func(ev runner.Event) {
+	cancel := run.Start(func(ev runner.Event) {
 		s.emit(req.ID, ev, start, p.Output)
 	})
 
@@ -155,7 +188,7 @@ func (s *Server) emit(id int32, ev runner.Event, start time.Time, output string)
 		}
 		s.frame(id, e.Canvas) // the final canvas travels the same path as a preview
 		s.finish(id)
-		s.event(id, "done", DoneEvent{
+		done := DoneEvent{
 			Backend:      e.Backend,
 			ShapeCount:   len(e.Result.Shapes) - 1,
 			InitialError: e.Result.InitialError,
@@ -163,8 +196,79 @@ func (s *Server) emit(id int32, ev runner.Event, start time.Time, output string)
 			ElapsedMs:    time.Since(start).Milliseconds(),
 			Geometry:     &doc,
 			GeometryPath: path,
-		})
+			Width:        e.Width,
+			Height:       e.Height,
+		}
+		if e.Quality != nil {
+			done.DeltaE, done.SSIM = e.Quality.DeltaE, e.Quality.SSIM
+		}
+		s.event(id, "done", done)
 	}
+}
+
+// inject writes the shapes into the running game, streaming the injector's own narration as log
+// lines. It runs on its own goroutine: the write takes seconds and blocking here would stop the
+// server reading, so the client would look hung for the whole operation.
+//
+// There is deliberately no cancel. The write walks a live layer table in another process's memory;
+// stopping halfway leaves the user's vinyl half-overwritten, which is worse than finishing.
+func (s *Server) inject(req Request) {
+	var p InjectParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			s.fail(req.ID, fmt.Errorf("bad inject params: %w", err))
+			return
+		}
+	}
+	if len(p.Shapes) == 0 {
+		s.fail(req.ID, fmt.Errorf("inject needs shapes"))
+		return
+	}
+	go func() {
+		err := inject.Apply(p.Shapes, p.Width, p.Height, p.Layers, p.Scale, func(line string) {
+			s.event(req.ID, "log", LogEvent{Line: line})
+		})
+		if err != nil {
+			s.event(req.ID, "log", LogEvent{Line: "inject: " + err.Error()})
+			s.fail(req.ID, err)
+			return
+		}
+		s.event(req.ID, "ok", struct{}{})
+	}()
+}
+
+// RenderParams asks for a picture of a shape list.
+//
+// The editor needs this because there must be exactly ONE renderer. A client
+// that drew the shapes itself would be a second definition of what a livery
+// looks like, and the two would drift the first time a primitive changed — the
+// in-game-faithful render is the whole product.
+type RenderParams struct {
+	Shapes      []model.Shape `json:"shapes"`
+	Width       int           `json:"width"`
+	Height      int           `json:"height"`
+	Transparent bool          `json:"transparent,omitempty"`
+}
+
+// render draws a shape list and sends it back as a frame. Synchronous on the
+// read goroutine: it is CPU work measured in tens of milliseconds, and a client
+// asks for it between edits rather than continuously.
+func (s *Server) render(req Request) {
+	var p RenderParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			s.fail(req.ID, fmt.Errorf("bad render params: %w", err))
+			return
+		}
+	}
+	if p.Width <= 0 || p.Height <= 0 {
+		s.fail(req.ID, fmt.Errorf("render needs a size, got %dx%d", p.Width, p.Height))
+		return
+	}
+	// ss=1: the game rasterises the geometry itself with hard edges, so a single
+	// sample is the honest representation of what will be injected.
+	s.frame(req.ID, imageio.RenderFH6Image(p.Shapes, p.Transparent, p.Width, p.Height, 1))
+	s.event(req.ID, "ok", struct{}{})
 }
 
 func (s *Server) cancel(req Request) {
@@ -219,7 +323,12 @@ func (s *Server) event(id int32, name string, payload any) {
 	s.send(Response{ID: id, Event: name, Result: b})
 }
 
+// fail answers a request with an error AND records it. Every failure the client
+// ever sees passes through here, so this one line is what makes a user's log
+// worth asking for: without it the client reports "failed" and the engine's own
+// log says nothing at all about why.
 func (s *Server) fail(id int32, err error) {
+	applog.Printf("ERROR: request %d failed: %v", id, err)
 	s.send(Response{ID: id, Event: "failed", Error: err.Error()})
 }
 

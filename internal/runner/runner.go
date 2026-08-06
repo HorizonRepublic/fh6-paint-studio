@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"image"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -67,7 +68,14 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			onEvent(Failed{Err: err})
 			return
 		}
-		defer be.Close()
+		// The device is released BEFORE the terminal event, not by a plain defer after it. The shim
+		// holds global device state, so an init that overlaps a teardown corrupts it — and Done is
+		// exactly the signal a caller acts on to start the next run. Emitting it while Close is still
+		// pending makes "the run finished" and "the GPU is free" two different moments, which is a
+		// crash waiting for a fast enough caller. The defer stays for the panic and cancel paths.
+		var closeOnce sync.Once
+		release := func() { closeOnce.Do(func() { _ = be.Close() }) }
+		defer release()
 		onEvent(Log{Line: "backend: " + name})
 		for _, s := range r.Summary {
 			onEvent(Log{Line: s})
@@ -166,7 +174,9 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		// canvas composites in the working space (sRGB-byte when not linear) at float precision, so it
 		// does NOT match the injected 8-bit shapes composited in LINEAR by the game. That mismatch was
 		// the "preview perfect, inject квашня" gap. RenderFH6 closes it: preview == inject == game.
-		onEvent(Done{Result: res, Canvas: renderInGame(res.Shapes, opt.TransparentBG, w, h), Backend: name})
+		canvas := renderInGame(res.Shapes, opt.TransparentBG, w, h)
+		release()
+		onEvent(Done{Result: res, Canvas: canvas, Backend: name})
 	}()
 
 	return cancel

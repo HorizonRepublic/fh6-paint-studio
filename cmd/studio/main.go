@@ -10,7 +10,6 @@ package main
 import (
 	"fmt"
 	"image"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,15 +25,17 @@ import (
 	"gioui.org/widget"
 
 	"fh6-paint-studio/internal/applog"
-	"fh6-paint-studio/internal/hybrid"
+	"fh6-paint-studio/internal/enginesvc"
 	"fh6-paint-studio/internal/i18n"
 	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/inject"
+	"fh6-paint-studio/internal/ipc"
 	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/runner"
+	"fh6-paint-studio/internal/session"
 	"fh6-paint-studio/internal/ui"
 	"fh6-paint-studio/internal/userpreset"
 )
@@ -60,6 +61,17 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--fh6-locate" {
 		fh6Locate()
+		return
+	}
+	// Hosting the engine service from this same binary is what keeps the release two files instead of
+	// three. It is a hidden subcommand, not a mode a user picks: the studio spawns itself with it.
+	if len(os.Args) > 1 && os.Args[1] == "--engine-service" {
+		applog.Init("engined.log")
+		defer applog.Close()
+		if err := enginesvc.Serve(enginesvc.Options{IdleTimeout: engineIdleTimeout}); err != nil {
+			fmt.Fprintln(os.Stderr, "engine service:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	applog.Init("fh6-paint-studio.log")
@@ -92,7 +104,7 @@ func loop(w *app.Window) error {
 	// separate process over the local protocol, which is the boundary the next UI will use. A failure
 	// to reach it falls back to in-process rather than leaving the user with an app that cannot
 	// generate at all: the service is an implementation detail to everyone except us.
-	drv := engineDriver(localDriver{})
+	drv := engineDriver(newLocalDriver())
 	defer drv.Close()
 	if os.Getenv("FH6_ENGINE") == "remote" {
 		if rd, err := dialEngine(os.Getenv("FH6_ENGINED")); err != nil {
@@ -109,7 +121,9 @@ func loop(w *app.Window) error {
 	st.SetBackends(backends)               // a picker when >1 GPU backend works (allgpu build), else a static label
 	runner.BackendPreference = backends[0] // default to the system's preferred (CUDA where present, else Vulkan)
 	st.UpdateCheckEnabled = updateCheckEnabled
-	st.Elevated = inject.Elevated()
+	// Elevation is asked of the DRIVER, not of this process: the injection happens wherever the
+	// engine runs, and that is the process whose token has to be able to open the game.
+	st.Elevated = drv.InjectState().Elevated
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference
 	st.AutoUpdate.Value = prefs.CheckUpdatesEnabled()
@@ -119,25 +133,16 @@ func loop(w *app.Window) error {
 	// dialog without a cold-start delay.
 	prewarmDialogs()
 
-	// The generation library (auto-saved completed runs) lives under ~/FH6PaintStudio/library. A failed
-	// open is non-fatal: Studio still works, the Library tab shows its empty/error state.
-	var store *library.Store
-	if root, err := library.DefaultRoot(); err != nil {
-		st.AppendLog("library: " + err.Error())
-	} else {
-		store = library.Open(root)
-		reloadLibrary(st, store)
-	}
+	// The generation library lives wherever the ENGINE does — under ~/FH6PaintStudio/library for an
+	// in-process engine, on the daemon's disk for a remote one. A failed open is non-fatal: Studio
+	// still works and the Library tab shows its error state.
+	store := drv.Library()
+	reloadLibrary(st, store)
 	var pendingExportID string // set when a library Export "Save as…" dialog is in flight
 
 	// Custom presets (saved generation settings, reloadable from the Preset dropdown).
-	var presetStore *userpreset.Store
-	if root, err := userpreset.DefaultRoot(); err != nil {
-		st.AppendLog("presets: " + err.Error())
-	} else {
-		presetStore = userpreset.Open(root)
-		reloadPresets(st, presetStore)
-	}
+	presetStore := drv.Presets()
+	reloadPresets(st, presetStore)
 
 	// Restore the last selection AFTER presets load, so a custom-preset name resolves in the dropdown.
 	// SelectPreset sets the engine mode and loads the snapshot; the persisted budget and keep-inside then
@@ -171,16 +176,11 @@ func loop(w *app.Window) error {
 	var ops op.Ops
 
 	var curPrep *imageio.Prepared // engine input for the loaded image (always decoded in linear light)
-	var curGen *imageio.Prepared  // engine input for the ACTIVE run — curPrep, or a crop of it
-	var hybridInk int             // hybrid mode: FDoG ink budget reserved this run, appended in Done
 	// viewAbs is the absolute source rect (raw-file coords) that the current working image covers — the
 	// original's auto-crop rect after Open/Reset, or the composed crop rect after Apply crop. It is the
-	// base a new crop selection composes against, so repeated crops re-decode the original at full res.
+	// base a new crop selection composes against, so repeated crops re-decode the original at full res,
+	// and it is what a run is described by: an absolute rectangle survives being composed onto itself.
 	var viewAbs image.Rectangle
-	// "Keep shapes inside image": when the active run used a transparent surround, these record the
-	// border (px) and the pre-pad dims so the finished geometry + canvas are mapped back to the original
-	// size (TranslateShapes/UnpadCanvas) — a clean, frame-free result. runPadPx==0 means no surround.
-	var runPadPx, runOrigW, runOrigH int
 	var cancelRun func()
 	var runCancelled bool        // set when the user cancels; the engine still emits Done, so the Done handler must not treat a cancelled run as a finished one
 	var lastShapes []model.Shape // final base geometry, for export
@@ -297,11 +297,9 @@ func loop(w *app.Window) error {
 					st.Phase = ui.PhaseRunning
 					runCancelled = false
 					runStart = time.Now()
-					curGen = curPrep
-					r := preset.Resolve(*curPrep, st.Choices())
-					st.Stats = ui.RunStats{Total: r.Options.StopAt}
-					cancelRun, _ = drv.Generate(driverRequest{
-						Prep: *curPrep, Resolved: r, Path: demoPath, MaxRes: curPrep.W, Choices: st.Choices(),
+					st.Stats = ui.RunStats{Total: st.Choices().Shapes}
+					cancelRun, _ = drv.Generate(session.Request{
+						Path: demoPath, DisplayRes: studioMaxRes, Choices: st.Choices(),
 					}, post)
 				}
 			}
@@ -323,47 +321,16 @@ func loop(w *app.Window) error {
 					applyProgress(st, ev)
 					tb.set(uint64(ev.Shapes), uint64(ev.Total))
 				case runner.Frame:
-					img := ev.Img
-					if runPadPx > 0 { // strip the transparent surround so the live preview is frame-free
-						img = imageio.UnpadCanvas(img, runPadPx, runOrigW, runOrigH)
-					}
-					st.SetPreview(img)
+					st.SetPreview(ev.Img)
 				case runner.Done:
+					// The engine side hands back a finished run: ink composited, surround removed, and the
+					// dimensions the geometry is expressed in. Nothing left to undo here.
 					shapes, canvas := ev.Result.Shapes, ev.Canvas
-					if hybridInk > 0 && curGen != nil { // hybrid: lay the FDoG designed outline ON TOP of the fill
-						if lines := hybrid.Ink(curGen, hybridInk, false); len(lines) > 0 {
-							shapes = append(shapes, lines...)
-							buf := imageio.RenderFH6(shapes, curGen.HasTransparency, curGen.W, curGen.H, 2)
-							img := image.NewNRGBA(image.Rect(0, 0, curGen.W, curGen.H))
-							for i, v := range buf {
-								if v < 0 {
-									v = 0
-								} else if v > 1 {
-									v = 1
-								}
-								img.Pix[i] = uint8(v*255 + 0.5)
-							}
-							canvas = img
-							st.AppendLog(fmt.Sprintf("hybrid: +%d FDoG lines on top of the fill", len(lines)))
-						}
-						hybridInk = 0
+					if ev.Quality != nil {
+						st.SetQuality(ev.Quality.DeltaE, ev.Quality.SSIM)
 					}
-					// Perceptual quality of the finished render vs the source (still at the run dims, before
-					// the keep-inside unpad) — shown as a friendly badge in the Activity panel.
-					if curGen != nil && canvas != nil && canvas.Bounds().Dx() == curGen.W && canvas.Bounds().Dy() == curGen.H {
-						src := imageio.EncodeForDisplay(curGen.Pixels)
-						de, _ := metric.DeltaE76(src, nrgbaToFloat(canvas), curGen.W, curGen.H)
-						ss := metric.SSIM(src, nrgbaToFloat(canvas), curGen.W, curGen.H)
-						st.SetQuality(de, ss)
-						st.AppendLog(fmt.Sprintf("quality: ΔE76 %.2f · SSIM %.3f", de, ss))
-					}
-					if curGen != nil { // crop run -> crop dims; whole-image run -> full dims
-						lastW, lastH = curGen.W, curGen.H
-					}
-					if runPadPx > 0 { // map the transparent-surround run back to the original size
-						shapes = imageio.TranslateShapes(shapes, -float64(runPadPx), -float64(runPadPx))
-						canvas = imageio.UnpadCanvas(canvas, runPadPx, runOrigW, runOrigH)
-						lastW, lastH = runOrigW, runOrigH
+					if ev.Width > 0 && ev.Height > 0 {
+						lastW, lastH = ev.Width, ev.Height
 					}
 					st.SetPreview(canvas)
 					if n := len(shapes); n > 0 {
@@ -493,13 +460,11 @@ func loop(w *app.Window) error {
 			if st.EditSaveBtn.Clicked(gtx) { // persist the edited design to the library (injectable)
 				name := st.SaveDesignName()
 				exists := false
-				if store != nil {
-					if entries, err := store.List(); err == nil {
-						for _, e := range entries {
-							if e.Name == name {
-								exists = true
-								break
-							}
+				if entries, err := store.List(); err == nil {
+					for _, e := range entries {
+						if e.Name == name {
+							exists = true
+							break
 						}
 					}
 				}
@@ -518,52 +483,33 @@ func loop(w *app.Window) error {
 			if st.GenBtn.Clicked(gtx) && curPrep != nil && st.Phase != ui.PhaseRunning && !opening {
 				st.Toast = ""
 				st.Log = nil
-				// The working source IS the (optionally cropped) image, so generate on curPrep directly.
-				genPrep := curPrep
 				ch := st.Choices()
-				// Hi-res fit (flat/anime): re-decode the ENGINE input at up to genMaxRes — thin strokes
-				// at the display resolution degrade to ~1px of gray AA the search can neither detect nor
-				// cover. The display (and crop UI) stays at studioMaxRes.
-				if hi := hiResPrep(st, ch.Mode, viewAbs, genPrep.W, genPrep.H); hi != nil {
-					genPrep = hi
-					st.AppendLog(fmt.Sprintf("hi-res fit: engine input %dx%d (display stays at %dpx)", hi.W, hi.H, studioMaxRes))
+				// The run is DESCRIBED, not prepared: the fit resolution, the keep-inside surround and
+				// the hybrid ink split all belong to the engine side, which undoes them again on the way
+				// out. The studio says which file, which region of it, and which preset — nothing that a
+				// second client would have to reimplement to get the same picture.
+				req := session.Request{
+					Path:       st.ImgPath,
+					DisplayRes: studioMaxRes,
+					SourceRes:  st.SourceRes.Value,
+					KeepInside: st.KeepInside.Value,
+					Choices:    ch,
 				}
-				runPadPx, runOrigW, runOrigH = 0, genPrep.W, genPrep.H
-				// Keep shapes inside image: always wrap the target in a transparent surround so the spill
-				// penalty bounds every shape on all four edges, then map the geometry/canvas back to the
-				// original size on Done. Always-pad (not gated on a transparency fraction) because content
-				// can touch an edge even when the middle is transparent, and a cutout silhouette touches its
-				// bbox after auto-crop. Quality-neutral: the empty margin draws no shapes.
-				if st.KeepInside.Value {
-					padded, padPx := imageio.PadTransparent(genPrep, framePadFrac)
-					genPrep, runPadPx = padded, padPx
-					st.AppendLog(fmt.Sprintf("keep-inside: transparent surround %dpx (%dx%d), bounding shapes on all edges", padPx, genPrep.W, genPrep.H))
+				if st.Cropped {
+					rect := viewAbs
+					req.Region = &rect
 				}
-				curGen = genPrep
 				st.Phase = ui.PhaseRunning
 				runCancelled = false
 				runStart = time.Now()
 				tb.indeterminate() // instant taskbar feedback until the first progress tick
-				r := preset.Resolve(*genPrep, ch)
-				hybridInk = 0
-				if preset.IsHybridMode(ch.Mode) { // reserve part of the budget for the FDoG ink (appended in Done)
-					hybridInk = preset.InkBudget(ch.InkRatio, ch.Shapes)
-					if hybridInk > 0 {
-						r.Options.StopAt = ch.Shapes - hybridInk
-						if r.Options.StopAt < 1 {
-							r.Options.StopAt = 1
-						}
-					}
-					st.AppendLog(fmt.Sprintf("%s: %d ink lines + %d fill (%.0f%% lines)", ch.Mode, hybridInk, r.Options.StopAt, ch.InkRatio*100))
-				}
-				st.ClearQuality() // drop the previous run's quality badge
-				st.Stats = ui.RunStats{Total: r.Options.StopAt}
+				st.ClearQuality()  // drop the previous run's quality badge
+				// The budget is a placeholder until the first Progress event carries the resolved total
+				// (a hybrid preset holds part of it back for ink, and a preset may auto-trim).
+				st.Stats = ui.RunStats{Total: ch.Shapes}
 				st.Stats.Cap = ch.Shapes // remember the requested cap so Done can show the auto-picked optimal count
 				var runErr error
-				cancelRun, runErr = drv.Generate(driverRequest{
-					Prep: *genPrep, Resolved: r,
-					Path: st.ImgPath, MaxRes: genPrep.W, Choices: ch, Cropped: st.Cropped,
-				}, post)
+				cancelRun, runErr = drv.Generate(req, post)
 				if runErr != nil {
 					st.Phase = ui.PhaseIdle
 					tb.clear()
@@ -585,8 +531,8 @@ func loop(w *app.Window) error {
 				reloadLibrary(st, store) // pick up anything saved since
 				prefillInjectLayers(st)  // seed the FH6-template field so it isn't a blank footgun
 			}
-			if st.OpenFolderBtn.Clicked(gtx) && store != nil {
-				openInExplorer(store.Root)
+			if st.OpenFolderBtn.Clicked(gtx) {
+				openInExplorer(store.Root())
 			}
 
 			if st.AboutBtn.Clicked(gtx) {
@@ -616,7 +562,7 @@ func loop(w *app.Window) error {
 			}
 
 			// Custom-preset actions (save the current settings, rename/delete the selected preset).
-			if st.SavePresetBtn.Clicked(gtx) && presetStore != nil {
+			if st.SavePresetBtn.Clicked(gtx) {
 				name := strings.TrimSpace(st.PresetNameEd.Text())
 				switch {
 				case name == "":
@@ -636,7 +582,7 @@ func loop(w *app.Window) error {
 					}
 				}
 			}
-			if st.DeletePresetBtn.Clicked(gtx) && presetStore != nil {
+			if st.DeletePresetBtn.Clicked(gtx) {
 				if sel := st.SelectedPreset(); sel != nil {
 					if err := presetStore.Delete(sel.ID); err != nil {
 						st.Toast = "Delete failed: " + err.Error()
@@ -656,7 +602,7 @@ func loop(w *app.Window) error {
 			commitRename := func(i int) {
 				r := &st.LibRows[i]
 				name := strings.TrimSpace(r.NameEd.Text())
-				if name == "" || name == r.Entry.Name || store == nil {
+				if name == "" || name == r.Entry.Name {
 					r.Editing = false
 					return
 				}
@@ -702,7 +648,7 @@ func loop(w *app.Window) error {
 					r.Editing = false
 					continue
 				}
-				if r.Inject.Clicked(gtx) && store != nil && !st.InjectBusy() {
+				if r.Inject.Clicked(gtx) && !st.InjectBusy() {
 					layers, scale := injectParams(st)
 					switch {
 					case layers <= 0 && r.Entry.Shapes > 0:
@@ -717,7 +663,7 @@ func loop(w *app.Window) error {
 						st.InjectLayersErr = true
 						st.Toast = "Enter the FH6 template layer count (top-right) before injecting"
 					default:
-						if g, err := store.LoadGeometry(r.Entry.ID); err == nil {
+						if g, err := store.Geometry(r.Entry.ID); err == nil {
 							id := r.Entry.ID
 							entryW, entryH := r.Entry.Width, r.Entry.Height
 							shapes := g.Shapes
@@ -733,7 +679,12 @@ func loop(w *app.Window) error {
 							}
 							st.AppendLog(fmt.Sprintf("injecting %q into FH6 (%d layers, scale %.2f)…", r.Entry.Name, layers, scale))
 							go func() {
-								err := runInject(post, shapes, entryW, entryH, layers, scale)
+								err := drv.Inject(ipc.InjectParams{
+									Shapes: shapes, Width: entryW, Height: entryH, Layers: layers, Scale: scale,
+								}, func(line string) { post(runner.Log{Line: line}) })
+								if err != nil {
+									post(runner.Log{Line: "inject: " + err.Error()})
+								}
 								injDone.put(injectOutcome{id: id, err: err})
 								w.Invalidate()
 							}()
@@ -742,8 +693,8 @@ func loop(w *app.Window) error {
 						}
 					}
 				}
-				if r.Edit.Clicked(gtx) && store != nil {
-					if g, err := store.LoadGeometry(r.Entry.ID); err == nil {
+				if r.Edit.Clicked(gtx) {
+					if g, err := store.Geometry(r.Entry.ID); err == nil {
 						ew, eh := r.Entry.Width, r.Entry.Height
 						if ew <= 0 || eh <= 0 {
 							ew, eh = 1024, 1024
@@ -755,13 +706,13 @@ func loop(w *app.Window) error {
 					}
 					continue
 				}
-				if r.Export.Clicked(gtx) && store != nil && !saving {
+				if r.Export.Clicked(gtx) && !saving {
 					saving = true
 					pendingExportID = r.Entry.ID
 					suggested := r.Entry.Name + ".forza.json"
 					go func() { savePick.put(pickSaveFile(0, suggested)); w.Invalidate() }()
 				}
-				if r.Delete.Clicked(gtx) && store != nil {
+				if r.Delete.Clicked(gtx) {
 					if r.ConfirmDelete {
 						if err := store.Delete(r.Entry.ID); err != nil {
 							st.Toast = "Delete failed: " + err.Error()
@@ -773,7 +724,7 @@ func loop(w *app.Window) error {
 						st.ArmDelete(i)
 					}
 				}
-				if r.ThumbBtn.Clicked(gtx) && store != nil { // open the full preview in the lightbox
+				if r.ThumbBtn.Clicked(gtx) { // open the full preview in the lightbox
 					if st.LightboxOn {
 						// A click while the preview is open dismisses it. Gio only re-resolves the pointer
 						// hit-target on a MOVE, so a click that doesn't move the cursor lands back on the
@@ -910,16 +861,13 @@ func applyProgress(st *ui.AppState, ev runner.Progress) {
 	st.Stats.UpdateETA(ev.Shapes, ev.Total, ev.Elapsed)
 }
 
-// loadPreviewImage decodes a stored generation's full preview.png (for the library lightbox). The PNG
-// decoder is already registered (reloadLibrary decodes thumbs), so a plain image.Decode suffices.
-func loadPreviewImage(store *library.Store, id string) (image.Image, error) {
-	f, err := os.Open(store.PreviewPath(id))
+// loadPreviewImage decodes a stored generation's full preview (for the library lightbox).
+func loadPreviewImage(store libraryAPI, id string) (image.Image, error) {
+	b, err := store.Image(id, "preview")
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	img, _, err := image.Decode(f)
-	return img, err
+	return decodePNG(b)
 }
 
 // nrgbaToFloat converts an sRGB NRGBA image to the packed []float32 RGBA (0..1) the metric package
@@ -960,10 +908,7 @@ func prefillInjectLayers(st *ui.AppState) {
 
 // reloadLibrary refreshes the UI library rows from the store (newest first, thumbs decoded on the UI
 // goroutine — cheap for <=128px PNGs).
-func reloadLibrary(st *ui.AppState, store *library.Store) {
-	if store == nil {
-		return
-	}
+func reloadLibrary(st *ui.AppState, store libraryAPI) {
 	entries, err := store.List()
 	if err != nil {
 		st.AppendLog("library list: " + err.Error())
@@ -972,11 +917,10 @@ func reloadLibrary(st *ui.AppState, store *library.Store) {
 	rows := make([]ui.LibraryRow, 0, len(entries))
 	for _, e := range entries {
 		row := ui.LibraryRow{Entry: e}
-		if f, err := os.Open(store.ThumbPath(e.ID)); err == nil {
-			if img, _, err := image.Decode(f); err == nil {
+		if b, err := store.Image(e.ID, "thumb"); err == nil {
+			if img, err := decodePNG(b); err == nil {
 				row.Thumb = paint.NewImageOp(img)
 			}
-			f.Close()
 		}
 		rows = append(rows, row)
 	}
@@ -984,10 +928,7 @@ func reloadLibrary(st *ui.AppState, store *library.Store) {
 }
 
 // reloadPresets refreshes the studio's custom-preset list (and the Preset dropdown) from the store.
-func reloadPresets(st *ui.AppState, store *userpreset.Store) {
-	if store == nil {
-		return
-	}
+func reloadPresets(st *ui.AppState, store presetsAPI) {
 	ps, err := store.List()
 	if err != nil {
 		st.AppendLog("presets list: " + err.Error())
@@ -1012,11 +953,11 @@ func libMeta(st *ui.AppState, w, h int) library.Entry {
 }
 
 // saveDecalToLibrary auto-saves a finished whole-image generation.
-func saveDecalToLibrary(st *ui.AppState, store *library.Store, shapes []model.Shape, w, h int) {
-	if store == nil || len(shapes) == 0 {
+func saveDecalToLibrary(st *ui.AppState, store libraryAPI, shapes []model.Shape, w, h int) {
+	if len(shapes) == 0 {
 		return
 	}
-	if _, err := store.Save(shapes, st.Preview, libMeta(st, w, h)); err != nil {
+	if _, err := store.Save(shapes, st.Preview, libMeta(st, w, h), false); err != nil {
 		st.AppendLog("library save: " + err.Error())
 		return
 	}
@@ -1026,23 +967,16 @@ func saveDecalToLibrary(st *ui.AppState, store *library.Store, shapes []model.Sh
 
 // saveEditedDesign saves an edited design to the library under name, optionally overwriting same-named
 // entries first (manual designs allow override; auto-generations never do). Shows in-editor feedback.
-func saveEditedDesign(st *ui.AppState, store *library.Store, name string, override bool) {
-	if store == nil || len(st.EditShapes) == 0 {
+func saveEditedDesign(st *ui.AppState, store libraryAPI, name string, override bool) {
+	if len(st.EditShapes) == 0 {
 		return
 	}
 	st.SetPreview(imageio.RenderFH6Image(st.EditShapes, true, st.EditW, st.EditH, 1))
-	if override {
-		if entries, err := store.List(); err == nil {
-			for _, e := range entries {
-				if e.Name == name {
-					_ = store.Delete(e.ID)
-				}
-			}
-		}
-	}
 	meta := libMeta(st, st.EditW, st.EditH)
 	meta.Name = name
-	if _, err := store.Save(st.EditShapes, st.Preview, meta); err != nil {
+	// override replaces same-named entries: a manual design is saved BY NAME, so re-saving it is an
+	// edit of the same thing. An auto-saved generation never takes this path.
+	if _, err := store.Save(st.EditShapes, st.Preview, meta, override); err != nil {
 		st.AppendLog("library save: " + err.Error())
 		st.Toast = "Save failed: " + err.Error()
 		st.CancelOverride()
@@ -1053,23 +987,16 @@ func saveEditedDesign(st *ui.AppState, store *library.Store, name string, overri
 }
 
 // exportLibraryEntry copies a stored generation's geometry to dst (+ preview.png beside it).
-func exportLibraryEntry(store *library.Store, id, dst string) string {
-	if store == nil {
-		return "No library"
-	}
-	g, err := store.LoadGeometry(id)
+func exportLibraryEntry(store libraryAPI, id, dst string) string {
+	g, err := store.Geometry(id)
 	if err != nil {
 		return "Export failed: " + err.Error()
 	}
 	if err := imageio.WriteGeometry(dst, g); err != nil {
 		return "Export failed: " + err.Error()
 	}
-	if src, err := os.Open(store.PreviewPath(id)); err == nil {
-		defer src.Close()
-		if out, err := os.Create(strings.TrimSuffix(dst, filepath.Ext(dst)) + ".png"); err == nil {
-			_, _ = io.Copy(out, src)
-			out.Close()
-		}
+	if png, err := store.Image(id, "preview"); err == nil {
+		_ = os.WriteFile(strings.TrimSuffix(dst, filepath.Ext(dst))+".png", png, 0o644)
 	}
 	return "Exported " + filepath.Base(dst)
 }
@@ -1115,39 +1042,14 @@ func fh6Locate() {
 	fmt.Println("OK", res)
 }
 
-// runInject performs a live FH6 injection on a worker goroutine, streaming log lines to the UI and
-// returning the outcome. The geometry JSON is already saved by the caller; injection can fail (game
-// not running, no table, wrong layer count) and the error is both logged and returned for the UI.
-func runInject(post func(runner.Event), shapes []model.Shape, w, h, layers int, scale float64) error {
-	inj := inject.NewFH6()
-	inj.Layers = layers
-	inj.Log = func(line string) { post(runner.Log{Line: line}) }
-	if scale <= 0 {
-		scale = 1.0
-	}
-	cm := inject.NewCanvasMap(w, h, float32(scale), inject.ScaleBase)
-	inj.Canvas = &cm
-	if err := inj.Inject(shapes, w, h); err != nil {
-		post(runner.Log{Line: "inject: " + err.Error()})
-		return err
-	}
-	post(runner.Log{Line: "inject: OK — Save & reload the vinyl in FH6 to apply"})
-	return nil
-}
-
 func fmtSecs(d time.Duration) string {
 	return fmt.Sprintf("%.1fs", d.Seconds())
 }
 
-// loadImage decodes a file into the engine's Prepared form plus a straight-alpha NRGBA for display.
-// studioMaxRes is the render resolution the Studio loads images (and crops) at — content fills the
-// render up to this long side. Crops reuse it so a region's detail occupies the full budget.
-const studioMaxRes = 1100
-
-// framePadFrac is the transparent surround added by the "Keep shapes inside image" toggle: a border of
-// this fraction of max(W,H) on every side. The empty (alpha-0) margin makes the spill penalty bound
-// every shape to the content rectangle; the result is mapped back to the original size on completion.
-const framePadFrac = 0.10
+// studioMaxRes is the resolution the Studio shows images (and crops) at. Tied to the engine side's
+// notion of a display resolution so the two cannot drift: the run is fitted relative to what the
+// user is looking at.
+const studioMaxRes = session.DisplayRes
 
 func loadImage(path string) (*imageio.Prepared, *image.NRGBA, image.Rectangle, error) {
 	// Auto-crop uniform/empty margins to the content bbox before downscale (IDENTICAL to the CLI's
@@ -1170,65 +1072,6 @@ func loadCropRegion(path string, abs image.Rectangle) (*imageio.Prepared, *image
 		return nil, nil, err
 	}
 	return prep, nrgbaFromPrep(prep), nil
-}
-
-// genMaxRes is the engine-side fit resolution for the modes that benefit from it. Thin strokes at
-// studioMaxRes degrade to ~1px of gray AA the search can neither detect nor cover; fitting the same
-// budget at a higher long side recovers them. 2026-07-20 native-resolution ladder (out/resbench,
-// img.png 3541px, cross-res scored at native): cap 2000 → 2800 → 4096 gave unweighted SSE
-// 54088 → 38896 → 29034, a clean −46% at native with NO low-view tradeoff; wall 155 → 216 → 259s
-// (1.67× on the largest source). Sources at/below the old 2000 cap are BYTE-IDENTICAL across caps
-// (they already fit native), so raising the ceiling only slows genuinely-large sources — exactly
-// where the gain is largest. So anime/flat now fit at NATIVE by default (owner decision 2026-07-20:
-// "native resolution default"), capped by srcResCap. Photo measured a wash and stays at studioMaxRes.
-const genMaxRes = srcResCap
-
-// srcResCap bounds the "Use source resolution" toggle: measured on a 3541px line-art source the
-// gain keeps growing all the way to native (−40% vs the 2000 cap, no low-view tradeoff, ~2× wall),
-// so the toggle fits at the TRUE source size — this ceiling only protects time/VRAM from
-// pathological scans.
-const srcResCap = 4096
-
-// hiResPrep re-decodes the current view for the ENGINE above the display cap when it pays: at
-// genMaxRes for the modes measured to benefit (flat/anime), or at the source's own resolution for
-// ANY mode when the user asks for maximum quality (the "Use source resolution" toggle). Returns nil
-// to fit on the display-resolution prep: no benefit for the mode, sources at/below studioMaxRes, no
-// source path (demo), or a failed re-decode. The re-derivation mirrors the state exactly: un-cropped
-// views go through the same auto-crop (+checker-strip) pipeline as loadImage; crops re-use the crop
-// tool's absolute-rect primitive, so the engine sees the same content rectangle at a higher
-// resolution.
-func hiResPrep(st *ui.AppState, mode string, viewAbs image.Rectangle, curW, curH int) *imageio.Prepared {
-	capPx := srcResCap
-	if preset.PresetMode(mode) == "pixel" {
-		capPx = srcResCap // pixel-art ALWAYS fits at native: a working-res downscale destroys the grid
-	} else if !st.SourceRes.Value {
-		switch preset.PresetMode(mode) {
-		case "flat", "anime":
-			capPx = genMaxRes
-		default:
-			return nil
-		}
-	}
-	if st.ImgPath == "" || (curW < studioMaxRes && curH < studioMaxRes) {
-		return nil // demo source, or the display load never hit the cap — nothing extra to gain
-	}
-	var (
-		prep *imageio.Prepared
-		err  error
-	)
-	if st.Cropped {
-		prep, err = imageio.LoadAbsRegion(st.ImgPath, capPx, viewAbs)
-	} else {
-		prep, _, err = imageio.LoadAutoCropped(st.ImgPath, capPx)
-	}
-	if err != nil {
-		st.AppendLog("hi-res fit unavailable (" + err.Error() + "); fitting at display resolution")
-		return nil
-	}
-	if prep.W <= curW && prep.H <= curH {
-		return nil // source had no extra pixels beyond the display load
-	}
-	return prep
 }
 
 func nrgbaFromPrep(prep *imageio.Prepared) *image.NRGBA {

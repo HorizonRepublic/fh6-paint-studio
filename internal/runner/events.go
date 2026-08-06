@@ -25,11 +25,21 @@ type Progress struct {
 type Frame struct{ Img *image.NRGBA }
 
 // Done is the terminal success event: the result, the final canvas, and the backend used.
+//
+// Width/Height and Quality are filled by internal/session, which knows the coordinate system the
+// caller asked about — the engine's own dimensions include the keep-inside surround, and the score
+// has to be taken before that surround comes off. RunAsync leaves them zero and nil.
 type Done struct {
 	Result  engine.Result
 	Canvas  *image.NRGBA
 	Backend string
+
+	Width, Height int
+	Quality       *Quality
 }
+
+// Quality is the perceptual score of the finished render against the source it was fitted to.
+type Quality struct{ DeltaE, SSIM float64 }
 
 // Failed is the terminal failure event (backend init error or a recovered panic).
 type Failed struct{ Err error }
