@@ -22,6 +22,41 @@ type FH6 struct {
 // NewFH6 returns an FH6 injector with the default profile and clear-unused enabled.
 func NewFH6() *FH6 { return &FH6{Profile: FH6Profile(), ClearUnused: true} }
 
+// Apply is the whole injection as one call: build the injector, map the canvas, write, and narrate.
+//
+// It lives here rather than in a UI because the write has to happen in whichever process holds the
+// Windows handles, and that is no longer necessarily the process with the buttons. Two callers doing
+// their own canvas mapping would be two chances to get the scale wrong on a live game.
+//
+// scale <= 0 means 1.0. log may be nil.
+func Apply(shapes []model.Shape, w, h, layers int, scale float64, log func(string)) error {
+	inj := NewFH6()
+	inj.Layers = layers
+	inj.Log = log
+	// Blank the template layers we did not use.
+	//
+	// A group has however many layers the user's template has, and a fit almost
+	// never fills all of them. Whatever those leftovers held before is still
+	// there and still drawn, which is how a shape nobody generated turns up in
+	// the game beside a design that never had one. Clearing writes only the
+	// transform, the colour and the mask flag — the same word-only fields as a
+	// normal write, never the resource pointer — and only to layers beyond the
+	// ones just written, in the group just written to.
+	inj.ClearUnused = true
+	if scale <= 0 {
+		scale = 1.0
+	}
+	cm := NewCanvasMap(w, h, float32(scale), ScaleBase)
+	inj.Canvas = &cm
+	if err := inj.Inject(shapes, w, h); err != nil {
+		return err
+	}
+	if log != nil {
+		log("inject: OK — Save & reload the vinyl in FH6 to apply")
+	}
+	return nil
+}
+
 func (f *FH6) Name() string    { return "Forza Horizon 6" }
 func (f *FH6) Available() bool { return runtime.GOOS == "windows" }
 
