@@ -133,9 +133,13 @@ func Prepare(req Request) (*Run, error) {
 		if ratio == 0 {
 			ratio = preset.DefaultInkRatio(req.Choices.Mode)
 		}
-		if ink := preset.InkBudget(ratio, req.Choices.Shapes); ink > 0 {
+		// Split what the engine may actually place, not the raw request: the background rectangle is
+		// already deducted (preset.PlaceBudget) and the ceiling applied, so fill + ink + background
+		// lands exactly on the budget instead of one over it.
+		budget := preset.PlaceBudget(req.Choices.Shapes)
+		if ink := preset.InkBudget(ratio, budget); ink > 0 {
 			run.Ink = ink
-			run.Resolved.Options.StopAt = req.Choices.Shapes - ink
+			run.Resolved.Options.StopAt = budget - ink
 			if run.Resolved.Options.StopAt < 1 {
 				run.Resolved.Options.StopAt = 1
 			}

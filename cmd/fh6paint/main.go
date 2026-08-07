@@ -178,9 +178,13 @@ func main() {
 	// In-game hard ceiling: a livery group accepts at most 3000 shape layers. A
 	// bumper panel is ~1000, a full side or roof is ~3000 Р Р†Р вЂљРІР‚Сњ each panel is its own
 	// budget, so quality-per-shape matters most at the lower counts.
-	const fh6MaxShapes = 3000
+	// One of those layers goes to the background rectangle the engine emits as shape 0, so what the
+	// greedy may place is one below the group ceiling — otherwise the geometry is a shape too long
+	// to inject and the game drops the topmost, most detailed one.
+	fh6MaxShapes := presetpkg.PlaceBudget(presetpkg.MaxShapes)
 	if *shapes > fh6MaxShapes && !*unsafeShapes {
-		applog.Printf("WARNING: -shapes %d exceeds FH6 ceiling; clamping to %d", *shapes, fh6MaxShapes)
+		applog.Printf("WARNING: -shapes %d leaves no room for the background rectangle in a %d-layer group; clamping to %d",
+			*shapes, presetpkg.MaxShapes, fh6MaxShapes)
 		*shapes = fh6MaxShapes
 	}
 	if *shapes < 1 {

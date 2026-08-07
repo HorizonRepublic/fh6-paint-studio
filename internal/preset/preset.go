@@ -116,7 +116,7 @@ type Resolved struct {
 func Resolve(prep imageio.Prepared, c Choices) Resolved {
 	w, h := prep.W, prep.H
 
-	shapes := clampShapes(c.Shapes)
+	shapes := PlaceBudget(c.Shapes)
 
 	// Quality preset -> base sample counts; explicit advanced values override.
 	random, mutated, sampleBudget, maxNI := resolveSampleCounts(c)
@@ -313,6 +313,18 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 	}
 
 	return Resolved{Options: opt, Weight: weight, Grid: grid, Mode: resolved, SS: ss, BestOf: sp.bestOf, Summary: summary, Target: prep.Pixels}
+}
+
+// PlaceBudget is how many shapes the engine may PLACE for a requested budget: the request clamped
+// to the group ceiling, minus the background rectangle the engine always emits as shape 0. That
+// rectangle occupies an in-game layer like any other, so the budget has to pay for it — asking for
+// 3000 used to yield 3001 shapes, one more than a full panel holds, and the injector silently
+// dropped the last (topmost, most detailed) one.
+func PlaceBudget(shapes int) int {
+	if n := clampShapes(shapes) - 1; n >= 1 {
+		return n
+	}
+	return 1
 }
 
 // clampShapes constrains the budget to [1, MaxShapes] — the FH6 per-group layer ceiling.

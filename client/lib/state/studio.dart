@@ -707,6 +707,18 @@ class Studio extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Forget the previous write's outcome, so the panel opens ready rather than
+  /// still showing the last result. The success state turns the button into
+  /// "close", which meant a second injection — a different shape count, a
+  /// re-run, the same picture after an edit — was impossible without restarting
+  /// the app: nothing left on screen could clear the flag.
+  void clearInjectResult() {
+    if (!injectSucceeded && injectError == null) return;
+    injectSucceeded = false;
+    injectError = null;
+    notifyListeners();
+  }
+
   void setInjectLayers(int n) {
     injectLayers = n;
     _prefs?.set('injectLayers', n);
