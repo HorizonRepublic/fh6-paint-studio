@@ -1,5 +1,65 @@
 # Changelog
 
+## [2.0.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.4.0...v2.0.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **engine:** count the background rectangle against the shape budget
+* **engine:** the engine service no longer accepts a TCP connection or an auth token -- it reads a client on stdin and writes to stdout, so anything that dialled it must spawn it instead. The "Run as administrator" control is gone along with the elevation it triggered. The shipped build no longer contains the neural proposer; build with -tags aimodel to get it back.
+* **engine:** run the engine as a service the client talks to
+* **engine:** solve layer colour and alpha exactly on the finished stack
+* **backend:** score every candidate with the same eval kernel in the studio and the CLI
+* **backend:** drop the CPU backend, promote the pure-Go math to a test-only reference
+* build and ship the release without the CUDA toolkit
+* **vulkan:** run the full pipeline on Vulkan and make it the supported backend
+
+* **backend:** drop the CPU backend, promote the pure-Go math to a test-only reference ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+* build and ship the release without the CUDA toolkit ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+
+
+### Features
+
+* **ci:** manual publish_nexus dispatch to republish a tag to Nexus Mods ([48f3238](https://github.com/HorizonRepublic/fh6-paint-studio/commit/48f3238f5d1de3c858ce8221794f9e6f59aaf67e))
+* **client:** the canvas-first interface, in Flutter ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **cli:** record the fitted source rectangle beside the geometry ([05ff48e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/05ff48ef678fa9745fe788c716fcd0b2ef226b0d))
+* **editor:** layers, the in-game shape bank, and shape creation ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **engine:** region-aware terms and refit passes for the quality campaign ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+* **engine:** run the engine as a service the client talks to ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **engine:** run the engine as a service the UI talks to ([86c5303](https://github.com/HorizonRepublic/fh6-paint-studio/commit/86c5303b0f2109ec4e3282aefb0fe47a52d59c78))
+* **engine:** solve layer colour and alpha exactly on the finished stack ([05ff48e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/05ff48ef678fa9745fe788c716fcd0b2ef226b0d))
+* **library:** sort, group by day, and delete runs in bulk ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **pixel:** pixel-art reconstruction without the engine ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+* **studio:** pixel-art preset, native-resolution fit and a best-of control ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+* **studio:** select the engine driver with FH6_ENGINE ([86c5303](https://github.com/HorizonRepublic/fh6-paint-studio/commit/86c5303b0f2109ec4e3282aefb0fe47a52d59c78))
+* **vulkan:** feed the generator a structure-tensor coherence map ([05ff48e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/05ff48ef678fa9745fe788c716fcd0b2ef226b0d))
+* **vulkan:** run the full pipeline on Vulkan and make it the supported backend ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+
+
+### Performance
+
+* **engine:** stop burning CPU while the GPU works ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+
+
+### Bug Fixes
+
+* **backend:** score every candidate with the same eval kernel in the studio and the CLI ([d12789f](https://github.com/HorizonRepublic/fh6-paint-studio/commit/d12789f419937641c267947b918204fcc70df026))
+* **canvas:** split the compare wipe at one exact pixel ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **ci:** forward NEXUS_API_KEY to the reusable release build ([48f3238](https://github.com/HorizonRepublic/fh6-paint-studio/commit/48f3238f5d1de3c858ce8221794f9e6f59aaf67e))
+* **cli:** decode geometry colour into the working space when scoring ([05ff48e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/05ff48ef678fa9745fe788c716fcd0b2ef226b0d))
+* **client:** let the same run be injected again ([46842c5](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46842c5d57ec1375cec32d03f6625fff3d9dd8de))
+* **client:** stopping a run no longer bleeds into the next one ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **deps:** update module gioui.org to v0.10.1 ([#40](https://github.com/HorizonRepublic/fh6-paint-studio/issues/40)) ([745ec65](https://github.com/HorizonRepublic/fh6-paint-studio/commit/745ec65596632035f0fad9a94f3756447c123ce2))
+* **deps:** update module golang.org/x/image to v0.44.0 ([#43](https://github.com/HorizonRepublic/fh6-paint-studio/issues/43)) ([cff2962](https://github.com/HorizonRepublic/fh6-paint-studio/commit/cff2962a988af0611911bebbb494c3e2ce016f83))
+* **deps:** update module golang.org/x/sys to v0.47.0 ([#42](https://github.com/HorizonRepublic/fh6-paint-studio/issues/42)) ([7f4f56b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/7f4f56b49779c1e7d0aed19458cd42c3a1b3cc52))
+* **deps:** update module golang.org/x/text to v0.39.0 ([#41](https://github.com/HorizonRepublic/fh6-paint-studio/issues/41)) ([efaa4fb](https://github.com/HorizonRepublic/fh6-paint-studio/commit/efaa4fb2902830925df3bbf3e2f25dfa3812deaf))
+* **deps:** update module golang.org/x/text to v0.40.0 ([#44](https://github.com/HorizonRepublic/fh6-paint-studio/issues/44)) ([7ffebe5](https://github.com/HorizonRepublic/fh6-paint-studio/commit/7ffebe5bb10db2d55a245f5d9ed0fed8d4464d70))
+* **engine:** count the background rectangle against the shape budget ([46842c5](https://github.com/HorizonRepublic/fh6-paint-studio/commit/46842c5d57ec1375cec32d03f6625fff3d9dd8de))
+* **engine:** honour the preset alpha floor in the polish ([05ff48e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/05ff48ef678fa9745fe788c716fcd0b2ef226b0d))
+* **engine:** restore the quality default, draw line art, and drop every privilege the app never needed ([2b32876](https://github.com/HorizonRepublic/fh6-paint-studio/commit/2b32876043bc5f00f29d9b24c7a49602999da99d))
+* **inject:** blank the template layers a fit did not fill ([c8aa59b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/c8aa59b3e6cb3422ee3e57a7cd9ffb9e3de8db1d))
+* **vulkan:** score dictionary words instead of rejecting them ([05ff48e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/05ff48ef678fa9745fe788c716fcd0b2ef226b0d))
+
 ## [1.4.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.3.0...v1.4.0) (2026-06-30)
 
 
