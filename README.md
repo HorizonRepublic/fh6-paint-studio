@@ -1,132 +1,151 @@
 # FH6 Paint Studio
 
-Turn any image into a **Forza Horizon vinyl livery**. FH6 Paint Studio rebuilds your photo or artwork
-out of a few thousand simple coloured shapes - exactly the "layers" the in-game Vinyl Group Editor
-stacks - and injects the finished result straight into the game. You never place a single shape by hand.
+Turn any image into a **Forza Horizon vinyl livery**. FH6 Paint Studio rebuilds
+a photo or artwork from a few thousand coloured shapes, the same layers the
+in-game Vinyl Group Editor stacks. The finished result goes straight into the
+game: you place nothing by hand unless you open the editor and choose to.
 
 **[Download the latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases)**
 
-![FH6 Paint Studio rebuilding an image into shapes](assets/screens/progress-completed.png)
+![The main screen with a finished reconstruction, ready to inject](assets/screens/main-screen.png)
 
-See it end to end: [source photo](assets/cat/source.jpg) → [generated reconstruction](assets/cat/generated.jpg) → [on the car in-game](assets/cat/car.jpg).
+End to end: [source photo](assets/cat/source.jpg) →
+[reconstruction](assets/cat/generated.jpg) → [on the car](assets/cat/car.jpg).
 
-> **Requirements:** Windows + a GPU - **NVIDIA** (GTX 10-series or newer) or any modern **AMD / Intel**.
-> The app picks the backend for you, or you choose it. A GPU is required - there is no CPU fallback.
+> **Requirements:** Windows and a GPU with Vulkan support, which covers recent
+> NVIDIA, AMD and Intel cards alike. The engine has no CPU fallback.
 
 ---
 
 ## What you get
 
-- **Almost any image works** - photos, logos, anime screenshots, memes, your cat. It figures out the shapes.
-- **GPU-accelerated** on NVIDIA and AMD/Intel, so a livery takes seconds, with a live preview that matches what you get in-game.
-- **Presets per art style** - Photo, Anime, and Flat for clean logos - plus a line-art mode that traces outlines, an ink-over-fill hybrid, and a one-colour mode for single-colour decals that avoids muddy grey edges.
-- **Built-in editor** - tweak a result by hand before injecting: move, scale, rotate and recolour shapes on a canvas, lock the layers you like, duplicate in rows or rings, snap into line, with full undo/redo. Or build a livery from scratch.
-- **Crop to what matters** - box a region (e.g. a face) and spend the whole shape budget on the detail you care about.
-- **Library** - every generation is saved, ready to re-inject or re-export later without regenerating.
+- **Almost any image works**: photos, logos, anime screenshots, memes, your cat.
+- **Fast**: the reconstruction runs on the GPU, and the live preview matches
+  what the game will draw.
+- **A preset per art style**: Photo, Drawing/Anime, and Logo/Flat, plus line art
+  that traces outlines, an ink-over-fill hybrid, a soft-glow mode for gradients,
+  pixel art, and a one-colour mode for clean single-colour decals.
+- **A real editor**: drag, scale, rotate and recolour shapes on the canvas, with
+  full undo. Select a group and move it together, pick any colour, zoom with
+  Ctrl+wheel, and place new shapes from the bank of 470 in-game primitives and
+  decals. Lock or hide whole layers.
+- **Crop to what matters**: box the face, and the whole shape budget goes to the
+  detail you care about.
+- **Library**: the app keeps every generation, ready to re-inject or re-export
+  without regenerating.
 
 ---
 
 ## How to use it
 
 ### 1. Get the app
-[**Download the latest release**](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest/download/fh6-paint-studio-windows-x64.7z)
-and extract it. You get one folder - keep everything in it together and run **`fh6_paint_studio.exe`**
-from inside. There's no installer.
 
-It's a `.7z` archive: Windows 11 extracts it as-is, Windows 10 needs
+[**Download the latest release**](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest/download/fh6-paint-studio-windows-x64.7z)
+and extract it anywhere. The folder holds one program,
+**`FH6 Paint Studio.exe`**, and its `bin` directory. Keep them together and run
+the exe. Windows 11 opens `.7z` archives natively, Windows 10 needs
 [7-Zip](https://www.7-zip.org/) or WinRAR.
 
-That link always points at the newest build. Every release also carries a version-stamped copy of the
-same archive if you want to pin one.
+That link always points at the newest build, and every release also carries a
+version-stamped copy of the same archive if you want to pin one.
+
+If the app refuses to start and Windows names a missing `vcruntime140.dll` or
+`msvcp140.dll`, install the
+[Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+Most machines already have it.
 
 ### 2. Make a livery
-1. **Open any image** you like - a photo, a logo, some art, whatever caught your eye.
-   - The defaults are tuned to look good, so you can just leave everything as-is. Tweak the **preset**
-     (anime / photo / flat) or the **shape budget** only if you want to.
-   - For the cleanest result, use an image with a **transparent background**. A normal (opaque)
-     background works too - the engine will just spend some shapes filling the background instead of
-     your subject.
-2. *(Optional)* **Crop** - drag a box over a region (e.g. a face) to spend the whole shape budget on
-   the detail you care about.
-3. Click **Generate** and wait for it to finish.
-4. Your result is auto-saved to the **Library** tab.
-5. *(Optional)* **Touch it up in the editor** - open the result to nudge shapes, fix a colour, or lock
-   the parts you're happy with. The generated result is ready to inject as-is, so skip this if you
-   don't need it.
 
-### 3. Put it on your car (in Forza Horizon)
-6. In the game's **Vinyl Group Editor**, create a group containing **N shapes** - where N is **at least
-   as many shapes as your generation has** (more is fine). They can be any shapes; they're just
-   placeholders the app overwrites. *Tip:* build a placeholder template once, save it, then re-import
-   it and hit **Ungroup** whenever you need a fresh canvas.
-7. Back in **FH6 Paint Studio → Library**, set the **FH6 layers** count, then click **Inject into FH6**.
-   - No administrator rights needed, and the app never asks for any: the game is an ordinary
-     process owned by you, which Windows lets you write to. If the injection is refused, you are
-     almost certainly on the Microsoft Store / Game Pass build, which runs sandboxed - the Steam
-     build works.
-8. **Save the vinyl in-game - this step is required.** Right after injecting it may look rough or
-   incomplete: the editor doesn't redraw every shape until the vinyl is **saved and reloaded**. Save
-   it, reopen it, and it renders correctly - then apply it to your car.
+1. **Open an image.** The defaults already look good. Touch the style or the
+   detail budget only when you want a different trade. An image with a
+   transparent background gives the cleanest result, while an opaque one simply
+   spends some shapes on filling the backdrop.
+2. *(Optional)* **Crop.** Drag a box over the region that matters.
+3. Click **Generate** and wait for the checkmarks.
+4. The result goes to **Runs** and stays there for later.
+5. *(Optional)* **Touch it up in the editor.** Nudge shapes, fix a colour, lock
+   the parts you like. The generated result injects fine as-is.
+
+### 3. Put it on your car
+
+1. In the game's **Vinyl Group Editor**, create a group with **at least as many
+   shapes as your generation has**. Any shapes qualify, they are placeholders
+   the app overwrites. A saved placeholder template plus **Ungroup** gives you a
+   fresh canvas whenever you need one.
+2. Back in the app, set the group's layer count and click **Inject**. The app
+   needs no administrator rights and never asks for any. If the game refuses the
+   write, the usual cause is the Microsoft Store / Game Pass build, which runs
+   sandboxed. The Steam build accepts it.
+3. **Save the vinyl in-game, then reopen it.** A fresh injection looks rough at
+   first: the game redraws the shapes only after you save and reload the vinyl.
+   After the reload it renders exactly as previewed, and you can apply it to the
+   car.
 
 ### Shape budgets
-Forza gives you **1000 shapes per bumper** and **3000 for every other panel** (side, roof, hood,
-doors…). Match your budget to the panel you're decorating.
 
-> Injection writes into a running game process and may violate the game's terms of service / be
-> flagged by anti-cheat. It's for personal, offline use - **use it at your own risk.** Generating and
-> exporting never touch the game.
+Forza allows **1000 shapes on a bumper** and **3000 on every other panel**:
+side, roof, hood, doors. Match the detail budget to the panel you are
+decorating.
+
+> Injection writes into a running game process, which may violate the game's
+> terms of service or trip anti-cheat. It exists for personal, offline use.
+> **Use it at your own risk.** Generating and exporting never touch the game.
 
 ---
 
 ## Is it safe? Verify your download
 
-Every release is built by GitHub Actions and carries a **Sigstore build-provenance attestation** - a
-signed, public record that ties the exact files you download to the commit and workflow that produced
-them. You don't have to take my word that the binaries match the source; you can check it yourself with
-the [GitHub CLI](https://cli.github.com/):
+GitHub Actions builds every release and attaches a **Sigstore build-provenance
+attestation**, a signed public record tying the exact files you download to the
+commit and workflow that produced them. Check it with the
+[GitHub CLI](https://cli.github.com/):
 
 ```sh
 gh attestation verify fh6-paint-studio-<version>-windows-x64.7z --repo HorizonRepublic/fh6-paint-studio
 ```
 
-A `SHA256SUMS` file ships with each release if you'd rather just confirm the download isn't corrupted.
+Each release also carries a `SHA256SUMS.txt` if you would rather just confirm
+the download is intact.
 
-**Heads-up on antivirus:** some scanners flag the app. Putting a livery on your car works by writing
-into Forza's memory - the same technique cheats use - so heuristic scanners treat it as suspicious even
-though it isn't. The code here is open and the build is attested, so you can confirm the binary is
-exactly what's in this repo.
-
-## Roadmap
-
-- **Bulk processing** - reconstruct a whole folder of images in one run.
+**Some antivirus scanners flag the app.** Putting a livery on your car works by
+writing into Forza's memory, the same technique cheats use, so heuristic
+scanners treat the binary with suspicion. The code is open and the attestation
+above ties the binary to this exact repository.
 
 ## Screenshots
 
 <table>
   <tr>
-    <td align="center"><img src="assets/screens/main-screen.png" width="440" alt="Main screen"><br><sub><b>Main screen</b> - open an image, pick a preset, set the budget</sub></td>
-    <td align="center"><img src="assets/screens/progress.png" width="440" alt="Reconstruction in progress"><br><sub><b>Reconstruction</b> - shapes layered in live</sub></td>
+    <td align="center"><img src="assets/screens/style-picker.png" width="440" alt="Style picker"><br><sub><b>Styles</b>: a preset per art style</sub></td>
+    <td align="center"><img src="assets/screens/detail-budget.png" width="440" alt="Detail budget"><br><sub><b>Detail</b>: the shape budget, with per-panel stops</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="assets/screens/progress-completed.png" width="440" alt="Finished reconstruction"><br><sub><b>Finished result</b></sub></td>
-    <td align="center"><img src="assets/screens/custom-editor.png" width="440" alt="Built-in editor"><br><sub><b>Built-in editor</b> - tweak shapes by hand</sub></td>
+    <td align="center"><img src="assets/screens/editor.png" width="440" alt="Shape editor"><br><sub><b>Editor</b>: layers, the in-game shape bank, hand editing</sub></td>
+    <td align="center"><img src="assets/screens/crop.png" width="440" alt="Crop mode"><br><sub><b>Crop</b>: spend the whole budget on one region</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="assets/screens/library.png" width="440" alt="Library tab"><br><sub><b>Library</b> - re-inject or re-export anytime</sub></td>
-    <td align="center"><img src="assets/screens/line-art.png" width="440" alt="Line-art mode"><br><sub><b>Line-art mode</b> - traced outlines</sub></td>
+    <td align="center"><img src="assets/screens/runs.png" width="440" alt="Runs gallery"><br><sub><b>Runs</b>: every generation, ready to re-inject</sub></td>
+    <td align="center"><img src="assets/screens/advanced-settings.png" width="440" alt="Advanced settings"><br><sub><b>Advanced</b>: the knobs, when the defaults are not enough</sub></td>
   </tr>
 </table>
 
 ## Build from source
 
-Needs [Go 1.26+](https://go.dev/dl/). `.\scripts\build.ps1 -Cuda` builds the app against the CUDA
-backend, `.\scripts\build-vulkan.ps1` against the cross-vendor Vulkan one, and
-`.\scripts\build-allgpu.ps1` produces the unified binary that picks either at runtime. First-time
-Windows toolchain setup (Go + CUDA + MSVC) is in `scripts\setup-windows.ps1`. Run the tests with
-`go test -tags cuda ./...`.
+The app is a Flutter client over a Go engine service. You need
+[Go 1.26+](https://go.dev/dl/), [Flutter](https://flutter.dev) (stable channel)
+and MSVC. One script assembles the whole release folder, Vulkan shim included:
+
+```powershell
+powershell -File scripts\build-client-release.ps1 -Version dev -Out release
+```
+
+Run the engine tests with `go test ./...`, the GPU correctness suite with
+`go test -tags vulkan ./internal/backend/vulkan` on a machine with a GPU, and
+the client tests with `flutter test` inside `client\`.
 
 ## License
 
-MIT - see [LICENSE](LICENSE). © 2026 Horizon Republic.
+MIT, see [LICENSE](LICENSE). © 2026 Horizon Republic.
 
-"Forza Horizon" is a trademark of Microsoft; this is an independent, unaffiliated tool.
+"Forza Horizon" is a trademark of Microsoft; this is an independent,
+unaffiliated tool.
