@@ -7,10 +7,43 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
 )
+
+// parallelRows splits [0,h) into one row band per CPU and runs fn on each
+// concurrently. A band owns its rows exclusively, so writers never overlap.
+func parallelRows(h int, fn func(y0, y1 int)) {
+	n := runtime.GOMAXPROCS(0)
+	if n > h {
+		n = h
+	}
+	if n <= 1 {
+		fn(0, h)
+		return
+	}
+	rows := (h + n - 1) / n
+	var wg sync.WaitGroup
+	for b := 0; b < n; b++ {
+		y0 := b * rows
+		y1 := y0 + rows
+		if y1 > h {
+			y1 = h
+		}
+		if y0 >= y1 {
+			break
+		}
+		wg.Add(1)
+		go func(y0, y1 int) {
+			defer wg.Done()
+			fn(y0, y1)
+		}(y0, y1)
+	}
+	wg.Wait()
+}
 
 func WriteGeometry(path string, g model.Geometry) error {
 	b, err := json.MarshalIndent(g, "", "  ")
@@ -125,46 +158,73 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 		}
 	}
 	fss := float32(ss)
+	type prepped struct {
+		prep                   raster.Prepared
+		grad                   bool
+		xMin, yMin, xMax, yMax int
+		cr, cg, cb, a          float32
+	}
+	preps := make([]prepped, 0, len(shapes))
 	for si := 1; si < len(shapes); si++ {
 		s := shapes[si]
 		if len(s.Color) < 4 {
 			continue
 		}
-		kind := model.KindFromType(s.Type)
-		p := scaleParams(kind, model.ParamsFromShape(s), fss)
-		cr := model.SRGBToLinear(float32(s.Color[0]) / 255)
-		cg := model.SRGBToLinear(float32(s.Color[1]) / 255)
-		cb := model.SRGBToLinear(float32(s.Color[2]) / 255)
 		a := float32(s.Color[3]) / 255
 		if a <= 0 {
 			continue
 		}
-		isGrad := raster.IsGradient(kind)
-		prep := raster.Prep(kind, p)
+		kind := model.KindFromType(s.Type)
+		p := scaleParams(kind, model.ParamsFromShape(s), fss)
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, W, H)
-		for y := yMin; y <= yMax; y++ {
-			for x := xMin; x <= xMax; x++ {
-				// Gradient kinds composite with their baked per-pixel falloff so the preview matches
-				// the in-game render; hard kinds use binary coverage (aEff = a, unchanged).
-				aEff := a
-				if isGrad {
-					cov := float32(prep.Coverage(x, y))
-					if cov <= 0 {
+		preps = append(preps, prepped{
+			prep: raster.Prep(kind, p),
+			grad: raster.IsGradient(kind),
+			xMin: xMin, yMin: yMin, xMax: xMax, yMax: yMax,
+			cr: model.SRGBToLinear(float32(s.Color[0]) / 255),
+			cg: model.SRGBToLinear(float32(s.Color[1]) / 255),
+			cb: model.SRGBToLinear(float32(s.Color[2]) / 255),
+			a:  a,
+		})
+	}
+	// One row band per CPU. A band owns its rows exclusively and walks the
+	// shapes in stack order, so every pixel receives exactly the operations
+	// the serial loop gave it — bit-identical output. Serial, this loop pinned
+	// one core for hundreds of milliseconds per editor frame.
+	parallelRows(H, func(y0, y1 int) {
+		for i := range preps {
+			sp := &preps[i]
+			yMin, yMax := sp.yMin, sp.yMax
+			if yMin < y0 {
+				yMin = y0
+			}
+			if yMax > y1-1 {
+				yMax = y1 - 1
+			}
+			for y := yMin; y <= yMax; y++ {
+				for x := sp.xMin; x <= sp.xMax; x++ {
+					// Gradient kinds composite with their baked per-pixel falloff so the preview
+					// matches the in-game render; hard kinds use binary coverage (aEff unchanged).
+					aEff := sp.a
+					if sp.grad {
+						cov := float32(sp.prep.Coverage(x, y))
+						if cov <= 0 {
+							continue
+						}
+						aEff = sp.a * cov
+					} else if !sp.prep.Inside(x, y) {
 						continue
 					}
-					aEff = a * cov
-				} else if !prep.Inside(x, y) {
-					continue
+					ia := 1 - aEff
+					q := (y*W + x) * 4
+					canvas[q+0] = canvas[q+0]*ia + sp.cr*aEff
+					canvas[q+1] = canvas[q+1]*ia + sp.cg*aEff
+					canvas[q+2] = canvas[q+2]*ia + sp.cb*aEff
+					canvas[q+3] = canvas[q+3]*ia + aEff
 				}
-				ia := 1 - aEff
-				q := (y*W + x) * 4
-				canvas[q+0] = canvas[q+0]*ia + cr*aEff
-				canvas[q+1] = canvas[q+1]*ia + cg*aEff
-				canvas[q+2] = canvas[q+2]*ia + cb*aEff
-				canvas[q+3] = canvas[q+3]*ia + aEff
 			}
 		}
-	}
+	})
 	lin := canvas
 	if ss > 1 {
 		lin = make([]float32, w*h*4)
@@ -195,12 +255,14 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 		}
 	}
 	out := make([]float32, w*h*4)
-	for i := 0; i < w*h; i++ {
-		out[i*4+0] = model.LinearToSRGB(lin[i*4+0])
-		out[i*4+1] = model.LinearToSRGB(lin[i*4+1])
-		out[i*4+2] = model.LinearToSRGB(lin[i*4+2])
-		out[i*4+3] = lin[i*4+3] // alpha straight
-	}
+	parallelRows(h, func(y0, y1 int) {
+		for i := y0 * w; i < y1*w; i++ {
+			out[i*4+0] = model.LinearToSRGB(lin[i*4+0])
+			out[i*4+1] = model.LinearToSRGB(lin[i*4+1])
+			out[i*4+2] = model.LinearToSRGB(lin[i*4+2])
+			out[i*4+3] = lin[i*4+3] // alpha straight
+		}
+	})
 	return out
 }
 

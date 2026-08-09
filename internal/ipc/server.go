@@ -34,6 +34,10 @@ type Server struct {
 	mu   sync.Mutex // serialises writes: events arrive from run goroutines
 	runs map[int32]func()
 
+	renderMu sync.Mutex
+	renderQ  []Request
+	renderOn bool
+
 	storeOnce sync.Once
 	store     *library.Store
 	storeErr  error
@@ -88,7 +92,7 @@ func (s *Server) dispatch(req Request) {
 	case "shapes.catalog":
 		s.shapesMethod(req)
 	case "render":
-		s.render(req)
+		s.queueRender(req)
 	default:
 		if !s.libraryMethod(req) && !s.presetMethod(req) {
 			s.fail(req.ID, fmt.Errorf("unknown method %q", req.Method))
@@ -257,9 +261,38 @@ type RenderParams struct {
 	Transparent bool          `json:"transparent,omitempty"`
 }
 
-// render draws a shape list and sends it back as a frame. Synchronous on the
-// read goroutine: it is CPU work measured in tens of milliseconds, and a client
-// asks for it between edits rather than continuously.
+// queueRender hands a render to the worker. NEVER on the read goroutine: a
+// 3000-shape document at native size is hundreds of milliseconds of CPU, and
+// rendering it inline blocked every other message on the pipe — which read as
+// the whole app freezing mid-drag. FIFO and one at a time; the client already
+// coalesces its canvas refreshes to one in flight plus one queued.
+func (s *Server) queueRender(req Request) {
+	s.renderMu.Lock()
+	s.renderQ = append(s.renderQ, req)
+	start := !s.renderOn
+	s.renderOn = true
+	s.renderMu.Unlock()
+	if start {
+		go s.renderWorker()
+	}
+}
+
+func (s *Server) renderWorker() {
+	for {
+		s.renderMu.Lock()
+		if len(s.renderQ) == 0 {
+			s.renderOn = false
+			s.renderMu.Unlock()
+			return
+		}
+		req := s.renderQ[0]
+		s.renderQ = s.renderQ[1:]
+		s.renderMu.Unlock()
+		s.render(req)
+	}
+}
+
+// render draws a shape list and sends it back as a frame.
 func (s *Server) render(req Request) {
 	var p RenderParams
 	if len(req.Params) > 0 {
