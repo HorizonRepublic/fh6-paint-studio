@@ -145,7 +145,7 @@ class _ShellState extends State<Shell> {
       return Stack(
         fit: StackFit.expand,
         children: [
-          const _Desk(),
+          const RepaintBoundary(child: _Desk()),
           Positioned(
             left: 0,
             top: captionHeight,
@@ -212,7 +212,7 @@ class _ShellState extends State<Shell> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                const _Desk(),
+                const RepaintBoundary(child: _Desk()),
                 Positioned(
                   left: _Rail.width,
                   top: 52,
@@ -1165,17 +1165,32 @@ class _SourceChip extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(context.s('source'), style: T.label),
+                    // Two lines, like every chip in the bar: the size rides
+                    // the label line. A third line never fit the shared box —
+                    // it sat on the bottom edge and read as a mistake.
+                    Row(
+                      children: [
+                        Text(context.s('source'), style: T.label),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            meta,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: T.monoText(
+                              9.5,
+                              color: r == null ? T.faint : T.teal,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 2),
                     Text(
                       studio.sourceName!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: T.text(13, color: T.body, weight: FontWeight.w500),
-                    ),
-                    Text(
-                      meta,
-                      style: T.monoText(10, color: r == null ? T.hint : T.teal),
                     ),
                   ],
                 ),

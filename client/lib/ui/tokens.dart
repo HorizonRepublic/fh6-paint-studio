@@ -220,34 +220,46 @@ class Glass extends StatelessWidget {
     required this.child,
     this.radius = 13,
     this.padding = EdgeInsets.zero,
+    this.live = true,
   });
 
   final Widget child;
   final double radius;
   final EdgeInsets padding;
 
+  /// Whether the backdrop is genuinely worth blurring. A BackdropFilter can
+  /// never be raster-cached — its input is the live scene — so every panel
+  /// carrying one re-blurs on every presented frame. A panel that sits over
+  /// the STATIC desk (tools, bar, inspector: they never overlap the canvas)
+  /// pays that price for a blur of a smooth gradient, which looks identical
+  /// to the gradient. Those pass false; panels that really float over moving
+  /// artwork (the bank) keep the live blur.
+  final bool live;
+
   @override
   Widget build(BuildContext context) {
+    final body = Container(
+      padding: padding,
+      decoration: BoxDecoration(
+        color: T.panel,
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(color: T.border),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x80000000),
+            blurRadius: 44,
+            offset: Offset(0, 14),
+          ),
+        ],
+      ),
+      child: child,
+    );
+    if (!live) return body;
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: BackdropFilter(
         filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: T.panel,
-            borderRadius: BorderRadius.circular(radius),
-            border: Border.all(color: T.border),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x80000000),
-                blurRadius: 44,
-                offset: Offset(0, 14),
-              ),
-            ],
-          ),
-          child: child,
-        ),
+        child: body,
       ),
     );
   }

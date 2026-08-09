@@ -189,6 +189,7 @@ const _keys = <String>[
   'deleteManyTitle',
   'deleteManyBody',
   'bank',
+  'overCap',
 ];
 
 /// Builds a catalogue from a list parallel to [_keys]. Positional rather than
@@ -362,6 +363,7 @@ final _en = _cat([
   'Delete {n} runs?',
   'They go for good, with their shapes.',
   'Bank',
+  'over the game\'s 3000 limit',
 ]);
 
 final _uk = _cat([
@@ -523,6 +525,7 @@ final _uk = _cat([
   'Видалити прогонів: {n}?',
   'Вони зникнуть назавжди, разом із фігурами.',
   'Банк',
+  'понад ліміт гри 3000',
 ]);
 
 final _de = _cat([
@@ -684,6 +687,7 @@ final _de = _cat([
   '{n} Läufe löschen?',
   'Sie sind endgültig weg, samt ihren Formen.',
   'Bank',
+  'über dem Spiellimit von 3000',
 ]);
 
 final _es = _cat([
@@ -845,6 +849,7 @@ final _es = _cat([
   '¿Eliminar {n} ejecuciones?',
   'Se van para siempre, con sus formas.',
   'Banco',
+  'supera el límite de 3000 del juego',
 ]);
 
 final _ptBR = _cat([
@@ -1006,6 +1011,7 @@ final _ptBR = _cat([
   'Excluir {n} execuções?',
   'Elas somem de vez, com as formas.',
   'Banco',
+  'acima do limite de 3000 do jogo',
 ]);
 
 final _fr = _cat([
@@ -1167,6 +1173,7 @@ final _fr = _cat([
   'Supprimer {n} rendus ?',
   'Ils partent définitivement, avec leurs formes.',
   'Banque',
+  'au-delà de la limite de 3000 du jeu',
 ]);
 
 final _pl = _cat([
@@ -1328,6 +1335,7 @@ final _pl = _cat([
   'Usunąć przebiegi: {n}?',
   'Znikną na zawsze, razem z kształtami.',
   'Bank',
+  'ponad limit gry 3000',
 ]);
 
 final _it = _cat([
@@ -1489,6 +1497,7 @@ final _it = _cat([
   'Eliminare {n} esecuzioni?',
   'Spariscono per sempre, con le loro forme.',
   'Banca',
+  'oltre il limite di 3000 del gioco',
 ]);
 
 final _tr = _cat([
@@ -1650,6 +1659,7 @@ final _tr = _cat([
   '{n} calisma silinsin mi?',
   'Sekilleriyle birlikte tamamen gider.',
   'Banka',
+  'oyunun 3000 sinirinin uzerinde',
 ]);
 
 final _zhCN = _cat([
@@ -1811,6 +1821,7 @@ final _zhCN = _cat([
   '删除 {n} 次生成？',
   '它们会连同形状一起永久消失。',
   '素材库',
+  '超出游戏 3000 上限',
 ]);
 
 final _ja = _cat([
@@ -1972,6 +1983,7 @@ final _ja = _cat([
   '{n} 件の実行を削除しますか？',
   '図形ごと完全に消えます。',
   'バンク',
+  'ゲームの上限3000を超えています',
 ]);
 
 final _ko = _cat([
@@ -2133,6 +2145,7 @@ final _ko = _cat([
   '실행 {n}개를 삭제할까요?',
   '도형과 함께 완전히 사라집니다.',
   '뱅크',
+  '게임 한도 3000 초과',
 ]);
 
 /// The same order the previous studio offered, so a returning user finds their

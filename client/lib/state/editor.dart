@@ -19,6 +19,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 
 import '../engine/engine_client.dart';
+import '../engine/protocol.dart';
 
 /// The primitives, by the type id in the document.
 const typeBaseRect = 1; // [x1,y1,x2,y2] — the background, corner to corner
@@ -163,14 +164,33 @@ class EditShape {
   EditShape copy() =>
       EditShape(type, List.of(data), List.of(color), layer: layer);
 
+  /// A copy with coordinates and extents multiplied by [k], for draft renders
+  /// at reduced resolution. Angles and skew are unitless and stay.
+  EditShape scaledFor(double k) {
+    final d = List.of(data);
+    final n = (isBoxLike || isWordLike) ? 4 : d.length;
+    for (var i = 0; i < n; i++) {
+      d[i] *= k;
+    }
+    return EditShape(type, d, List.of(color), layer: layer);
+  }
+
   bool get isEllipseLike =>
       type == typeEllipse || type == typeGlow || type == typeDisk;
   bool get isBoxLike => isEllipseLike || type == typeRect;
 
+  /// A dictionary word from the bank: [cx,cy,W,H,rot,skew] — FULL extents,
+  /// unlike the primitives' half extents. Everything that is not a primitive.
+  bool get isWordLike =>
+      !isBoxLike &&
+      type != typeTriangle &&
+      type != typeBaseRect &&
+      type != typeLine;
+
   /// The centre, whatever the primitive. Triangles have no stored centre, so it
   /// is the centroid — which is also the point a drag should pivot around.
   ui.Offset get center {
-    if (isBoxLike) return ui.Offset(data[0], data[1]);
+    if (isBoxLike || isWordLike) return ui.Offset(data[0], data[1]);
     if (type == typeTriangle) {
       return ui.Offset(
         (data[0] + data[2] + data[4]) / 3,
@@ -183,16 +203,34 @@ class EditShape {
     return ui.Offset.zero;
   }
 
-  double get angle => isBoxLike && data.length > 4 ? data[4] : 0;
+  double get angle =>
+      (isBoxLike || isWordLike) && data.length > 4 ? data[4] : 0;
   double get size =>
       isBoxLike ? math.max(data[2], data[3]) : bounds.longestSide;
 
+  /// The shape's own box, unrotated: what the selection frame shows. [bounds]
+  /// is the rotated EXTENT — right for fitting a view, wrong for a frame that
+  /// must turn rigidly with the shape instead of breathing as it spins.
+  ui.Rect get localBounds {
+    if (isBoxLike || isWordLike) {
+      final k = isWordLike ? 1 : 2; // words store full extents
+      return ui.Rect.fromCenter(
+        center: ui.Offset(data[0], data[1]),
+        width: data[2] * k,
+        height: data[3] * k,
+      );
+    }
+    return bounds;
+  }
+
   ui.Rect get bounds {
-    if (isBoxLike) {
+    if (isBoxLike || isWordLike) {
       // The rotated extent, so a selection box never crops a turned shape.
+      final hw = isWordLike ? data[2] / 2 : data[2];
+      final hh = isWordLike ? data[3] / 2 : data[3];
       final t = data[4] * math.pi / 180;
-      final ex = (data[2] * math.cos(t)).abs() + (data[3] * math.sin(t)).abs();
-      final ey = (data[2] * math.sin(t)).abs() + (data[3] * math.cos(t)).abs();
+      final ex = (hw * math.cos(t)).abs() + (hh * math.sin(t)).abs();
+      final ey = (hw * math.sin(t)).abs() + (hh * math.cos(t)).abs();
       return ui.Rect.fromLTRB(
         data[0] - ex,
         data[1] - ey,
@@ -221,6 +259,16 @@ class EditShape {
   /// Whether a point is inside. Exact for the primitives a user can select; the
   /// gradient kinds use their footprint, which is what their handles show.
   bool contains(ui.Offset p) {
+    if (isWordLike) {
+      // The word's box, turned back: its true footprint lives in the engine's
+      // masks, and the box is what the frame shows and the hand expects.
+      final t = -data[4] * math.pi / 180;
+      final dx = p.dx - data[0], dy = p.dy - data[1];
+      final rx = dx * math.cos(t) - dy * math.sin(t);
+      final ry = dx * math.sin(t) + dy * math.cos(t);
+      return rx.abs() <= math.max(0.5, data[2] / 2) &&
+          ry.abs() <= math.max(0.5, data[3] / 2);
+    }
     switch (type) {
       case typeEllipse || typeGlow || typeDisk:
         final t = -data[4] * math.pi / 180;
@@ -270,7 +318,7 @@ class EditShape {
   }
 
   void translate(double dx, double dy) {
-    if (isBoxLike) {
+    if (isBoxLike || isWordLike) {
       data[0] += dx;
       data[1] += dy;
       return;
@@ -282,9 +330,10 @@ class EditShape {
   }
 
   void scaleBy(double k) {
-    if (isBoxLike) {
-      data[2] = math.max(0.5, data[2] * k);
-      data[3] = math.max(0.5, data[3] * k);
+    if (isBoxLike || isWordLike) {
+      final floor = isWordLike ? 1.0 : 0.5;
+      data[2] = math.max(floor, data[2] * k);
+      data[3] = math.max(floor, data[3] * k);
       return;
     }
     final c = center;
@@ -295,7 +344,7 @@ class EditShape {
   }
 
   void rotateBy(double deg) {
-    if (isBoxLike) {
+    if (isBoxLike || isWordLike) {
       data[4] = (data[4] + deg) % 360;
       return;
     }
@@ -311,7 +360,7 @@ class EditShape {
   /// Mirrors across the document's own axis, not the shape's: mirroring a decal
   /// is about where it sits on the panel.
   void mirror(double axis, {required bool horizontal}) {
-    if (isBoxLike) {
+    if (isBoxLike || isWordLike) {
       if (horizontal) {
         data[0] = 2 * axis - data[0];
         data[4] = (360 - data[4]) % 360;
@@ -331,8 +380,18 @@ class EditShape {
   }
 }
 
+/// Repaint driver for the canvas during live gestures. The PAINTERS listen to
+/// this; the widget tree does not — rebuilding a 3000-row layer panel at
+/// pointer-event rate is what made dragging crawl no matter how cheap the
+/// canvas itself was.
+class CanvasTick extends ChangeNotifier {
+  void tick() => notifyListeners();
+}
+
 class Editor extends ChangeNotifier {
   Editor(this._engine);
+
+  final canvasTick = CanvasTick();
 
   final EngineClient _engine;
 
@@ -412,6 +471,20 @@ class Editor extends ChangeNotifier {
   ui.Image? render;
   bool rendering = false;
   bool _dirty = false;
+  bool _dirtyDraft = true;
+
+  /// Long side of a draft render, in pixels. Small enough that the engine
+  /// answers within a pointer frame or two on a full document.
+  static const _draftLongSide = 700.0;
+
+  /// Long side of a committed render — display-resolution, not native.
+  static const _fullLongSide = 1600.0;
+
+  /// The shape just added, until a render that includes it lands. The picture
+  /// trails the document by a round-trip, so without this a new shape exists
+  /// but cannot be seen.
+  EditShape? settling;
+  int _settleWaits = 0;
 
   int selected = -1;
   String? error;
@@ -454,6 +527,7 @@ class Editor extends ChangeNotifier {
     width = w;
     height = h;
     selected = -1;
+    extra.clear();
     _undo.clear();
     _redo.clear();
     notifyListeners();
@@ -515,6 +589,8 @@ class Editor extends ChangeNotifier {
 
   void _swap(List<List<EditShape>> from, List<List<EditShape>> to) {
     if (from.isEmpty) return;
+    endInteraction();
+    extra.clear();
     to.add(shapes.map((s) => s.copy()).toList());
     final restored = from.removeLast();
     shapes
@@ -530,13 +606,210 @@ class Editor extends ChangeNotifier {
   /// — so dragging cannot build a backlog, and the shape follows the pointer
   /// instead of jumping into place when the mouse is released.
   void live() {
-    notifyListeners();
-    unawaited(refresh());
+    // Painters only — no notifyListeners, no tree rebuild. The shape objects
+    // are mutated in place, so a repaint alone shows the new geometry.
+    canvasTick.tick();
+    // With the interaction composite up OR still rendering, the engine hears
+    // nothing: a draft queued behind the composite's three renders only
+    // delays the very thing that ends the drafting. Group drags and a failed
+    // composite (_interBusy cleared in its finally) keep the draft path.
+    if (interBelow == null && !_interBusy) unawaited(refresh(draft: true));
   }
 
+  /// Extra selected shapes beyond [selected] — move-only companions: the
+  /// group translates together, but resize/rotate/inspector stay with the
+  /// primary. Cleared by any plain select or structural change, because the
+  /// members are INDICES and a reorder would silently retarget them.
+  final extra = <int>{};
+
   void select(int i) {
+    if (i != selected) endInteraction();
     selected = i;
+    extra.clear();
     notifyListeners();
+  }
+
+  /// Ctrl+click in the panel: joins or leaves the move-group.
+  void toggleExtra(int i) {
+    if (i <= 0 || i >= shapes.length || i == selected) return;
+    if (selected < 0) {
+      select(i);
+      return;
+    }
+    if (!extra.remove(i)) extra.add(i);
+    endInteraction();
+    notifyListeners();
+  }
+
+  /// Shift+click in the panel: the whole run between the primary and [i]
+  /// becomes the move-group. Locked and hidden layers stay out of it — the
+  /// range must not quietly drag what a lock was meant to protect.
+  void extendTo(int i) {
+    if (i <= 0 || i >= shapes.length) return;
+    if (selected <= 0) {
+      select(i);
+      return;
+    }
+    extra.clear();
+    final lo = math.min(selected, i);
+    final hi = math.max(selected, i);
+    for (var n = lo; n <= hi; n++) {
+      if (n == selected) continue;
+      final l = layerOf(shapes[n].layer);
+      if (l != null && (l.locked || l.hidden)) continue;
+      extra.add(n);
+    }
+    endInteraction();
+    notifyListeners();
+  }
+
+  // ---- live interaction -----------------------------------------------
+
+  /// The stack split around the selected shape, rendered ONCE when a gesture
+  /// starts: everything below it, the shape alone on transparency, everything
+  /// above. During the gesture the canvas is composited locally from these
+  /// three at frame rate and the engine is asked for NOTHING — the per-tick
+  /// full-stack renders are what made dragging stutter and freeze. The commit
+  /// at the gesture's end renders the truth; this composite is sRGB and
+  /// approximate on purpose.
+  ui.Image? interBelow, interSprite, interAbove;
+  List<double>? interStart; // the shape's data as the sprite was rendered
+  int _interFor = -1;
+  bool _interBusy = false;
+  bool _interRetire =
+      false; // drop the composite when the next FULL frame lands
+
+  Future<void> beginInteraction() async {
+    final i = selected;
+    if (i < 0 || _interBusy) return;
+    if (_interFor == i && interBelow != null) {
+      _interRetire = false; // a fresh grab keeps the composite alive
+      return;
+    }
+    _interBusy = true;
+    _interFor = i;
+    try {
+      final k = math.min(1.0, _draftLongSide / math.max(width, height));
+      final w = math.max(1, (width * k).round());
+      final h = math.max(1, (height * k).round());
+      List<Map<String, dynamic>> part(Iterable<EditShape> ss) => [
+        for (final s in ss)
+          if (layerOf(s.layer)?.hidden != true)
+            (k == 1.0 ? s : s.scaledFor(k)).toJson(),
+      ];
+      // The pose is snapshotted with the request: the hand is already moving
+      // the live shape while these render.
+      final snap = shapes[i].copy();
+      // The renderer treats shapes[0] as the BACKGROUND slot — with a
+      // transparent render it is skipped outright. The sprite and the
+      // above-stack must ride on a stub, or their first shape vanishes:
+      // that was the drag where the shape disappeared until release.
+      const stub = {
+        'type': 1,
+        'data': [0.0, 0.0, 0.0, 0.0],
+        'color': [0, 0, 0, 0],
+        'score': 0,
+      };
+      // The list is snapshotted synchronously and all requests leave at
+      // once: the server is FIFO anyway, and awaiting each reply before
+      // SENDING the next added two idle round-trips to every grab.
+      final all = List<EditShape>.of(shapes);
+      ui.Image below, sprite;
+      ui.Image? above;
+      if (extra.isEmpty) {
+        final fb = _engine.render(
+          shapes: part(all.take(i)),
+          width: w,
+          height: h,
+        );
+        final fs = _engine.render(
+          shapes: [
+            stub,
+            ...part([snap]),
+          ],
+          width: w,
+          height: h,
+          transparent: true,
+        );
+        final fa = _engine.render(
+          shapes: [stub, ...part(all.skip(i + 1))],
+          width: w,
+          height: h,
+          transparent: true,
+        );
+        below = await _decodeFrame(await fb);
+        sprite = await _decodeFrame(await fs);
+        above = await _decodeFrame(await fa);
+      } else {
+        // A move-group: the sprite is EVERY selected shape in stack order,
+        // riding on top of everything else. The z-order is approximate for
+        // the gesture; the commit render restores the truth.
+        final sel = {i, ...extra};
+        final fb = _engine.render(
+          shapes: part([
+            for (var n = 0; n < all.length; n++)
+              if (!sel.contains(n)) all[n],
+          ]),
+          width: w,
+          height: h,
+        );
+        final fs = _engine.render(
+          shapes: [
+            stub,
+            ...part([
+              for (var n = 0; n < all.length; n++)
+                if (sel.contains(n)) all[n],
+            ]),
+          ],
+          width: w,
+          height: h,
+          transparent: true,
+        );
+        below = await _decodeFrame(await fb);
+        sprite = await _decodeFrame(await fs);
+      }
+      if (_interFor != i) {
+        below.dispose();
+        sprite.dispose();
+        above?.dispose();
+        return;
+      }
+      interBelow = below;
+      interSprite = sprite;
+      interAbove = above;
+      interStart = List.of(snap.data);
+      notifyListeners();
+    } catch (_) {
+      endInteraction(); // the draft-render path keeps working without this
+    } finally {
+      _interBusy = false;
+    }
+  }
+
+  void endInteraction() {
+    final old = [interBelow, interSprite, interAbove];
+    interBelow = interSprite = interAbove = null;
+    interStart = null;
+    _interFor = -1;
+    // Disposed a beat later: a repaint scheduled before listeners heard the
+    // news may still hold these.
+    Future<void>.delayed(const Duration(milliseconds: 300), () {
+      for (final img in old) {
+        img?.dispose();
+      }
+    });
+  }
+
+  Future<ui.Image> _decodeFrame(PreviewFrame f) {
+    final done = Completer<ui.Image>();
+    ui.decodeImageFromPixels(
+      f.pixels,
+      f.width,
+      f.height,
+      ui.PixelFormat.rgba8888,
+      done.complete,
+    );
+    return done.future;
   }
 
   /// The topmost shape under a point. Topmost because that is the one the user
@@ -712,11 +985,25 @@ class Editor extends ChangeNotifier {
     s.layer = activeLayer;
     shapes.add(s);
     selected = shapes.length - 1;
+    extra.clear();
     groupLayer = null;
+    settling = s;
+    // A render already in flight was asked before this shape existed; only the
+    // one after it can show the shape.
+    _settleWaits = rendering ? 2 : 1;
     commit();
   }
 
   void commit() {
+    // The composite outlives the gesture ON PURPOSE: dropped at release, the
+    // canvas fell back to the STALE picture and the shape flashed back to its
+    // old place for the render's round-trip. It retires when the fresh
+    // full-resolution frame actually lands.
+    if (interBelow != null && _interFor == selected) {
+      _interRetire = true;
+    } else {
+      endInteraction();
+    }
     notifyListeners();
     refresh();
   }
@@ -725,8 +1012,22 @@ class Editor extends ChangeNotifier {
     final s = current;
     if (s == null || selected == 0) return; // the background is not deletable
     mark();
+    extra.clear();
+    final layer = s.layer;
+    final was = selected;
     shapes.removeAt(selected);
-    selected = math.min(selected, shapes.length - 1);
+    // Focus falls to the NEXT ROW of the panel — the nearest same-layer shape
+    // below the deleted one in the stack — not to whatever slid into the old
+    // index, which could be any layer and looked random.
+    final ids = indicesIn(layer);
+    if (ids.isNotEmpty) {
+      selected = ids.lastWhere(
+        (i) => i < was,
+        orElse: () => ids.firstWhere((i) => i >= was, orElse: () => ids.last),
+      );
+    } else {
+      selected = math.min(was, shapes.length - 1);
+    }
     commit();
   }
 
@@ -749,6 +1050,7 @@ class Editor extends ChangeNotifier {
     // it, and moving it would put the canvas colour on top of the art.
     if (i < 1 || i + by < 1 || i + by >= shapes.length) return;
     mark();
+    extra.clear();
     final s = shapes.removeAt(i);
     shapes.insert(i + by, s);
     selected = i + by;
@@ -773,6 +1075,18 @@ class Editor extends ChangeNotifier {
     commit();
   }
 
+  /// Colour mid-drag: paints without touching undo. The picker marks once
+  /// when the drag starts and commits once when it ends, so a sweep across
+  /// the field is one undo step, not a hundred.
+  void previewColor(int r, int g, int b) {
+    final s = current;
+    if (s == null) return;
+    s.color[0] = r;
+    s.color[1] = g;
+    s.color[2] = b;
+    live();
+  }
+
   void setAlpha(int a) {
     final s = current;
     if (s == null) return;
@@ -781,26 +1095,49 @@ class Editor extends ChangeNotifier {
     commit();
   }
 
+  /// Alpha mid-drag: paints without touching undo — the slider marks once on
+  /// grab and commits once on release, like the colour picker.
+  void previewAlpha(int a) {
+    final s = current;
+    if (s == null) return;
+    s.color[3] = a.clamp(0, 255);
+    live();
+  }
+
   /// Asks the engine for a fresh picture. Coalesced: an edit during a render
   /// queues exactly one more, so dragging cannot build a backlog of stale
   /// pictures that then flash past in order.
-  Future<void> refresh() async {
+  ///
+  /// [draft] renders at a reduced resolution. The full-size picture of a
+  /// 3000-shape document takes long enough that the canvas trailed the
+  /// pointer by half a second — a live gesture wants cadence, not fidelity.
+  /// The commit at the gesture's end asks for the full frame.
+  Future<void> refresh({bool draft = false}) async {
     if (rendering) {
       _dirty = true;
+      _dirtyDraft = _dirtyDraft && draft; // one full request upgrades the queue
       return;
     }
     rendering = true;
     notifyListeners();
     try {
+      // Even the FULL render is capped near display resolution: the viewport
+      // shows ~1100 logical px, and rendering/shipping/decoding a 16 MB
+      // native frame per mouse-up bought pixels nobody could see. Export and
+      // injection use the GEOMETRY, which never loses precision.
+      final k = math.min(
+        1.0,
+        (draft ? _draftLongSide : _fullLongSide) / math.max(width, height),
+      );
       final frame = await _engine.render(
         // A hidden layer leaves the picture but not the document: it is still
         // exported and still undoable, it simply is not drawn.
         shapes: shapes
             .where((s) => layerOf(s.layer)?.hidden != true)
-            .map((s) => s.toJson())
+            .map((s) => (k == 1.0 ? s : s.scaledFor(k)).toJson())
             .toList(),
-        width: width,
-        height: height,
+        width: math.max(1, (width * k).round()),
+        height: math.max(1, (height * k).round()),
       );
       final completer = Completer<ui.Image>();
       ui.decodeImageFromPixels(
@@ -810,17 +1147,31 @@ class Editor extends ChangeNotifier {
         ui.PixelFormat.rgba8888,
         completer.complete,
       );
-      render?.dispose();
-      render = await completer.future;
+      // Swap BEFORE disposing: the await parks this function while the tree
+      // still paints the old image — disposing it first was a use-after-free
+      // for however long the decode took.
+      final fresh = await completer.future;
+      final old = render;
+      render = fresh;
+      old?.dispose();
       error = null;
     } catch (e) {
       error = '$e';
+    }
+    if (_settleWaits > 0 && --_settleWaits == 0) settling = null;
+    // Only a FULL frame retires the composite — a stale queued draft landing
+    // first would bring the old picture back for a blink.
+    if (_interRetire && !draft) {
+      _interRetire = false;
+      endInteraction();
     }
     rendering = false;
     notifyListeners();
     if (_dirty) {
       _dirty = false;
-      unawaited(refresh());
+      final d = _dirtyDraft;
+      _dirtyDraft = true;
+      unawaited(refresh(draft: d));
     }
   }
 

@@ -36,6 +36,18 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # channel of its own — the caption buttons are Flutter widgets that have to reach
 # Win32 — and MethodChannel lives in the plugin half of the C++ wrapper.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app flutter_wrapper_plugin)
+# The release ships every DLL inside bin\, not beside the exe, so the user sees
+# one .exe and nothing else (scripts/build-client-release.ps1). A normal import
+# would be resolved by the loader before wWinMain runs and fail; delay-loading
+# defers each DLL to its first call, which happens after main.cpp has pointed
+# the loader at bin\. A NEW PLUGIN'S DLL MUST BE ADDED HERE — left off the
+# list it stays an ordinary import and the release exe will not start.
+target_link_libraries(${BINARY_NAME} PRIVATE "delayimp.lib")
+target_link_options(${BINARY_NAME} PRIVATE
+  "/DELAYLOAD:flutter_windows.dll"
+  "/DELAYLOAD:desktop_drop_plugin.dll"
+  "/DELAYLOAD:file_selector_windows_plugin.dll"
+)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 # SetWindowSubclass, for making the caption hit test fall through to the parent.
 target_link_libraries(${BINARY_NAME} PRIVATE "comctl32.lib")

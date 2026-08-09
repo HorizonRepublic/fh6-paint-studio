@@ -418,6 +418,7 @@ class _DetailPopoverState extends State<DetailPopover> {
     // and clicks Generate meant that number.
     _focus.addListener(() {
       if (!_focus.hasFocus) _commit();
+      setState(() {}); // the field's border shows focus
     });
   }
 
@@ -470,26 +471,40 @@ class _DetailPopoverState extends State<DetailPopover> {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
+                      // Dressed as an input on purpose: the same number drawn
+                      // bare read as a label, and nobody clicks a label.
                       SizedBox(
-                        width: 96,
-                        child: TextField(
-                          controller: _field,
-                          focusNode: _focus,
-                          onSubmitted: (_) => _commit(),
-                          keyboardType: TextInputType.number,
-                          style: T.monoText(
-                            26,
-                            color: T.title,
-                            weight: FontWeight.w500,
+                        width: 108,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 120),
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          decoration: BoxDecoration(
+                            color: T.fillSoft,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: _focus.hasFocus ? T.teal : T.border,
+                            ),
                           ),
-                          cursorColor: T.teal,
-                          decoration: const InputDecoration(
-                            isDense: true,
-                            contentPadding: EdgeInsets.symmetric(vertical: 4),
-                            border: InputBorder.none,
+                          child: TextField(
+                            controller: _field,
+                            focusNode: _focus,
+                            onSubmitted: (_) => _commit(),
+                            keyboardType: TextInputType.number,
+                            style: T.monoText(
+                              26,
+                              color: T.title,
+                              weight: FontWeight.w500,
+                            ),
+                            cursorColor: T.teal,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              contentPadding: EdgeInsets.symmetric(vertical: 4),
+                              border: InputBorder.none,
+                            ),
                           ),
                         ),
                       ),
+                      const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           named == null
