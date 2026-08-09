@@ -40,14 +40,12 @@ End to end: [source photo](assets/cat/source.jpg) →
 
 ### 1. Get the app
 
-[**Download the latest release**](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest/download/fh6-paint-studio-windows-x64.7z)
+Grab the `.7z` archive from the
+[latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest)
 and extract it anywhere. The folder holds one program,
 **`FH6 Paint Studio.exe`**, and its `bin` directory. Keep them together and run
 the exe. Windows 11 opens `.7z` archives natively, Windows 10 needs
 [7-Zip](https://www.7-zip.org/) or WinRAR.
-
-That link always points at the newest build, and every release also carries a
-version-stamped copy of the same archive if you want to pin one.
 
 If the app refuses to start and Windows names a missing `vcruntime140.dll` or
 `msvcp140.dll`, install the
