@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.1.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.0.0...v2.1.0) (2026-08-10)
+
+
+### Features
+
+* **editor:** realtime drags on a local composite, multi-select move, a colour picker, double-click placement, cursor zoom ([dac7c8e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dac7c8e43aa7fb68751b9736194bd3cdc1554d9d))
+* **release:** one visible executable, everything else inside bin\ ([dac7c8e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dac7c8e43aa7fb68751b9736194bd3cdc1554d9d))
+
+
+### Performance
+
+* **client:** one-copy frame assembly and a cool idle editor ([dac7c8e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dac7c8e43aa7fb68751b9736194bd3cdc1554d9d))
+* **engine:** row-band parallel RenderFH6, bit-identical to the serial loop ([dac7c8e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dac7c8e43aa7fb68751b9736194bd3cdc1554d9d))
+
+
+### Bug Fixes
+
+* **editor:** bank shapes arrive visible, selected and at full alpha ([dac7c8e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dac7c8e43aa7fb68751b9736194bd3cdc1554d9d))
+* **engine:** renders no longer block the service pipe ([dac7c8e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dac7c8e43aa7fb68751b9736194bd3cdc1554d9d))
+
 ## [2.0.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v1.4.0...v2.0.0) (2026-08-07)
 
 
