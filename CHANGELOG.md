@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.1.0...v2.1.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* release the dead-code cleanup and Nexus link ([4709f4b](https://github.com/HorizonRepublic/fh6-paint-studio/commit/4709f4bcbeda06334abdbb8cb122c532f9f246d6))
+
 ## [2.1.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.0.0...v2.1.0) (2026-08-10)
 
 
