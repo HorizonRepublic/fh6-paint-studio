@@ -1,15 +1,9 @@
 package ui
 
 import (
-	"image"
 	"strings"
 
-	"gioui.org/layout"
-	"gioui.org/op"
 	"gioui.org/widget"
-	"gioui.org/widget/material"
-
-	"fh6-paint-studio/internal/i18n"
 )
 
 // MultiSelect is a combobox that floats a checklist popup: zero or more options can be ticked, and the
@@ -94,58 +88,4 @@ func (m *MultiSelect) SetCSV(csv string) {
 		m.checked[i] = on
 		m.boxes[i].Value = on
 	}
-}
-
-func (m *MultiSelect) summary() string {
-	v := m.Value()
-	switch {
-	case len(v) == 0:
-		return i18n.T("multiselect.none")
-	case len(v) == len(m.options):
-		return i18n.T("multiselect.all")
-	default:
-		return strings.Join(v, ", ")
-	}
-}
-
-// Layout draws the closed control and, when open, the deferred checklist popup.
-func (m *MultiSelect) Layout(gtx C, th *Theme) D {
-	if m.btn.Clicked(gtx) {
-		m.open = !m.open
-	}
-	for i := range m.boxes {
-		if m.boxes[i].Update(gtx) {
-			m.checked[i] = m.boxes[i].Value
-		}
-	}
-	dims := ddBox(gtx, th, &m.btn, m.summary())
-	if m.open {
-		macro := op.Record(gtx.Ops)
-		off := op.Offset(image.Pt(0, dims.Size.Y+4)).Push(gtx.Ops)
-		m.popup(gtx, th, dims.Size.X)
-		off.Pop()
-		op.Defer(gtx.Ops, macro.Stop())
-	}
-	return dims
-}
-
-func (m *MultiSelect) popup(gtx C, th *Theme, width int) D {
-	gtx.Constraints.Min.X = width
-	gtx.Constraints.Max.X = width
-	return th.CardBg(gtx, th.SurfaceHi, 4, func(gtx C) D {
-		ch := make([]layout.FlexChild, 0, len(m.options))
-		for i := range m.options {
-			i := i
-			ch = append(ch, layout.Rigid(func(gtx C) D {
-				return layout.UniformInset(8).Layout(gtx, func(gtx C) D {
-					cb := material.CheckBox(th.M, &m.boxes[i], m.options[i])
-					cb.Color = th.Text
-					cb.IconColor = th.Accent
-					cb.TextSize = 14
-					return cb.Layout(gtx)
-				})
-			}))
-		}
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
-	})
 }

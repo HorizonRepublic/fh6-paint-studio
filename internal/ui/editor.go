@@ -636,11 +636,6 @@ func (s *AppState) drawDragSprite(gtx C, rect image.Rectangle) {
 // selValid reports whether a selectable shape (not the background) is currently selected.
 func (s *AppState) selValid() bool { return s.EditSel >= 1 && s.EditSel < len(s.EditShapes) }
 
-// isLocked reports whether shape i is locked (protected from edits).
-func (s *AppState) isLocked(i int) bool {
-	return i >= 1 && i < len(s.EditShapes) && s.EditShapes[i].Locked
-}
-
 // selLocked reports whether the primary selected shape is locked — locked selections show a grey,
 // handle-less frame and refuse drag/scale/rotate.
 func (s *AppState) selLocked() bool { return s.selValid() && s.EditShapes[s.EditSel].Locked }

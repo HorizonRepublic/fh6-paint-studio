@@ -860,20 +860,6 @@ func loadPreviewImage(store libraryAPI, id string) (image.Image, error) {
 	return decodePNG(b)
 }
 
-// nrgbaToFloat converts an sRGB NRGBA image to the packed []float32 RGBA (0..1) the metric package
-// expects, honouring the row stride.
-func nrgbaToFloat(img *image.NRGBA) []float32 {
-	w, h := img.Bounds().Dx(), img.Bounds().Dy()
-	out := make([]float32, w*h*4)
-	for y := 0; y < h; y++ {
-		row := img.Pix[y*img.Stride : y*img.Stride+w*4]
-		for x := 0; x < w*4; x++ {
-			out[y*w*4+x] = float32(row[x]) / 255
-		}
-	}
-	return out
-}
-
 // prefillInjectLayers seeds the FH6-template count (when blank) from the largest generation, capped to
 // the per-group ceiling — a safe default that fits every entry, which the per-row fit badge then
 // confirms. The user lowers it to match their real in-game template; the badges update to show drops.

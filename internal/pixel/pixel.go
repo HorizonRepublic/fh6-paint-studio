@@ -168,10 +168,6 @@ type rect struct {
 // row, then greedy vertical merge of runs with identical span+color — the classic RLE cover. Not
 // provably minimal, but within a few percent on real sprites and exactly right on stripes/fills.
 func decompose(cells []colorKey, opaque []bool, gw, gh int) []rect {
-	type run struct {
-		x0, x1 int
-		color  colorKey
-	}
 	var out []rect
 	open := map[[3]int]int{} // {x0,x1,color-ish} -> index into out of the still-growing rect
 	for gy := 0; gy < gh; gy++ {

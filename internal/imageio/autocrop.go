@@ -126,44 +126,6 @@ func LoadAutoCropped(path string, maxRes int) (*Prepared, image.Rectangle, error
 	return PrepareFromImage(crop, maxRes), rect, nil
 }
 
-// LoadRegionAutoCropped decodes path, then crops the fractional sub-rectangle [fx,fy,fw,fh] taken
-// relative to AutoCropRect(img) — the SAME content rectangle the Studio shows after loadImage's
-// auto-crop, not the raw file bounds. This keeps a crop the user draws on the displayed source aligned
-// with the region that gets reconstructed, while still cropping at FULL resolution before the maxRes
-// downscale (so the region fills the render and stays crisp). Returns the source-px crop rect.
-func LoadRegionAutoCropped(path string, maxRes int, fx, fy, fw, fh float64) (*Prepared, image.Rectangle, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, image.Rectangle{}, err
-	}
-	defer f.Close()
-	img, _, err := image.Decode(f)
-	if err != nil {
-		return nil, image.Rectangle{}, err
-	}
-	sub := subRect(AutoCropRect(img), fx, fy, fw, fh)
-	crop := image.NewRGBA(image.Rect(0, 0, sub.Dx(), sub.Dy()))
-	draw.Draw(crop, crop.Bounds(), img, sub.Min, draw.Src)
-	return PrepareFromImage(crop, maxRes), sub, nil
-}
-
-// subRect maps the fractional rectangle [fx,fy,fw,fh] of base into absolute pixels, clamped to base
-// with a minimum 1px extent so a degenerate selection never produces an empty image.
-func subRect(base image.Rectangle, fx, fy, fw, fh float64) image.Rectangle {
-	W, H := base.Dx(), base.Dy()
-	x0 := base.Min.X + clamp(int(fx*float64(W)), 0, W-1)
-	y0 := base.Min.Y + clamp(int(fy*float64(H)), 0, H-1)
-	x1 := x0 + max(1, int(fw*float64(W)))
-	y1 := y0 + max(1, int(fh*float64(H)))
-	if x1 > base.Max.X {
-		x1 = base.Max.X
-	}
-	if y1 > base.Max.Y {
-		y1 = base.Max.Y
-	}
-	return image.Rect(x0, y0, x1, y1)
-}
-
 // LoadAbsRegion decodes path and crops the ABSOLUTE pixel rectangle abs (in the raw source's
 // coordinates), then prepares it at maxRes. Unlike LoadRegion/LoadAutoCropped it applies no auto-crop
 // and no fractional mapping — the caller supplies the exact source rect. This is the crop-tool's

@@ -43,9 +43,6 @@ class T {
 
   static const mono = 'Consolas';
 
-  static const radius = Radius.circular(9);
-  static const panelRadius = Radius.circular(13);
-
   static TextStyle text(
     double size, {
     Color color = body,
@@ -98,9 +95,6 @@ class Motion {
 
   /// Popovers, panels, things appearing and disappearing.
   static const base = Duration(milliseconds: 150);
-
-  /// The odd larger surface that crosses most of the screen.
-  static const slow = Duration(milliseconds: 200);
 
   static const curve = Curves.easeOutCubic;
   static const curveIn = Curves.easeInCubic;
