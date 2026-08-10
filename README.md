@@ -7,6 +7,7 @@
   <a href="https://github.com/HorizonRepublic/fh6-paint-studio/releases"><img src="https://img.shields.io/github/downloads/HorizonRepublic/fh6-paint-studio/total" alt="Downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/HorizonRepublic/fh6-paint-studio" alt="License"></a>
   <a href="https://github.com/HorizonRepublic/fh6-paint-studio/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HorizonRepublic/fh6-paint-studio/ci.yml" alt="Build"></a>
+  <a href="https://www.nexusmods.com/forzahorizon6/mods/314"><img src="https://img.shields.io/badge/Nexus%20Mods-FH6%20Paint%20Studio-da8e35" alt="Nexus Mods"></a>
 </p>
 
 <p align="center"><img src="assets/screens/main-screen.png" width="760" alt="A finished reconstruction, ready to inject"></p>
@@ -32,7 +33,8 @@ Windows 10 or 11, with a GPU that supports Vulkan (recent NVIDIA, AMD or Intel).
 
 **[Download the latest release](https://github.com/HorizonRepublic/fh6-paint-studio/releases/latest)**,
 extract the `.7z` anywhere, and run **`FH6 Paint Studio.exe`**. Windows 11 opens
-`.7z` natively; Windows 10 needs [7-Zip](https://www.7-zip.org/).
+`.7z` natively; Windows 10 needs [7-Zip](https://www.7-zip.org/). It is also on
+[Nexus Mods](https://www.nexusmods.com/forzahorizon6/mods/314).
 
 ## Usage
 
