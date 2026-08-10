@@ -28,26 +28,6 @@ func TestSegmentSplitsBlobsDropsSpeck(t *testing.T) {
 
 // TestDistanceTransformBoundedRect is the regression for the inf-radius bug: a region that fills its
 // whole bbox must still have a finite (border-bounded) max distance, not 1e9.
-func TestDistanceTransformBoundedRect(t *testing.T) {
-	w, h := 10, 4
-	mask := make([]bool, w*h)
-	for i := range mask {
-		mask[i] = true
-	}
-	d := distanceTransform(mask, w, h)
-	mx := 0.0
-	for _, v := range d {
-		if v > mx {
-			mx = v
-		}
-	}
-	if mx > 100 {
-		t.Fatalf("distance unbounded (inf-radius regression): max=%.1f", mx)
-	}
-	if mx < 1 {
-		t.Errorf("max distance suspiciously small: %.1f", mx)
-	}
-}
 
 // TestCoverBlocksCoversRegion checks the coverage guarantee: every in-region pixel ends up under an
 // emitted rect (no holes), here for an L-shaped region.

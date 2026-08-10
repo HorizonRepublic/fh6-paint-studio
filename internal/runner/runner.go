@@ -210,13 +210,3 @@ func floatToNRGBA(buf []float32, w, h int) *image.NRGBA {
 	imageio.EncodeDisplayBytes(buf, img.Pix)
 	return img
 }
-
-func u8(f float32) uint8 {
-	if f <= 0 {
-		return 0
-	}
-	if f >= 1 {
-		return 255
-	}
-	return uint8(f*255 + 0.5)
-}

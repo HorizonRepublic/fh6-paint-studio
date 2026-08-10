@@ -255,11 +255,6 @@ func randomShapeOfKind(rng *rand.Rand, kind model.ShapeKind, cx, cy, maxR, w, h,
 	return c
 }
 
-// RandomEllipses is a Segment-1 compatibility wrapper for ellipse-only generation.
-func RandomEllipses(rng *rand.Rand, w, h, count int, s *ErrorSampler, progress float32) []model.Candidate {
-	return RandomShapes(rng, w, h, count, []model.ShapeKind{model.KindEllipse}, nil, s, progress, nil, nil, 0, false, 1, 0, nil, nil)
-}
-
 // MutateShape perturbs the geometry of a base candidate per kind (color is
 // recomputed by the backend on each evaluation). When allowAlpha is set, the
 // shape's alpha is also perturbed within [alphaMin,1] — the hill climb then tunes

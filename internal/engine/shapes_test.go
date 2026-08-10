@@ -82,14 +82,3 @@ func TestAllowAlphaProducesSemiTransparent(t *testing.T) {
 		}
 	}
 }
-
-func TestRandomEllipsesWrapperStillEllipse(t *testing.T) {
-	grid := make([]float32, 16)
-	s := NewErrorSampler(grid, 4, 4, 40, 40)
-	rng := rand.New(rand.NewSource(6))
-	for _, c := range RandomEllipses(rng, 40, 40, 20, s, 0) {
-		if c.Kind != model.KindEllipse {
-			t.Fatalf("RandomEllipses produced non-ellipse kind %d", c.Kind)
-		}
-	}
-}

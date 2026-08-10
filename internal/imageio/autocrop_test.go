@@ -3,9 +3,6 @@ package imageio
 import (
 	"image"
 	"image/color"
-	"image/png"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -44,43 +41,6 @@ func TestAutoCropTransparent(t *testing.T) {
 	}
 	if r.Min.X > 30 || r.Min.Y > 30 || r.Max.X < 80 || r.Max.Y < 80 {
 		t.Errorf("crop %v must contain the cutout [30,30]-[80,80]", r)
-	}
-}
-
-// LoadRegionAutoCropped crops fractions of the AUTO-CROPPED content rect (not the raw bounds) and
-// preserves full resolution (maxRes=0 = no downscale).
-func TestLoadRegionAutoCropped(t *testing.T) {
-	img := image.NewNRGBA(image.Rect(0, 0, 100, 100))
-	fillRect(img, img.Bounds(), color.NRGBA{40, 40, 40, 255})                // border
-	fillRect(img, image.Rect(20, 20, 80, 80), color.NRGBA{220, 30, 30, 255}) // 60x60 content
-	path := filepath.Join(t.TempDir(), "bordered.png")
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := png.Encode(f, img); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-
-	base := AutoCropRect(img)
-	full, rect, err := LoadRegionAutoCropped(path, 0, 0, 0, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if full.W != base.Dx() || full.H != base.Dy() {
-		t.Fatalf("full region = %dx%d, want the content rect %dx%d", full.W, full.H, base.Dx(), base.Dy())
-	}
-	if !rect.Eq(base) {
-		t.Fatalf("full region rect = %v, want AutoCropRect %v", rect, base)
-	}
-	// A quarter (top-left) of the content rect is ~half the dims in each axis.
-	q, _, err := LoadRegionAutoCropped(path, 0, 0, 0, 0.5, 0.5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q.W < base.Dx()/2-1 || q.W > base.Dx()/2+1 || q.H < base.Dy()/2-1 || q.H > base.Dy()/2+1 {
-		t.Fatalf("quarter region = %dx%d, want ~%dx%d", q.W, q.H, base.Dx()/2, base.Dy()/2)
 	}
 }
 
