@@ -75,7 +75,17 @@ try {
 
     # 5) Stage. Copy what the build produced, and nothing else.
     $stage = Join-Path $Out "fh6-paint-studio"
-    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+    if (Test-Path $stage) {
+        # Probe for a running copy BEFORE deleting anything. A Remove-Item that dies halfway on a
+        # locked engined.exe leaves a gutted folder whose exe starts nothing — silently.
+        $locked = Get-ChildItem $stage -Recurse -File | Where-Object {
+            try {
+                $h = [IO.File]::Open($_.FullName, 'Open', 'ReadWrite', 'None'); $h.Close(); $false
+            } catch { $true }
+        } | Select-Object -First 1
+        if ($locked) { throw "close the running app first: '$($locked.FullName)' is in use" }
+        Remove-Item -Recurse -Force $stage
+    }
     New-Item -ItemType Directory -Force $stage | Out-Null
 
     # Named, not wildcarded. `flutter build` does not clean its output directory, so the Release
@@ -83,44 +93,31 @@ try {
     # from a build two versions old. A `*.exe` copy picks that up, and the only thing that kept it
     # out of the release was the explicit copy two lines later happening to overwrite it. Name what
     # ships instead of naming what to sweep.
-    Copy-Item (Join-Path $built 'fh6_paint_studio.exe') $stage
-    Copy-Item (Join-Path $built 'flutter_windows.dll') $stage
-    Get-ChildItem (Join-Path $built '*_plugin.dll') | ForEach-Object { Copy-Item $_.FullName $stage }
-    Copy-Item (Join-Path $built 'data') $stage -Recurse
-    Copy-Item (Join-Path $root 'bin\engined.exe') $stage
-    Copy-Item $vkdll $stage
+    # The folder a user opens holds the exe, the README, and ONE directory. Everything else —
+    # Flutter's runtime, data\, the engine service, the licences — lives inside bin\: the runner
+    # delay-loads its DLLs and points the loader there before the first call needs one
+    # (client/windows/runner), the client looks for engined in bin\engine first, and engined finds
+    # fh6vk.dll beside itself because a process's own directory heads the DLL search order.
+    Copy-Item (Join-Path $built 'fh6_paint_studio.exe') (Join-Path $stage 'FH6 Paint Studio.exe')
+    $binDir = New-Item -ItemType Directory -Force (Join-Path $stage 'bin')
+    Copy-Item (Join-Path $built 'flutter_windows.dll') $binDir
+    Get-ChildItem (Join-Path $built '*_plugin.dll') | ForEach-Object { Copy-Item $_.FullName $binDir }
+    Copy-Item (Join-Path $built 'data') $binDir -Recurse
+    $engineDir = New-Item -ItemType Directory -Force (Join-Path $binDir 'engine')
+    Copy-Item (Join-Path $root 'bin\engined.exe') $engineDir
+    Copy-Item $vkdll $engineDir
 
     # Our own licence. Every binary's version resource claims MIT; the text has to travel with them
     # for that claim to mean anything, and mod hosts ask for an explicit permissions statement.
-    Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
+    $docsDir = New-Item -ItemType Directory -Force (Join-Path $binDir 'docs')
+    Copy-Item (Join-Path $root 'LICENSE') (Join-Path $docsDir 'LICENSE.txt')
 
-    # The client and both Flutter plugins import msvcp140 / vcruntime140 / vcruntime140_1. We ship
-    # none of them, so on a machine without the VC++ runtime the app dies at launch with a
-    # missing-DLL box -- which reads to the user as a broken download or an antivirus having eaten
-    # something, not as a missing prerequisite. Say it in the drop.
-    $readme = @"
-FH6 Paint Studio $Version
-
-Unpack the whole folder and run fh6_paint_studio.exe. Keep the files together:
-the app will not start without data\ and engined.exe beside it.
-
-REQUIREMENT
-  Microsoft Visual C++ Redistributable (2015-2022, x64).
-  Most machines already have it. If the app does not start and Windows names a
-  missing vcruntime140.dll or msvcp140.dll, install it from Microsoft:
-  https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-WHAT IT DOES
-  Turns a picture into a Forza Horizon vinyl and, on request, writes the result
-  into the running game so you can see it on the car. It needs no administrator
-  rights and asks for none. It makes no network connections.
-
-LICENCE
-  LICENSE.txt covers this software. THIRD-PARTY-NOTICES.txt carries the notices
-  of the libraries it is built on, which their licences require to travel with it.
-"@
-    [IO.File]::WriteAllText((Join-Path $stage 'README.txt'),
-        ($readme -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
+    # No README in the drop. The folder a user opens is the exe and bin\, nothing else; the
+    # instructions and the VC++ redist note live in the repo README and on the mod page, which is
+    # where someone whose app will not start actually goes. NB the client and both Flutter plugins
+    # import msvcp140 / vcruntime140 / vcruntime140_1 and we ship none of them -- the download page
+    # must keep saying so, or a machine without the runtime reads the missing-DLL box as a broken
+    # download.
 
     # Directories Flutter leaves behind with nothing in them (a package whose assets were all
     # dropped still gets its folder). An empty directory in the archive is a folder entry that
@@ -140,14 +137,14 @@ LICENCE
     # is both invisible to anyone who wants to read them and a compressed archive nested inside the
     # release -- something mod hosts reject on sight, because a nested archive cannot be scanned.
     # They are a CONDITION of using the libraries in here (MIT and BSD both require the notice to
-    # travel with every copy), so they are unpacked to plain text at the top level, not dropped.
-    $noticesZ = Join-Path $stage 'data\flutter_assets\NOTICES.Z'
+    # travel with every copy), so they are unpacked to plain text in docs\, not dropped.
+    $noticesZ = Join-Path $binDir 'data\flutter_assets\NOTICES.Z'
     if (Test-Path $noticesZ) {
         # 7-Zip does the gunzip. It is already a dependency of this script, and leaning on it beats
         # hand-driving .NET streams from Windows PowerShell, which will not bind GZipStream's
         # methods here at all.
         & $7z e -tgzip -so $noticesZ 2>$null |
-            Set-Content (Join-Path $stage 'THIRD-PARTY-NOTICES.txt') -Encoding utf8
+            Set-Content (Join-Path $docsDir 'THIRD-PARTY-NOTICES.txt') -Encoding utf8
         if ($LASTEXITCODE -ne 0) { throw "could not unpack $noticesZ" }
         Remove-Item -Force $noticesZ
     }
@@ -156,7 +153,7 @@ LICENCE
     # the same thing about travelling with the binary, and none of them appear in it -- so they are
     # appended here, read out of the module cache for whatever the engine actually links rather than
     # from a hand-kept list that would rot.
-    $notices = Join-Path $stage 'THIRD-PARTY-NOTICES.txt'
+    $notices = Join-Path $docsDir 'THIRD-PARTY-NOTICES.txt'
     $goMods = & go list -deps -tags vulkan -f '{{if .Module}}{{.Module.Path}}{{end}}' ./cmd/engined |
         Sort-Object -Unique | Where-Object { $_ -and $_ -ne 'fh6-paint-studio' }
     foreach ($m in $goMods) {

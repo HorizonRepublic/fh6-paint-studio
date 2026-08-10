@@ -2,6 +2,8 @@
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
 
+#include <string>
+
 #include "flutter_window.h"
 #include "utils.h"
 
@@ -17,7 +19,44 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-  flutter::DartProject project(L"data");
+  // The release keeps everything but this exe inside bin\. The Flutter runtime
+  // is delay-loaded (see CMakeLists.txt), so redirecting the loader here — one
+  // line before the first flutter:: call — is early enough. A dev build has no
+  // bin\ beside the exe, and both probes fall back to the stock layout.
+  wchar_t exe_path[MAX_PATH];
+  ::GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+  std::wstring exe_dir(exe_path);
+  exe_dir = exe_dir.substr(0, exe_dir.find_last_of(L"\\/"));
+  const std::wstring bin = exe_dir + L"\\bin";
+  if (::GetFileAttributesW(bin.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    ::SetDllDirectoryW(bin.c_str());
+  }
+  std::wstring assets = bin + L"\\data";
+  if (::GetFileAttributesW(assets.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    assets = exe_dir + L"\\data";
+  }
+
+  // A half-unpacked folder would otherwise die before any code that could say
+  // so — the delay-loaded runtime just never resolves and the process ends in
+  // silence. This is the one message the user gets instead.
+  const bool runtime_present =
+      ::GetFileAttributesW((bin + L"\\flutter_windows.dll").c_str()) !=
+          INVALID_FILE_ATTRIBUTES ||
+      ::GetFileAttributesW((exe_dir + L"\\flutter_windows.dll").c_str()) !=
+          INVALID_FILE_ATTRIBUTES;
+  if (!runtime_present ||
+      ::GetFileAttributesW(assets.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    // ASCII only: MSVC reads this file without a BOM as ANSI, and anything
+    // fancier arrives on screen as mojibake.
+    ::MessageBoxW(nullptr,
+                  L"Part of the app is missing next to FH6 Paint Studio.exe.\n"
+                  L"Extract the WHOLE archive into one folder (the exe needs "
+                  L"its bin\\ folder beside it), then run it again.",
+                  L"FH6 Paint Studio", MB_ICONERROR | MB_OK);
+    return EXIT_FAILURE;
+  }
+
+  flutter::DartProject project(assets);
 
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();

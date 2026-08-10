@@ -33,7 +33,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = '${{ inputs.tag }}'
-          $archive = "fh6-paint-studio-$($tag.TrimStart('v'))-windows-x64.7z"
+          # The build names the asset after the TAG, v included — v2.0.0 shipped as
+          # fh6-paint-studio-v2.0.0-windows-x64.7z. Only the Nexus version string drops the v.
+          $archive = "fh6-paint-studio-$tag-windows-x64.7z"
           gh release download $tag --repo ${{ github.repository }} --pattern $archive --pattern SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "no such release, or it has no $archive attached" }
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

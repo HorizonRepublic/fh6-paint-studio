@@ -29,9 +29,14 @@ String engineExecutable() {
   if (override != null && override.isNotEmpty) return override;
 
   final dir = File(Platform.resolvedExecutable).parent.path;
-  final beside = File('$dir${Platform.pathSeparator}engined.exe');
+  final sep = Platform.pathSeparator;
+  // The release tucks the service into bin\engine so the folder a user opens
+  // holds one .exe — the one they should run.
+  final tucked = File('$dir${sep}bin${sep}engine${sep}engined.exe');
+  if (tucked.existsSync()) return tucked.path;
+  final beside = File('$dir${sep}engined.exe');
   if (beside.existsSync()) return beside.path;
-  return 'bin${Platform.pathSeparator}engined.exe';
+  return 'bin${sep}engined.exe';
 }
 
 void main() async {

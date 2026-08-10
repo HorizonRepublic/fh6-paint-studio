@@ -95,44 +95,82 @@ PreviewFrame decodeFrame(Uint8List payload) {
 /// first time a multi-megabyte frame arrived. This buffers until a whole message
 /// is present.
 class MessageReader {
-  final _buffer = BytesBuilder(copy: false);
+  final _chunks = <Uint8List>[];
   int _pending = 0;
 
   /// Feeds a chunk and returns every complete message it completed.
+  ///
+  /// O(total bytes): each byte is copied at most once, into its message's own
+  /// buffer. The previous drain-and-put-back approach re-copied everything
+  /// buffered so far on EVERY arriving chunk — quadratic in message size, and
+  /// a full-resolution frame is hundreds of chunks, every copy on the UI
+  /// isolate while pointer events waited behind it.
   List<Message> add(List<int> chunk) {
-    _buffer.add(chunk);
+    if (chunk.isEmpty) return const [];
+    _chunks.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
     _pending += chunk.length;
 
     final out = <Message>[];
-    while (true) {
-      if (_pending < 5) break;
-      // takeBytes drains the builder, so peek by draining and putting back the
-      // remainder. Messages are large and infrequent enough that this costs far
-      // less than tracking offsets across a growable buffer would.
-      final bytes = _buffer.takeBytes();
-      _pending = bytes.length;
-
-      final length = ByteData.view(
-        bytes.buffer,
-        bytes.offsetInBytes,
-      ).getUint32(0);
+    while (_pending >= 5) {
+      final length = _peekLength();
       if (length < 1 || length > maxMessage) {
         throw FormatException('message length $length is out of range');
       }
       final total = 4 + length;
-      if (bytes.length < total) {
-        _buffer.add(bytes);
-        _pending = bytes.length;
-        break;
-      }
-      out.add(Message(bytes[4], Uint8List.sublistView(bytes, 5, total)));
-      if (bytes.length > total) {
-        _buffer.add(Uint8List.sublistView(bytes, total));
-        _pending = bytes.length - total;
-      } else {
-        _pending = 0;
-      }
+      if (_pending < total) break;
+      final msg = _take(total);
+      out.add(Message(msg[4], Uint8List.sublistView(msg, 5)));
     }
     return out;
+  }
+
+  /// The 4-byte length prefix, without consuming anything.
+  int _peekLength() {
+    final first = _chunks.first;
+    if (first.length >= 4) {
+      return ByteData.sublistView(first, 0, 4).getUint32(0);
+    }
+    final head = Uint8List(4);
+    var n = 0;
+    for (final c in _chunks) {
+      for (var i = 0; i < c.length && n < 4; i++) {
+        head[n++] = c[i];
+      }
+      if (n == 4) break;
+    }
+    return ByteData.sublistView(head).getUint32(0);
+  }
+
+  /// Removes exactly [n] bytes from the front, as one contiguous buffer.
+  Uint8List _take(int n) {
+    final first = _chunks.first;
+    // Inside the first chunk: views, no copying at all.
+    if (first.length == n) {
+      _chunks.removeAt(0);
+      _pending -= n;
+      return first;
+    }
+    if (first.length > n) {
+      _chunks[0] = Uint8List.sublistView(first, n);
+      _pending -= n;
+      return Uint8List.sublistView(first, 0, n);
+    }
+    final msg = Uint8List(n);
+    var filled = 0;
+    while (filled < n) {
+      final c = _chunks.first;
+      final need = n - filled;
+      if (c.length <= need) {
+        msg.setRange(filled, filled + c.length, c);
+        filled += c.length;
+        _chunks.removeAt(0);
+      } else {
+        msg.setRange(filled, filled + need, c);
+        _chunks[0] = Uint8List.sublistView(c, need);
+        filled = n;
+      }
+    }
+    _pending -= n;
+    return msg;
   }
 }

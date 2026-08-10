@@ -88,33 +88,20 @@ jobs:
           $code = $LASTEXITCODE
           Pop-Location
           if ($code -ne 0) { throw "7z failed ($code)" }
-          # A second asset under a VERSION-FREE name. GitHub's
-          # releases/latest/download/<asset> endpoint resolves the release but not the filename, so a
-          # versioned name alone gives no stable URL — every consumer that fetches automatically
-          # (code signing, mirrors, install scripts) would have to scrape the release JSON first.
-          $stable = "fh6-paint-studio-windows-x64.7z"
-          Copy-Item $archive $stable -Force
           "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "STABLE=$stable"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Checksums
         shell: pwsh
         run: |
-          # Both assets are listed: they are byte-identical, but a verifier checks the name it
-          # actually downloaded, and a missing line reads as a failed check rather than a note.
-          $lines = @($env:ARCHIVE, $env:STABLE) | ForEach-Object {
-            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $_"
-          }
+          $line = "$((Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower())  $env:ARCHIVE"
           # LF + no BOM so `sha256sum -c` accepts it on Unix (Out-File would write CRLF).
-          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), ($lines -join "`n") + "`n")
+          [IO.File]::WriteAllText((Join-Path $PWD 'SHA256SUMS.txt'), $line + "`n")
           Get-Content SHA256SUMS.txt
       # Skipped on fork PRs, where the GITHUB_TOKEN can't write id-token/attestations.
       - name: Attest build provenance
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: |
-            ${{ env.ARCHIVE }}
-            ${{ env.STABLE }}
+          subject-path: ${{ env.ARCHIVE }}
       - name: Upload artifact (PR dry-run)
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
@@ -122,14 +109,13 @@ jobs:
           name: fh6-paint-studio-windows-x64
           path: |
             ${{ env.ARCHIVE }}
-            ${{ env.STABLE }}
             SHA256SUMS.txt
       - name: Attach to the release
         if: github.event_name != 'pull_request'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ inputs.tag }}" "$env:ARCHIVE" "$env:STABLE" SHA256SUMS.txt --clobber
+        run: gh release upload "${{ inputs.tag }}" "$env:ARCHIVE" SHA256SUMS.txt --clobber
       # Nexus is NOT published from here. It scans every upload and quarantines what trips it, so a
       # release has to be looked at before it goes up, not after -- and a build step cannot look at
       # anything. Publishing is the separate, manual .github/workflows/nexus-publish.yml, which
