@@ -151,7 +151,14 @@ class Studio extends ChangeNotifier {
   EngineClient? get engine => _engine;
 
   bool get isRunning => phase == Phase.running || phase == Phase.loading;
-  double get progress => total == 0 ? 0 : (shapes / total).clamp(0.0, 1.0);
+  /// Fraction of the WHOLE run. The shape counter only describes placement, so
+  /// a bar driven by it reached 100% and then sat there for the polish and the
+  /// post-passes — close to half the run. The engine reports its own overall
+  /// progress across every phase; the shape ratio stays as the fallback for an
+  /// older engine and for the moment before the first phase event lands.
+  double get progress => overall > 0
+      ? overall.clamp(0.0, 1.0)
+      : (total == 0 ? 0 : (shapes / total).clamp(0.0, 1.0));
 
   /// Connects to the engine service and loads what a first screen needs.
   Future<void> connect(String executable) async {
