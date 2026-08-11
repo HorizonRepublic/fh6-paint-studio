@@ -1,5 +1,3 @@
-//go:build vulkan && !cuda && !allgpu
-
 package main
 
 import (

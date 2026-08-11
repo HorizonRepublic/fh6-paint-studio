@@ -281,12 +281,10 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	if opt.PolishOpts.AlphaMin == 0 && opt.AllowAlpha && !opt.TransparentBG {
 		opt.PolishOpts.AlphaMin = polishAlphaFloor(opt.AlphaMin)
 	}
-	// Use the GPU polish primitives when the backend provides them (CUDA), else the pure-Go
-	// reference. Both run the same algorithm; the GPU path just moves forward/loss/backward
-	// onto the device. A non-zero false-edge λ needs the device-side term (fp_set_polish_false_edge);
-	// when the backend lacks it the CPU driver carries the experiment.
+	// Polish runs on the device (the only backend). A non-zero false-edge λ needs the device-side
+	// term (fp_set_polish_false_edge); when the backend lacks it the term is dropped, not the polish.
 	// Region-weighted terms: build the 1−hard map once per run (Options.TermRegionWeight); the
-	// setters below ship it to the device, the CPU driver reads it natively.
+	// setters below ship it to the device.
 	if opt.TermRegionWeight && opt.PolishOpts.TermWeight == nil &&
 		(opt.PolishOpts.FalseEdgeLambda > 0 || opt.PolishOpts.EagleLambda > 0) {
 		hard := metric.HardEdgeMap(be.Target(), w, h)
@@ -326,12 +324,11 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		}
 	}
 	var pr PolishResult
-	// The collision diagnostic instruments the host backward pass only, so asking for it forces the
-	// CPU driver — otherwise it would silently report nothing on the backend we actually ship.
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK && !absGradOn() {
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
-		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)
+		applog.Printf("polish: device lacks polish support — skipping polish (shapes returned unpolished)")
+		pr = PolishResult{Shapes: shapes}
 	}
 	recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
 	_ = be.Reset(initCanvas)

@@ -1,5 +1,3 @@
-//go:build vulkan || allgpu
-
 // Package vulkan is the cross-vendor GPU backend: a second implementation of
 // backend.Backend (alongside internal/backend/cuda) that mirrors the CPU reference
 // (internal/backend/cpu). It drives fh6vk.dll (built from internal/backend/vulkan/shim

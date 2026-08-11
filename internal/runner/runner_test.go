@@ -1,5 +1,3 @@
-//go:build cuda
-
 package runner_test
 
 import (

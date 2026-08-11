@@ -3,10 +3,6 @@
 #   powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 [-Out <dir>] [-Version <x.y.z>] [-SkipDLL]
 #
 # Vulkan is the one supported backend (owner decision 2026-08-03), so the release no longer carries
-# CUDA: Vulkan runs on NVIDIA, AMD and Intel alike, its polish is ~2.4x faster, it costs a third of
-# the CPU time, and dropping the second shim removes the CUDA toolkit from CI entirely. CUDA stays
-# in the tree as an unmaintained fallback for local A/Bs (scripts\build-cuda.ps1 -Release), but it
-# is NOT shipped -- CUDA 13 also dropped Maxwell/Pascal/Volta, so those cards need Vulkan anyway.
 #
 # Windows-optimised flags: stripped symbols (-s -w) + -trimpath, the GUI linked -H windowsgui (NO
 # console window), CGO_ENABLED=0 (the DLL is loaded via syscall, no cgo), GOAMD64=v1 (max CPU compat).
@@ -39,8 +35,7 @@ try {
     # as the dev scratch dir, so it accumulates profiling/PGO/A-B exes and shim link byproducts that
     # a fixed list keeps missing — and anything left here looks like part of the release.
     New-Item -ItemType Directory -Force -Path $Out | Out-Null
-    Remove-Item (Join-Path $Out 'fh6paint*.exe'), (Join-Path $Out 'fh6cuda.*'),
-                (Join-Path $Out 'fh6vk.exp'), (Join-Path $Out 'fh6vk.lib') -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $Out 'fh6paint*.exe'),                 (Join-Path $Out 'fh6vk.exp'), (Join-Path $Out 'fh6vk.lib') -ErrorAction SilentlyContinue
 
     # 3) Stamp the studio's version resource from -Version; verNum also feeds the binary version (-X).
     $verNum = (($Version -replace '^v', '') -split '-')[0]
