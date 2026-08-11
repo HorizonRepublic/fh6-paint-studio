@@ -68,7 +68,7 @@ var hardEdgeTau, hardDensSat, hardCohFloor = func() (float64, float64, float64) 
 }()
 
 // HardEdgeMap returns, per pixel, how much the local target neighbourhood is HARD-EDGED STRUCTURE
-// (line-work, spikes/wedges, geometric borders) in [0,1] вЂ” the regions where hard-cornered shape
+// (line-work, spikes/wedges, geometric borders) in [0,1] — the regions where hard-cornered shape
 // kinds (rectangle/triangle) earn their keep. Smooth shading scores ~0: a rect/tri placed there
 // draws straight rim edges the target does not have (the "standout" artifact).
 //
@@ -81,7 +81,7 @@ func HardEdgeMap(target []float32, w, h int) []float32 {
 	const cell = 12
 	edgeTau, densSat, cohFloor := hardEdgeTau, hardDensSat, hardCohFloor
 	// Perceptual per-channel planes: sRGB-encode each channel so shadow edges keep their visual
-	// contrast (linear light crushes darks вЂ” dark-on-dark line-work vanished from a linear-luma
+	// contrast (linear light crushes darks — dark-on-dark line-work vanished from a linear-luma
 	// map), and keep the channels separate so chroma-only edges (same luma) still register.
 	chans := [3][]float32{make([]float32, w*h), make([]float32, w*h), make([]float32, w*h)}
 	heRows(h, func(y0, y1 int) {

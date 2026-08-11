@@ -12,7 +12,7 @@ import (
 // The repair itself already exists and works — softswap replaces a hard-edged shape with a soft one
 // on the same footprint, so the fill stays and the rim goes. What it lacked was aim. It ranked
 // candidates by the false-edge mass INSIDE a shape and only ever looked at rectangles and triangles,
-// while the defect the owner names ("кола, які випирають") is a property of a shape's BOUNDARY and,
+// while the defect the owner names ("circles that stick out") is a property of a shape's BOUNDARY and,
 // measured, lives mostly on ellipses: of the fifty worst offenders on a test frame, thirty-seven were
 // ellipses, which the old ordering could not even see.
 //

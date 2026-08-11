@@ -20,7 +20,7 @@ func triBaseVerts() [3][2]float64 {
 // FH6's forward transform is v = pos + R(rot)·Shear(k)·diag(sx,sy)·b for each base vertex b, with
 //
 //	R(rot)   = [[cos,-sin],[sin,cos]]   rotation in DEGREES (editor space, Y up)
-//	Shear(k) = [[1, k],[0,1]]           k is FH6's raw "Наклон" value — a shear FACTOR, NOT an angle
+//	Shear(k) = [[1, k],[0,1]]           k is FH6's raw skew-slider value — a shear FACTOR, NOT an angle
 //
 // (Calibrated live: the editor's skew field is the shear coefficient itself — k=20 is a huge shear
 // that looks like a line, k≈0.65 a gentle lean — so skew must be written as U01/sy, not atan.)
@@ -64,7 +64,7 @@ func TriangleFit(t0, t1, t2 [2]float64) (posX, posY, sx, sy, rotDeg, skew float6
 }
 
 // triApply is the forward FH6 transform — used by tests to verify TriangleFit round-trips. rotDeg is
-// degrees; skew is the raw shear factor (FH6's "Наклон").
+// degrees; skew is the raw shear factor (FH6's skew slider).
 func triApply(posX, posY, sx, sy, rotDeg, skew float64) [3][2]float64 {
 	rot := rotDeg * math.Pi / 180
 	c, s := math.Cos(rot), math.Sin(rot)

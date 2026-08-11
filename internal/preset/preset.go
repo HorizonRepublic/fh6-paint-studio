@@ -872,7 +872,7 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// magnitude-only FE relu can't see), anime only. GPU λ-grid {0.005/0.015/0.03} ×
 		// img_5/img_24 × seeds 1/2: smooth cel wins both seeds at 0.015 (−1.0/−3.0% SSE with
 		// SSIM/banding better; −8% at 0.005 on seed 2), spiky img_24 pays +1.3..1.8% SSE at
-		// perceptual parity — the same content split FE/SSIM показали. λ=1e-3 from the paper is an
+		// perceptual parity — the same content split FE/SSIM showed. λ=1e-3 from the paper is an
 		// order too small here (term 0.1% of SSE); 0.015 ≈ 1% of SSE is the balance; ≥0.05
 		// over-presses everything. Wall cost on GPU ≈ 0. Devices without the term (old DLL,
 		// Vulkan pending its port) disable it instead of falling back to the CPU polish driver.
@@ -1020,7 +1020,7 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		d.AspectMax = 8
 		d.PolishTau1 = 0.06
 		// Auto-shape-count knee (flat/line-art only): large uniform regions (white bg) saturate fast,
-		// after which the greedy wastes budget on imperceptible ghost facets ("квашня"). The floor lets
+		// after which the greedy wastes budget on imperceptible ghost facets (a mushy, curdled look). The floor lets
 		// the knee trip on near-SOLVED flats (where the ÷currentErr rate blows up and never stops).
 		// SELF-ADAPTIVE per image — validated on the bank: img_2 (sparse face on white) 3000→982 shapes
 		// (−67%, SSIM ≥ base, LOWER banding); img_17 (dense brush-art) 3000→2354 (−22%, EYE-EQUAL at 3×
