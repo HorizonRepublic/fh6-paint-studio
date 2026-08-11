@@ -188,6 +188,8 @@ const _keys = <String>[
   'deleteManyBody',
   'bank',
   'overCap',
+  'reference',
+  'createScratch',
 ];
 
 /// Builds a catalogue from a list parallel to [_keys]. Positional rather than
@@ -360,6 +362,8 @@ final _en = _cat([
   'They go for good, with their shapes.',
   'Bank',
   'over the game\'s 3000 limit',
+  'Reference',
+  'Create from scratch',
 ]);
 
 final _uk = _cat([
@@ -520,6 +524,8 @@ final _uk = _cat([
   'Вони зникнуть назавжди, разом із фігурами.',
   'Банк',
   'понад ліміт гри 3000',
+  'Оригінал',
+  'Створити з нуля',
 ]);
 
 final _de = _cat([
@@ -680,6 +686,8 @@ final _de = _cat([
   'Sie sind endgültig weg, samt ihren Formen.',
   'Bank',
   'über dem Spiellimit von 3000',
+  'Referenz',
+  'Von Grund auf neu',
 ]);
 
 final _es = _cat([
@@ -840,6 +848,8 @@ final _es = _cat([
   'Se van para siempre, con sus formas.',
   'Banco',
   'supera el límite de 3000 del juego',
+  'Referencia',
+  'Crear desde cero',
 ]);
 
 final _ptBR = _cat([
@@ -1000,6 +1010,8 @@ final _ptBR = _cat([
   'Elas somem de vez, com as formas.',
   'Banco',
   'acima do limite de 3000 do jogo',
+  'Referência',
+  'Criar do zero',
 ]);
 
 final _fr = _cat([
@@ -1160,6 +1172,8 @@ final _fr = _cat([
   'Ils partent définitivement, avec leurs formes.',
   'Banque',
   'au-delà de la limite de 3000 du jeu',
+  'Référence',
+  'Créer à partir de zéro',
 ]);
 
 final _pl = _cat([
@@ -1320,6 +1334,8 @@ final _pl = _cat([
   'Znikną na zawsze, razem z kształtami.',
   'Bank',
   'ponad limit gry 3000',
+  'Oryginał',
+  'Utwórz od zera',
 ]);
 
 final _it = _cat([
@@ -1480,6 +1496,8 @@ final _it = _cat([
   'Spariscono per sempre, con le loro forme.',
   'Banca',
   'oltre il limite di 3000 del gioco',
+  'Riferimento',
+  'Crea da zero',
 ]);
 
 final _tr = _cat([
@@ -1640,6 +1658,8 @@ final _tr = _cat([
   'Sekilleriyle birlikte tamamen gider.',
   'Banka',
   'oyunun 3000 sinirinin uzerinde',
+  'Referans',
+  'Sifirdan olustur',
 ]);
 
 final _zhCN = _cat([
@@ -1800,6 +1820,8 @@ final _zhCN = _cat([
   '它们会连同形状一起永久消失。',
   '素材库',
   '超出游戏 3000 上限',
+  '原图',
+  '从零创建',
 ]);
 
 final _ja = _cat([
@@ -1960,6 +1982,8 @@ final _ja = _cat([
   '図形ごと完全に消えます。',
   'バンク',
   'ゲームの上限3000を超えています',
+  '元画像',
+  '一から作成',
 ]);
 
 final _ko = _cat([
@@ -2120,6 +2144,8 @@ final _ko = _cat([
   '도형과 함께 완전히 사라집니다.',
   '뱅크',
   '게임 한도 3000 초과',
+  '원본',
+  '처음부터 만들기',
 ]);
 
 /// The same order the previous studio offered, so a returning user finds their

@@ -2,6 +2,8 @@ package engine
 
 import (
 	"math"
+	"runtime"
+	"sync"
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -93,30 +95,70 @@ func gcBuild(layers []model.Shape, w, h int) []gcLayer {
 	return out
 }
 
+// gcParallelMin is the layer footprint (in pixels) above which that single layer's composite splits
+// its rows across cores. A layer's own pixels are independent — out[p] reads and writes only p — so
+// the split is bit-identical to the serial blend; the threshold keeps the many small layers, where a
+// goroutine batch would cost more than the blend itself, on the serial path.
+const gcParallelMin = 1 << 16
+
+// gcCompositeLayer blends one layer's colour over out across rows [y0,y1]. Rows are disjoint in out,
+// so several bands of the SAME layer may run concurrently without a race.
+func gcCompositeLayer(l *gcLayer, cr, cg, cb float32, out []float32, w, y0, y1 int) {
+	bw := l.x1 - l.x0 + 1
+	for y := y0; y <= y1; y++ {
+		row := (y - l.y0) * bw
+		for x := l.x0; x <= l.x1; x++ {
+			a := l.at(x, y, row)
+			if a <= 0 {
+				continue
+			}
+			p := (y*w + x) * 4
+			ia := 1 - a
+			out[p+0] = out[p+0]*ia + a*cr
+			out[p+1] = out[p+1]*ia + a*cg
+			out[p+2] = out[p+2]*ia + a*cb
+		}
+	}
+}
+
 // gcComposite renders the stack for the given colours (c is 3 per layer, RGB interleaved) into out,
-// which must already hold the base canvas. Bottom-up, exactly the shipped `over`.
+// which must already hold the base canvas. Bottom-up, exactly the shipped `over`. Layers stay strictly
+// ordered (each blends over the previous); only a LARGE layer's own rows fan out, which does not
+// reorder the blend.
 func gcComposite(gl []gcLayer, c []float64, out []float32, w int) {
 	for i := range gl {
 		l := &gl[i]
 		if !l.live {
 			continue
 		}
-		bw := l.x1 - l.x0 + 1
 		cr, cg, cb := float32(c[i*3+0]), float32(c[i*3+1]), float32(c[i*3+2])
-		for y := l.y0; y <= l.y1; y++ {
-			row := (y - l.y0) * bw
-			for x := l.x0; x <= l.x1; x++ {
-				a := l.at(x, y, row)
-				if a <= 0 {
-					continue
-				}
-				p := (y*w + x) * 4
-				ia := 1 - a
-				out[p+0] = out[p+0]*ia + a*cr
-				out[p+1] = out[p+1]*ia + a*cg
-				out[p+2] = out[p+2]*ia + a*cb
-			}
+		lh := l.y1 - l.y0 + 1
+		if (l.x1-l.x0+1)*lh < gcParallelMin {
+			gcCompositeLayer(l, cr, cg, cb, out, w, l.y0, l.y1)
+			continue
 		}
+		nb := runtime.GOMAXPROCS(0)
+		if nb > lh {
+			nb = lh
+		}
+		rows := (lh + nb - 1) / nb
+		var wg sync.WaitGroup
+		for b := 0; b < nb; b++ {
+			by0 := l.y0 + b*rows
+			if by0 > l.y1 {
+				break
+			}
+			by1 := by0 + rows - 1
+			if by1 > l.y1 {
+				by1 = l.y1
+			}
+			wg.Add(1)
+			go func(y0, y1 int) {
+				defer wg.Done()
+				gcCompositeLayer(l, cr, cg, cb, out, w, y0, y1)
+			}(by0, by1)
+		}
+		wg.Wait()
 	}
 }
 

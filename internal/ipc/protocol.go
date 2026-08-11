@@ -178,12 +178,26 @@ func WriteFrame(w io.Writer, h FrameHeader, pix []byte) error {
 	if len(pix) != int(h.W)*int(h.H)*4 {
 		return fmt.Errorf("ipc: frame %dx%d needs %d bytes, got %d", h.W, h.H, int(h.W)*int(h.H)*4, len(pix))
 	}
-	buf := make([]byte, frameHeaderSize+len(pix))
-	binary.BigEndian.PutUint32(buf[0:], uint32(h.ID))
-	binary.BigEndian.PutUint32(buf[4:], uint32(h.W))
-	binary.BigEndian.PutUint32(buf[8:], uint32(h.H))
-	copy(buf[frameHeaderSize:], pix)
-	return writeFrame(w, KindFrame, buf)
+	// Payload = the kind byte + the 12-byte frame header + the pixels. The header
+	// goes out in one small write and the pixels follow straight after, so a
+	// multi-megabyte frame is never copied into a second buffer just to prepend
+	// twelve bytes. The bytes on the wire are byte-for-byte what buffering them
+	// produced.
+	payloadLen := 1 + frameHeaderSize + len(pix)
+	if payloadLen > MaxMessage {
+		return fmt.Errorf("ipc: message of %d bytes exceeds the %d limit", payloadLen, MaxMessage)
+	}
+	var head [5 + frameHeaderSize]byte
+	binary.BigEndian.PutUint32(head[0:], uint32(payloadLen))
+	head[4] = KindFrame
+	binary.BigEndian.PutUint32(head[5:], uint32(h.ID))
+	binary.BigEndian.PutUint32(head[9:], uint32(h.W))
+	binary.BigEndian.PutUint32(head[13:], uint32(h.H))
+	if _, err := w.Write(head[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(pix)
+	return err
 }
 
 func writeFrame(w io.Writer, kind byte, payload []byte) error {

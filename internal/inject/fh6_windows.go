@@ -3,6 +3,7 @@
 package inject
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -67,6 +68,9 @@ func (f *FH6) run(shapes []model.Shape, cm CanvasMap) error {
 			if err := p.write(ptr+uintptr(fw.Offset), fw.Data); err != nil {
 				return fmt.Errorf("write layer %d field +0x%x: %w", written+1, fw.Offset, err)
 			}
+		}
+		if f.WritePaths {
+			f.writeLayerPath(p, ptr, lw.Word) // best-effort; a stale path just falls back to reload
 		}
 		written++
 		if written == 1 || written%100 == 0 {
@@ -153,6 +157,183 @@ func (f *FH6) dump(indices []int) ([]LayerInfo, error) {
 		out = append(out, decodeLayer(idx, ptr, raw, f.Profile))
 	}
 	return out, nil
+}
+
+// RawLayer is one slot's raw struct bytes, for offset-level diagnostics (read-only).
+type RawLayer struct {
+	Index int
+	Ptr   uintptr
+	Bytes []byte
+}
+
+// DumpRaw reads `size` bytes of each requested layer slot's struct from the live group (read-only).
+// Used by the mesh-path diagnostics to inspect fields beyond the decoded set (e.g. the resource-path
+// pointer at +0x80 and the geometry resource at +0xA8).
+func (f *FH6) DumpRaw(indices []int, size int) ([]RawLayer, error) {
+	pid, name, err := findProcess(f.Profile.ProcessNames)
+	if err != nil {
+		return nil, err
+	}
+	f.logf("found %s (pid %d)", name, pid)
+	p, err := openProc(pid, false) // read-only
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+	table, err := locateTable(p, f.Profile, f.Layers, func(s string) { f.logf("%s", s) })
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RawLayer, 0, len(indices))
+	for _, idx := range indices {
+		if idx < 0 || idx >= f.Layers {
+			continue
+		}
+		ptr, ok := p.readU64(table + uintptr(idx)*8)
+		if !ok || !isUserPointer(ptr) {
+			continue
+		}
+		raw, err := p.read(ptr, size)
+		if err != nil || len(raw) < size {
+			continue
+		}
+		out = append(out, RawLayer{Index: idx, Ptr: ptr, Bytes: raw})
+	}
+	return out, nil
+}
+
+// ReadAt reads n bytes at an arbitrary address in the live game (read-only diagnostic) — used to
+// follow a layer's pointers (the resource-path string at +0x80, the resource at +0xA8) to their
+// targets. It opens its own read-only handle, so it is fine to call standalone.
+func (f *FH6) ReadAt(addr uintptr, n int) ([]byte, error) {
+	pid, _, err := findProcess(f.Profile.ProcessNames)
+	if err != nil {
+		return nil, err
+	}
+	p, err := openProc(pid, false) // read-only
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+	return p.read(addr, n)
+}
+
+// SearchHit is one occurrence of a needle in the live game's memory (read-only).
+type SearchHit struct {
+	Addr    uintptr
+	Context []byte // bytes surrounding the hit (ctxBefore before, then the needle + tail)
+}
+
+// SearchAll scans ALL committed readable memory (image + mapped + private heap) for needle and returns
+// up to max hits, each with `ctxBefore` bytes before and `ctxAfter` bytes after for structure spotting.
+// Read-only diagnostic — used to locate the shape catalog by an anchor path string.
+func (f *FH6) SearchAll(needle []byte, max, ctxBefore, ctxAfter int) ([]SearchHit, error) {
+	pid, _, err := findProcess(f.Profile.ProcessNames)
+	if err != nil {
+		return nil, err
+	}
+	p, err := openProc(pid, false)
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+	var hits []SearchHit
+	const chunk = 32 * 1024 * 1024
+	addr := uintptr(userPtrMin)
+	for addr < userPtrMax && len(hits) < max {
+		mbi, ok := p.query(addr)
+		if !ok {
+			addr += 0x10000
+			continue
+		}
+		base, size := mbi.BaseAddress, mbi.RegionSize
+		if size == 0 {
+			break
+		}
+		if mbi.State == memCommit && isReadable(mbi.Protect) {
+			for off := uintptr(0); off < size && len(hits) < max; off += chunk {
+				n := size - off
+				if n > chunk {
+					n = chunk
+				}
+				mem, err := p.read(base+off, int(n))
+				if err != nil || len(mem) < len(needle) {
+					continue
+				}
+				start := 0
+				for len(hits) < max {
+					i := bytes.Index(mem[start:], needle)
+					if i < 0 {
+						break
+					}
+					pos := start + i
+					start = pos + 1
+					lo := pos - ctxBefore
+					if lo < 0 {
+						lo = 0
+					}
+					hi := pos + len(needle) + ctxAfter
+					if hi > len(mem) {
+						hi = len(mem)
+					}
+					ctx := make([]byte, hi-lo)
+					copy(ctx, mem[lo:hi])
+					hits = append(hits, SearchHit{Addr: base + off + uintptr(pos), Context: ctx})
+				}
+			}
+		}
+		next := base + size
+		if next <= addr {
+			break
+		}
+		addr = next
+	}
+	return hits, nil
+}
+
+// writeLayerPath rewrites the layer's std::string mesh path (the string object at layer+0x80 is
+// {data ptr, size, capacity}) in place to the mesh file for `word`, so FH6 rebuilds the geometry live
+// on the next repaint instead of showing the template's mesh until a save+reload. It never grows past
+// the existing capacity and never touches the resource pointer at 0xA8 — the game re-derives that from
+// the path itself, with correct ownership. Best-effort: on any problem the path is left as-is.
+func (f *FH6) writeLayerPath(p *proc, layerPtr uintptr, word uint16) {
+	path, ok := wordToMeshPath(word)
+	if !ok {
+		return // unknown word (e.g. a bank glyph not in the map) — falls back to reload
+	}
+	const dataOff, sizeOff, capOff = 0x80, 0x90, 0x98
+	dataPtr, ok := p.readU64(layerPtr + dataOff)
+	if !ok || !isUserPointer(dataPtr) {
+		return
+	}
+	capacity, ok := p.readU64(layerPtr + capOff)
+	if !ok || uintptr(len(path))+1 > capacity {
+		return // would overflow the layer's own buffer — skip
+	}
+	if err := p.write(dataPtr, append([]byte(path), 0)); err != nil {
+		return
+	}
+	var sz [8]byte
+	binary.LittleEndian.PutUint64(sz[:], uint64(len(path)))
+	_ = p.write(layerPtr+sizeOff, sz[:])
+}
+
+// WriteAt writes data at an arbitrary address in the live game — a WRITE, gated to the calibrated FH6
+// process (never FH5, whose layout differs). Used only by controlled single-field diagnostics.
+func (f *FH6) WriteAt(addr uintptr, data []byte) error {
+	pid, name, err := findProcess(f.Profile.ProcessNames)
+	if err != nil {
+		return err
+	}
+	if !writeSafeProcess(name) {
+		return fmt.Errorf("refusing to write into %q — FH6 only", name)
+	}
+	p, err := openProc(pid, true)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+	return p.write(addr, data)
 }
 
 // dumpGroups lists the live CLiveryGroup instances via RTTI (read-only, no preset count needed).

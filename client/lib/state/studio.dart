@@ -507,8 +507,16 @@ class Studio extends ChangeNotifier {
   /// out of order — the guard drops the stale one rather than letting the
   /// preview flicker backwards.
   bool _decoding = false;
+  PreviewFrame? _pendingFrame;
   void _decode(PreviewFrame f) {
-    if (_decoding) return;
+    // A frame arriving mid-decode is stashed, not dropped: the LAST frame of a
+    // run is the finished geometry, and dropping it left the canvas one frame
+    // behind until an unrelated repaint. Only the newest pending frame is kept —
+    // older ones are already stale.
+    if (_decoding) {
+      _pendingFrame = f;
+      return;
+    }
     _decoding = true;
     ui.decodeImageFromPixels(
       f.pixels,
@@ -520,6 +528,11 @@ class Studio extends ChangeNotifier {
         preview = img;
         _decoding = false;
         notifyListeners();
+        final next = _pendingFrame;
+        if (next != null) {
+          _pendingFrame = null;
+          _decode(next);
+        }
       },
     );
   }
@@ -571,12 +584,25 @@ class Studio extends ChangeNotifier {
   /// Takes an edited document as the current result, so exporting or injecting
   /// after an edit uses what the user actually made. Saving it to the library is
   /// a separate act — a saved run is a thing you chose to keep.
-  void adoptEdited(Map<String, dynamic> edited, ui.Image? rendered) {
+  void adoptEdited(
+    Map<String, dynamic> edited,
+    ui.Image? rendered, {
+    int? width,
+    int? height,
+    String? name,
+  }) {
     geometry = edited;
     shapes = ((edited['shapes'] as List?)?.length ?? 1) - 1;
     if (rendered != null) {
       preview?.dispose();
       preview = rendered.clone();
+    }
+    // A design built from scratch has no run behind it: without its own
+    // dimensions the result is 0×0, which an inject and an export both need.
+    if (width != null && width > 0) resultW = width;
+    if (height != null && height > 0) resultH = height;
+    if (sourceName == null && name != null && name.isNotEmpty) {
+      sourceName = name;
     }
     selectedRunId = null;
     phase = Phase.done;
@@ -585,19 +611,36 @@ class Studio extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Stores the current result in the library under a name.
+  /// Saves the current result to the library so it appears in Runs. This is
+  /// what the editor's "save to runs" calls: a design edited by hand or built
+  /// from scratch has no entry of its own until this writes one — a fit is
+  /// persisted by the engine when it finishes, an edit is not.
+  ///
+  /// Non-destructive: every save is a NEW entry. Editing a run and saving keeps
+  /// the original beside it, and two from-scratch designs never overwrite each
+  /// other on a shared name.
   Future<void> saveToLibrary(String name) async {
     final e = _engine;
     final g = geometry;
     final img = preview;
     if (e == null || g == null || img == null) return;
+    // The library names a run by its source basename with no extension — "car",
+    // not "car.png" — so a from-scratch design named after its reference reads
+    // the same as a fitted one.
+    final display = name
+        .replaceFirst(
+          RegExp(r'\.(png|jpe?g|webp|bmp|tiff?|gif)$', caseSensitive: false),
+          '',
+        )
+        .trim();
+    final safe = display.isEmpty ? 'Untitled' : display;
     try {
       final bytes = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
       if (bytes == null) return;
-      await e.librarySave(
+      final res = await e.librarySave(
         shapes: (g['shapes'] as List?) ?? const [],
         entry: {
-          'name': name,
+          'name': safe,
           'preset': mode,
           'width': resultW,
           'height': resultH,
@@ -608,12 +651,14 @@ class Studio extends ChangeNotifier {
         pixels: bytes.buffer.asUint8List(),
         pixelW: img.width,
         pixelH: img.height,
-        replace: true,
       );
-      _note('done', 'saved "$name" to the library');
+      // Point the rail at the run just written, the way opening one does.
+      final id = (res?['entry'] as Map?)?['id'] as String?;
+      if (id != null) selectedRunId = id;
+      _note('done', 'saved "$safe" to runs');
       await refreshLibrary();
     } catch (err) {
-      _note('error', 'save failed: \$err');
+      _note('error', 'save failed: $err');
     }
     notifyListeners();
   }
@@ -676,6 +721,18 @@ class Studio extends ChangeNotifier {
   /// group the user has open, and the write walks that table directly. After it
   /// lands the vinyl must be saved and reloaded in-game before it looks right —
   /// FH6 only re-derives the mesh from the word on reload.
+  /// The shapes worth writing into the game: fully-transparent ones — a
+  /// from-scratch vinyl's invisible background backing (alpha 0) — are dropped,
+  /// so the game receives only what is actually drawn and the layer budget is
+  /// spent on real shapes. A generation's opaque base fill stays.
+  List<dynamic> get injectShapes {
+    final all = (geometry?['shapes'] as List?) ?? const [];
+    return all.where((s) {
+      final c = s is Map ? s['color'] as List? : null;
+      return c == null || c.length < 4 || (c[3] as num) > 0;
+    }).toList();
+  }
+
   Future<void> inject() async {
     final e = _engine;
     final g = geometry;

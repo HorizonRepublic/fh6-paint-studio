@@ -104,11 +104,13 @@ func ShapeToLayer(s model.Shape, cm CanvasMap) (LayerWrite, bool) {
 	case model.TypeRectangle: // background / corner rect: [x, y, w, h] -> centre + half-extent
 		lw.place(cm, p[0]+p[2]/2, p[1]+p[3]/2, p[2]/2, p[3]/2, 0)
 		lw.Word = WordSquare
-	case model.TypeRotatedRectangle: // [cx, cy, halfW, halfH, deg]
+	case model.TypeRotatedRectangle: // [cx, cy, halfW, halfH, deg, skew]
 		lw.place(cm, p[0], p[1], p[2], p[3], p[4])
+		lw.Skew = -p[5] // Y-flip reverses shear sense just as it reverses rotation; 0 for generated shapes
 		lw.Word = WordSquare
-	case model.TypeRotatedEllipse: // [cx, cy, rx, ry, deg] — Circle word + non-uniform scale = ellipse
+	case model.TypeRotatedEllipse: // [cx, cy, rx, ry, deg, skew] — Circle word + non-uniform scale = ellipse
 		lw.place(cm, p[0], p[1], p[2], p[3], p[4])
+		lw.Skew = -p[5]
 		lw.Word = WordCircle
 	case model.TypeTriangle: // [x1,y1,x2,y2,x3,y3] -> exact FH6 triangle via affine fit (pos/scale/rot/skew)
 		px, py, sx, sy, rot, skew := TriangleFit(
@@ -183,7 +185,7 @@ func (lw *LayerWrite) placeMask(cm CanvasMap, cx, cy, hx, hy, deg, skew, nativeW
 		lw.SY = hy * cm.K / nativeH
 	}
 	lw.Rotation = -deg
-	lw.Skew = skew
+	lw.Skew = -skew // Y-flip reverses shear sense (same negation the box cases apply)
 }
 
 // placeBase is place with an explicit scale base, so the radial gradients can use their own
@@ -241,6 +243,20 @@ func ClearWrites(p GameProfile) []FieldWrite {
 		{p.ColorOffset, []byte{0, 0, 0, 0}},
 		{p.MaskOffset, []byte{0}},
 	}
+}
+
+// vinylPathPrefix is the FH6 virtual directory every vinyl mesh path starts with.
+const vinylPathPrefix = `GAME:\Media\Livery\Vinyls\`
+
+// wordToMeshPath returns the full mesh path a layer must point at to render `word` as its shape,
+// or ok=false for a word with no known mesh file (left stale). The map is generated in
+// meshpaths_gen.go.
+func wordToMeshPath(word uint16) (string, bool) {
+	f, ok := meshFileByWord[word]
+	if !ok {
+		return "", false
+	}
+	return vinylPathPrefix + f + ".modelbin", true
 }
 
 // --- helpers ---------------------------------------------------------------

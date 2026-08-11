@@ -50,7 +50,7 @@ class _InjectPopoverState extends State<InjectPopover> {
 
   @override
   Widget build(BuildContext context) {
-    final shapes = (studio.geometry?['shapes'] as List?)?.length ?? 0;
+    final shapes = studio.injectShapes.length;
     final layers = int.tryParse(_layers.text.trim()) ?? 0;
     final short = layers > 0 && layers < shapes;
 

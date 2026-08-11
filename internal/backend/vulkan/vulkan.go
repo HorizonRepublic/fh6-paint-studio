@@ -34,7 +34,7 @@ import (
 const (
 	candStride = 11
 	resStride  = 5
-	maxCands   = 65536 // device scratch capacity; Evaluate chunks if exceeded (each chunk is a launch plus a sync, so a bigger one is fewer round-trips for ~4 MB more device scratch)
+	maxCands   = 65535 // device scratch capacity AND the eval chunk size; capped at the guaranteed compute-workgroup dispatch limit (fp_eval launches one workgroup per candidate), so a full chunk never overflows it on Intel iGPUs
 )
 
 // maskRejected is a large positive ΔSSE sentinel: a mask candidate can never be the
@@ -52,6 +52,12 @@ type Vulkan struct {
 
 	candBuf []float32 // reused Evaluate/Apply staging buffer
 	outBuf  []float32
+
+	// Reused per-shape on-device search scratch. The backend is single-goroutine, so one set is
+	// safe; a fresh w*h CDF every placement was ~3000 large allocations a run.
+	searchCDF []float32
+	searchKF  []float32
+	searchOut []float32
 
 	masksOn       bool // word atlas uploaded — bank words score/composite/polish on device
 	dll           *syscall.DLL
@@ -733,7 +739,10 @@ func (g *Vulkan) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCD
 	if g.procSearchRand == nil || len(kinds) == 0 || n < 1 {
 		return model.Candidate{}, 0, false
 	}
-	cdf := make([]float32, len(grid))
+	if cap(g.searchCDF) < len(grid) {
+		g.searchCDF = make([]float32, len(grid))
+	}
+	cdf := g.searchCDF[:len(grid)]
 	var tot float32
 	for i, v := range grid {
 		if v < 0 {
@@ -742,13 +751,19 @@ func (g *Vulkan) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCD
 		tot += v
 		cdf[i] = tot
 	}
-	kf := make([]float32, len(kinds))
+	if cap(g.searchKF) < len(kinds) {
+		g.searchKF = make([]float32, len(kinds))
+	}
+	kf := g.searchKF[:len(kinds)]
 	for i, k := range kinds {
 		kf[i] = float32(k)
 	}
 	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha)}
 	fp := []float32{maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad}
-	out := make([]float32, 12)
+	if cap(g.searchOut) < 12 {
+		g.searchOut = make([]float32, 12)
+	}
+	out := g.searchOut[:12]
 	g.procSearchRand.Call(
 		uintptr(uint64(seed)),
 		uintptr(unsafe.Pointer(&ip[0])),

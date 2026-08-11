@@ -25,8 +25,17 @@ func EllipseBBox(p [6]float32, w, h int) (xMin, yMin, xMax, yMax int) {
 	rx, ry := math.Max(1, float64(p[2])), math.Max(1, float64(p[3]))
 	t := float64(p[4]) * deg2rad
 	c, s := math.Cos(t), math.Sin(t)
-	ex := math.Sqrt(rx*rx*c*c + ry*ry*s*s)
-	ey := math.Sqrt(rx*rx*s*s + ry*ry*c*c)
+	var ex, ey float64
+	if skew := float64(p[5]); skew != 0 {
+		// Sheared ellipse: its x half-extent grows to sqrt(rx²+(skew·ry)²); the AABB of that,
+		// rotated, is a conservative box (extra pixels fail Inside, so the render is unchanged).
+		shx := math.Sqrt(rx*rx + skew*skew*ry*ry)
+		ex = math.Abs(shx*c) + math.Abs(ry*s)
+		ey = math.Abs(shx*s) + math.Abs(ry*c)
+	} else {
+		ex = math.Sqrt(rx*rx*c*c + ry*ry*s*s)
+		ey = math.Sqrt(rx*rx*s*s + ry*ry*c*c)
+	}
 	xMin = clampI(int(math.Floor(cx-ex-1)), 0, w-1)
 	xMax = clampI(int(math.Ceil(cx+ex+1)), 0, w-1)
 	yMin = clampI(int(math.Floor(cy-ey-1)), 0, h-1)
@@ -44,6 +53,7 @@ func EllipseInside(p [6]float32, x, y int) bool {
 	dy := float64(y) + 0.5 - cy
 	xr := dx*c + dy*s
 	yr := -dx*s + dy*c
+	xr -= float64(p[5]) * yr // inverse horizontal shear (0 for generated shapes)
 	return xr*xr/(rx*rx)+yr*yr/(ry*ry) <= 1.0
 }
 
@@ -96,8 +106,9 @@ func RectBBox(p [6]float32, w, h int) (xMin, yMin, xMax, yMax int) {
 	hw, hh := math.Max(0.5, float64(p[2])), math.Max(0.5, float64(p[3]))
 	t := float64(p[4]) * deg2rad
 	c, s := math.Cos(t), math.Sin(t)
-	ex := math.Abs(hw*c) + math.Abs(hh*s)
-	ey := math.Abs(hw*s) + math.Abs(hh*c)
+	shx := hw + math.Abs(float64(p[5]))*hh // shear widens the x half-extent (0 => unchanged)
+	ex := math.Abs(shx*c) + math.Abs(hh*s)
+	ey := math.Abs(shx*s) + math.Abs(hh*c)
 	xMin = clampI(int(math.Floor(cx-ex-1)), 0, w-1)
 	xMax = clampI(int(math.Ceil(cx+ex+1)), 0, w-1)
 	yMin = clampI(int(math.Floor(cy-ey-1)), 0, h-1)
@@ -115,6 +126,7 @@ func RectInside(p [6]float32, x, y int) bool {
 	dy := float64(y) + 0.5 - cy
 	xr := dx*c + dy*s
 	yr := -dx*s + dy*c
+	xr -= float64(p[5]) * yr // inverse horizontal shear (0 for generated shapes)
 	return math.Abs(xr) <= hw && math.Abs(yr) <= hh
 }
 

@@ -155,18 +155,19 @@ func locateTable(p *proc, prof GameProfile, count int, log func(string)) (uintpt
 		return 0, fmt.Errorf("invalid layer count %d (expected the exact FH6 template count, 1..65535)", count)
 	}
 
-	cachedVt, cachedGroup, haveCache := loadCache(p)
+	cachedVt, cachedGroup, haveGroup, haveVtable := loadCache(p)
 
 	// 1. Cached exact group — instant direct hit (no scan), re-validated.
-	if haveCache {
+	if haveGroup {
 		if table, ok := tableFromGroup(p, prof, cachedGroup, cachedVt, count); ok {
 			log(fmt.Sprintf("locator: ✓ via cached group 0x%x (vtable 0x%x) → table 0x%x", cachedGroup, cachedVt, table))
 			return table, nil
 		}
 	}
 
-	// 2. Cached vtable — group moved but its class vtable is stable: targeted scan.
-	if haveCache {
+	// 2. Cached vtable — same session with a moved group, or a new session with the vtable
+	//    reconstructed from its stable RVA: a targeted scan that skips the slow count scan.
+	if haveVtable {
 		if table, vt, group, ok := tableFromVtables(p, prof, count, []uintptr{cachedVt}); ok {
 			cacheLocation(p, vt, group, count)
 			log(fmt.Sprintf("locator: ✓ via cached vtable 0x%x → table 0x%x", vt, table))
@@ -307,8 +308,8 @@ func tableFromVtables(p *proc, prof GameProfile, count int, vtables []uintptr) (
 				if !okc || int(cnt) != count {
 					continue
 				}
-				tbl, okt := p.readU64(grp + tableOff)
-				if !okt || !isUserPointer(tbl) || !p.isPrivateWritable(tbl) {
+				tbl, okt := tableVectorOK(p, grp+tableOff, count)
+				if !okt {
 					continue
 				}
 				if scoreTable(p, prof, tbl, min(count, 64)) <= 0 {

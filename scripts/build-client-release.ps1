@@ -23,6 +23,12 @@ Push-Location $root
 try {
     # 1) The Vulkan shim, unless we are told the existing one is current.
     $vkdll = Join-Path $root "bin\fh6vk.dll"
+    # A clean build (step 7) leaves the shim only inside the prod layout, so restore the loose copy the
+    # staging step reads from before deciding whether -SkipDLL can reuse it.
+    if ($SkipDLL -and -not (Test-Path $vkdll)) {
+        $prodDll = Join-Path $root "bin\bin\engine\fh6vk.dll"
+        if (Test-Path $prodDll) { Copy-Item $prodDll $vkdll }
+    }
     if ($SkipDLL -and (Test-Path $vkdll)) {
         Write-Host "Reusing the existing shim: $vkdll" -ForegroundColor Yellow
     } else {
@@ -208,6 +214,23 @@ try {
         Get-FileHash -Algorithm SHA256 |
         ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), $_.Path.Substring($stage.Length + 1) })
     [IO.File]::WriteAllText($sums, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+
+    # 7) Reduce bin\ to EXACTLY the runnable prod layout, so the app runs and injects from the familiar
+    # place without unpacking the archive. The shim and engined builds drop intermediates here
+    # (.obj/.exp/.lib/.res, loose exes, the CLI, test logs) that have no business in a prod folder — the
+    # user opens bin\ expecting what a release drop looks like: the launcher and its bin\ runtime, and
+    # nothing else. Everything still needed to run, and to reuse the shim on the next -SkipDLL build,
+    # lives inside bin\bin\. Staging has already consumed bin\engined.exe and bin\fh6vk.dll by now.
+    # Wrapped so a locked bin\ (the app left running) warns instead of failing the finished release.
+    $binRoot = Join-Path $root 'bin'
+    try {
+        Get-ChildItem $binRoot -Force | Remove-Item -Recurse -Force
+        Copy-Item (Join-Path $stage 'FH6 Paint Studio.exe') $binRoot
+        Copy-Item (Join-Path $stage 'bin') $binRoot -Recurse
+        Write-Host "bin\ is now the runnable prod layout" -ForegroundColor Green
+    } catch {
+        Write-Host "Could not refresh bin\ (is the app running?): $_" -ForegroundColor Yellow
+    }
 
     $size = [math]::Round((Get-Item $archive).Length / 1MB, 1)
     Write-Host ""

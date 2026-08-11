@@ -131,8 +131,8 @@ func scaleParams(kind model.ShapeKind, p [6]float32, ss float32) [6]float32 {
 		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4] * ss, p[5] * ss}
 	case model.KindLine:
 		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4] * ss, 0}
-	default: // ellipse / rectangle: [cx, cy, a, b, thetaDeg, _]
-		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4], 0}
+	default: // ellipse / rectangle: [cx, cy, a, b, thetaDeg, skew] — angle + skew are dimensionless
+		return [6]float32{p[0] * ss, p[1] * ss, p[2] * ss, p[3] * ss, p[4], p[5]}
 	}
 }
 
@@ -229,30 +229,34 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 	if ss > 1 {
 		lin = make([]float32, w*h*4)
 		inv := 1.0 / float32(ss*ss)
-		for oy := 0; oy < h; oy++ {
-			for ox := 0; ox < w; ox++ {
-				var r, g, b, a float32
-				for dy := 0; dy < ss; dy++ {
-					for dx := 0; dx < ss; dx++ {
-						q := ((oy*ss+dy)*W + (ox*ss + dx)) * 4
-						r += canvas[q+0]
-						g += canvas[q+1]
-						b += canvas[q+2]
-						a += canvas[q+3]
+		// Output rows are disjoint in lin — each averages its own SSAA block of
+		// canvas — so the downsample bands across cores, bit-identically.
+		parallelRows(h, func(y0, y1 int) {
+			for oy := y0; oy < y1; oy++ {
+				for ox := 0; ox < w; ox++ {
+					var r, g, b, a float32
+					for dy := 0; dy < ss; dy++ {
+						for dx := 0; dx < ss; dx++ {
+							q := ((oy*ss+dy)*W + (ox*ss + dx)) * 4
+							r += canvas[q+0]
+							g += canvas[q+1]
+							b += canvas[q+2]
+							a += canvas[q+3]
+						}
 					}
+					o := (oy*w + ox) * 4
+					// The composite buffer holds PREMULTIPLIED colour over a transparent background
+					// (canvas = canvas*ia + cr*aEff, bg starts 0). Un-premultiply on downsample —
+					// divide the summed colour by the summed alpha — so antialiased edge pixels keep
+					// full-saturation colour at fractional alpha instead of darkening. Reduces to a plain
+					// box-average over an opaque bg (alpha is 1 everywhere there).
+					if a > 0 {
+						lin[o+0], lin[o+1], lin[o+2] = r/a, g/a, b/a
+					}
+					lin[o+3] = a * inv
 				}
-				o := (oy*w + ox) * 4
-				// The composite buffer holds PREMULTIPLIED colour over a transparent background
-				// (canvas = canvas*ia + cr*aEff, bg starts 0). Un-premultiply on downsample —
-				// divide the summed colour by the summed alpha — so antialiased edge pixels keep
-				// full-saturation colour at fractional alpha instead of darkening. Reduces to a plain
-				// box-average over an opaque bg (alpha is 1 everywhere there).
-				if a > 0 {
-					lin[o+0], lin[o+1], lin[o+2] = r/a, g/a, b/a
-				}
-				lin[o+3] = a * inv
 			}
-		}
+		})
 	}
 	out := make([]float32, w*h*4)
 	parallelRows(h, func(y0, y1 int) {

@@ -588,8 +588,10 @@ void writeDescriptors() {
 void submitWait() {
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO}; si.commandBufferCount = 1; si.pCommandBuffers = &g_cmd;
     vkResetFences(g_device, 1, &g_fence);
-    vkQueueSubmit(g_queue, 1, &si, g_fence);
-    vkWaitForFences(g_device, 1, &g_fence, VK_TRUE, UINT64_MAX);
+    // Record submit/fence failure so the device-error check after Evaluate can
+    // see a VK_ERROR_DEVICE_LOST — otherwise a stale g_out returns as valid.
+    if (vkQueueSubmit(g_queue, 1, &si, g_fence) != VK_SUCCESS) { g_lastError = 1050; return; }
+    if (vkWaitForFences(g_device, 1, &g_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) { g_lastError = 1051; }
 }
 
 // barrier making this dispatch's shader writes available to later shader reads, the
@@ -1438,6 +1440,7 @@ API int fp_masks_on() { return g_masksOn; }
 API void fp_eval(const float* cands, int n, float* out) {
     if (n <= 0 || !g_device) return;
     if (n > g_maxCands) n = g_maxCands;
+    if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the guaranteed dispatch limit (Intel iGPUs enforce exactly 65535)
     memcpy(g_cands.map, cands, (size_t)n * 11 * sizeof(float));
 
     vkResetCommandBuffer(g_cmd, 0);
