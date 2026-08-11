@@ -114,6 +114,19 @@ class _ShellState extends State<Shell> {
     });
   }
 
+  /// Opens the editor on an empty document, so a livery can be built by hand
+  /// without a fit behind it. The canvas starts at a neutral square; loading a
+  /// reference in the editor resizes it to the picture being traced.
+  void _editBlank() {
+    final engine = studio.engine;
+    if (engine == null) return;
+    final ed = Editor(engine)..loadBlank(1000, 1000);
+    setState(() {
+      _editor = ed;
+      _pop = _Pop.none;
+    });
+  }
+
   void _closeEditor() {
     final ed = _editor;
     setState(() => _editor = null);
@@ -176,6 +189,7 @@ class _ShellState extends State<Shell> {
                 onPickLanguage: _closeEditor,
                 onSettings: _closeEditor,
                 onLog: _closeEditor,
+                onCreate: _closeEditor,
                 logOpen: false,
               ),
             ),
@@ -226,7 +240,7 @@ class _ShellState extends State<Shell> {
                     switchInCurve: Motion.curve,
                     switchOutCurve: Motion.curveIn,
                     child: studio.sourceImage == null && studio.preview == null
-                        ? _Empty(studio: studio)
+                        ? _Empty(studio: studio, onCreate: _editBlank)
                         : CanvasView(
                             studio: studio,
                             // A crop rectangle over a running fit would be a
@@ -253,6 +267,7 @@ class _ShellState extends State<Shell> {
                       pop: _pop,
                       onSettings: () => _toggle(_Pop.settings),
                       onLog: () => setState(() => _logOpen = !_logOpen),
+                      onCreate: _editBlank,
                       logOpen: _logOpen,
                     ),
                   ),
@@ -575,6 +590,7 @@ class _Header extends StatelessWidget {
     required this.pop,
     required this.onSettings,
     required this.onLog,
+    required this.onCreate,
     required this.logOpen,
     this.compact = false,
   });
@@ -583,6 +599,10 @@ class _Header extends StatelessWidget {
   final VoidCallback onHelp;
   final VoidCallback onSettings;
   final VoidCallback onLog;
+
+  /// Opens the editor on a blank document — a livery from scratch, reachable
+  /// without first fitting a picture.
+  final VoidCallback onCreate;
   final bool logOpen;
 
   /// Drops everything but the identity and the window buttons. Used over the
@@ -628,6 +648,10 @@ class _Header extends StatelessWidget {
           CaptionControls(
             children: [
               if (!compact) ...[
+                // A way into the editor that does not start from a picture: the
+                // canvas-first shell otherwise only reaches it through a result.
+                _TopAction(context.s('createScratch'), onTap: onCreate),
+                const SizedBox(width: 5),
                 // The log is one click from anywhere, because the moment it is
                 // wanted is the moment something has gone wrong.
                 _TopAction(
@@ -1395,8 +1419,12 @@ class _ChipDivider extends StatelessWidget {
 }
 
 class _Empty extends StatelessWidget {
-  const _Empty({required this.studio});
+  const _Empty({required this.studio, required this.onCreate});
   final Studio studio;
+
+  /// Opens the editor on a blank canvas, the other way to start: build a livery
+  /// by hand instead of fitting one to a picture.
+  final VoidCallback onCreate;
 
   @override
   Widget build(BuildContext context) {
@@ -1449,6 +1477,10 @@ class _Empty extends StatelessWidget {
                 loaded ? context.s('chooseAnother') : context.s('chooseFile'),
                 onTap: choose,
               ),
+              const SizedBox(height: 10),
+              // The other way in: an empty canvas to draw on, for a livery that
+              // starts from nothing rather than from a photo.
+              Btn(context.s('createScratch'), onTap: onCreate),
             ],
           ),
         ),

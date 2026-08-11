@@ -46,6 +46,7 @@ func Prep(kind model.ShapeKind, p [6]float32) Prepared {
 		pr.rx, pr.ry = math.Max(0.5, float64(p[2])), math.Max(0.5, float64(p[3]))
 		t := float64(p[4]) * deg2rad
 		pr.c, pr.s = math.Cos(t), math.Sin(t)
+		pr.skew = float64(p[5]) // editor-set shear; 0 for every generated shape
 	default:
 		if model.IsMask(kind) {
 			pr.cx, pr.cy = float64(p[0]), float64(p[1])
@@ -61,8 +62,17 @@ func Prep(kind model.ShapeKind, p [6]float32) Prepared {
 		pr.rx2, pr.ry2 = pr.rx*pr.rx, pr.ry*pr.ry
 		t := float64(p[4]) * deg2rad
 		pr.c, pr.s = math.Cos(t), math.Sin(t)
+		pr.skew = float64(p[5]) // editor-set shear for the ellipse + radial kinds; 0 when generated
 	}
 	return pr
+}
+
+// localS rotates the pixel centre into the shape frame and applies the inverse horizontal shear —
+// the SAME K^{-1} the mask path uses (sx = kx - skew*ky). With skew 0 it is exactly local(), so every
+// generated shape is bit-identical.
+func (pr *Prepared) localS(x, y int) (float64, float64) {
+	xr, yr := pr.local(x, y)
+	return xr - pr.skew*yr, yr
 }
 
 // local rotates the pixel centre into the shape's frame.
@@ -99,7 +109,7 @@ func (pr *Prepared) Coverage(x, y int) float64 {
 func (pr *Prepared) Inside(x, y int) bool {
 	switch pr.kind {
 	case model.KindRectangle:
-		xr, yr := pr.local(x, y)
+		xr, yr := pr.localS(x, y)
 		return math.Abs(xr) <= pr.rx && math.Abs(yr) <= pr.ry
 	case model.KindTriangle:
 		px, py := float64(x)+0.5, float64(y)+0.5
@@ -128,13 +138,13 @@ func (pr *Prepared) Inside(x, y int) bool {
 		if model.IsMask(pr.kind) {
 			return pr.Coverage(x, y) >= 0.5
 		}
-		xr, yr := pr.local(x, y)
+		xr, yr := pr.localS(x, y)
 		return xr*xr/pr.rx2+yr*yr/pr.ry2 <= 1.0
 	}
 }
 
 // normRadius mirrors ellipseNormRadius for the gradient kinds.
 func (pr *Prepared) normRadius(x, y int) float64 {
-	xr, yr := pr.local(x, y)
+	xr, yr := pr.localS(x, y)
 	return math.Sqrt(xr*xr/pr.rx2 + yr*yr/pr.ry2)
 }

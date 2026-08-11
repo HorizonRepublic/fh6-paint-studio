@@ -13,6 +13,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -205,8 +206,27 @@ class EditShape {
 
   double get angle =>
       (isBoxLike || isWordLike) && data.length > 4 ? data[4] : 0;
-  double get size =>
-      isBoxLike ? math.max(data[2], data[3]) : bounds.longestSide;
+
+  /// The horizontal shear the selection frame must follow so it hugs the shape.
+  /// Box primitives shear in pixel space (data[5] = the raster's skew), so the
+  /// frame parallelogram matches exactly. Words shear in normalised mask space,
+  /// a different magnitude, so their frame is left unsheared for now.
+  double get frameSkew => isBoxLike && data.length > 5 ? data[5] : 0;
+  double get size {
+    if (isBoxLike || isWordLike) return math.max(data[2], data[3]);
+    // Triangle/line: the farthest vertex from the centre. Rotation-INVARIANT,
+    // unlike the axis-aligned bounds — turning a shape must not read as a
+    // resize, which is exactly what made the drag composite (s.size/was.size)
+    // scale it mid-rotation.
+    final c = center;
+    var m = 0.0;
+    for (var i = 0; i + 1 < data.length; i += 2) {
+      final dx = data[i] - c.dx, dy = data[i + 1] - c.dy;
+      final d = dx * dx + dy * dy;
+      if (d > m) m = d;
+    }
+    return math.sqrt(m);
+  }
 
   /// The shape's own box, unrotated: what the selection frame shows. [bounds]
   /// is the rotated EXTENT — right for fitting a view, wrong for a frame that
@@ -343,6 +363,71 @@ class EditShape {
     }
   }
 
+  /// Whether this kind can carry a skew the GAME will render: a word stores a
+  /// skew field, a triangle skews by moving its vertices. Box primitives have no
+  /// skew slot and the raster ignores one, so they must not offer it — a skewed
+  /// rectangle would preview and inject unskewed.
+  bool get canSkew => isBoxLike || isWordLike || type == typeTriangle;
+
+  /// Non-uniform resize about the CENTRE: sets the half-extent along ONE of the
+  /// shape's own axes ([halfW] or [halfH], in the shape's local frame). This is
+  /// the async side-resize the corner handles cannot do (they scale uniformly).
+  void resizeLocal({double? halfW, double? halfH}) {
+    if (isBoxLike) {
+      if (halfW != null) data[2] = math.max(0.5, halfW);
+      if (halfH != null) data[3] = math.max(0.5, halfH);
+      return;
+    }
+    if (isWordLike) {
+      // Words store FULL extents, so a half-extent is doubled going in.
+      if (halfW != null) data[2] = math.max(1, halfW * 2);
+      if (halfH != null) data[3] = math.max(1, halfH * 2);
+      return;
+    }
+    // Triangle/line: no stored extents — scale the vertices along a WORLD axis
+    // about the centre so the axis-aligned box reaches the target half-extent.
+    final c = center;
+    if (halfW != null) {
+      final cur = bounds.width / 2;
+      if (cur > 0.01) {
+        final k = math.max(0.5, halfW) / cur;
+        for (var i = 0; i + 1 < data.length; i += 2) {
+          data[i] = c.dx + (data[i] - c.dx) * k;
+        }
+      }
+    }
+    if (halfH != null) {
+      final cur = bounds.height / 2;
+      if (cur > 0.01) {
+        final k = math.max(0.5, halfH) / cur;
+        for (var i = 1; i < data.length; i += 2) {
+          data[i] = c.dy + (data[i] - c.dy) * k;
+        }
+      }
+    }
+  }
+
+  /// Incremental HORIZONTAL shear about the centre. A word carries it in its
+  /// skew field ([data]\[5]); a triangle moves its vertices, since it has no slot
+  /// to store one. Only meaningful where [canSkew].
+  void skewBy(double ds) {
+    if (isBoxLike || isWordLike) {
+      // Words already carry a skew slot; box primitives grow one (their Data ships
+      // as 5 numbers, so the shear is a new 6th the renderer and injector read).
+      while (data.length < 6) {
+        data.add(0);
+      }
+      data[5] += ds;
+      return;
+    }
+    if (type == typeTriangle || type == typeLine) {
+      final c = center;
+      for (var i = 0; i + 1 < data.length; i += 2) {
+        data[i] += ds * (data[i + 1] - c.dy);
+      }
+    }
+  }
+
   void rotateBy(double deg) {
     if (isBoxLike || isWordLike) {
       data[4] = (data[4] + deg) % 360;
@@ -467,6 +552,17 @@ class Editor extends ChangeNotifier {
     return done.future;
   }
 
+  /// A reference picture ghosted under the work in the editor, loaded by the
+  /// user. Independent of any generation source: it is what makes tracing a
+  /// livery from scratch possible, and it is never injected or exported —
+  /// display only, like the studio's own source copy.
+  ui.Image? reference;
+  String? referenceName;
+
+  /// Whether the document is still empty save for its background — the point at
+  /// which loading a reference may resize the canvas to match it.
+  bool get isBlank => shapes.length <= 1;
+
   /// The engine's picture of the current document.
   ui.Image? render;
   bool rendering = false;
@@ -532,6 +628,65 @@ class Editor extends ChangeNotifier {
     _redo.clear();
     notifyListeners();
     refresh();
+  }
+
+  /// Opens an empty document to build a livery by hand: one transparent
+  /// background over an empty stack, at [w]×[h]. Loading a reference then
+  /// resizes it to the picture being traced, so this size is only the starting
+  /// point for freehand work with no reference at all.
+  void loadBlank(int w, int h) {
+    final bg = {
+      'type': typeBaseRect,
+      'data': [0.0, 0.0, w.toDouble(), h.toDouble()],
+      'color': [0, 0, 0, 0],
+      'score': 0,
+    };
+    load({
+      'shapes': [bg],
+      'layers': [
+        {'id': 0, 'name': 'Background'},
+        {'id': 1, 'name': 'Shapes'},
+      ],
+    }, w, h);
+    // New shapes land in a working layer, not on top of the background slot.
+    activeLayer = 1;
+    notifyListeners();
+  }
+
+  /// Lays a reference picture under the work. On a still-blank canvas the
+  /// dimensions follow the reference so tracing lines up one-to-one; once there
+  /// is work to keep, the canvas holds its size and the reference just overlays.
+  Future<void> setReference(String path) async {
+    try {
+      final bytes = await File(path).readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      reference?.dispose();
+      reference = img;
+      referenceName = path.split(RegExp(r'[\\/]')).last;
+      if (isBlank && (img.width != width || img.height != height)) {
+        width = img.width;
+        height = img.height;
+        if (shapes.isNotEmpty) {
+          shapes[0].data = [0, 0, width.toDouble(), height.toDouble()];
+        }
+        notifyListeners();
+        await refresh();
+      } else {
+        notifyListeners();
+      }
+    } catch (e) {
+      error = 'could not load the reference: $e';
+      notifyListeners();
+    }
+  }
+
+  void clearReference() {
+    reference?.dispose();
+    reference = null;
+    referenceName = null;
+    notifyListeners();
   }
 
   /// Starting layers for a document that has none.
@@ -1183,6 +1338,7 @@ class Editor extends ChangeNotifier {
   @override
   void dispose() {
     render?.dispose();
+    reference?.dispose();
     super.dispose();
   }
 }

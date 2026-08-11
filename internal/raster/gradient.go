@@ -84,6 +84,7 @@ func GaussianCovGrad(kind model.ShapeKind, p [6]float32, x, y int) (cov float64,
 	dy := float64(y) + 0.5 - cy
 	xr := dx*c + dy*s
 	yr := -dx*s + dy*c
+	xr -= float64(p[5]) * yr // inverse horizontal shear (0 for generated shapes)
 	u := xr*xr/(rx*rx) + yr*yr/(ry*ry)
 	if u >= 1 {
 		return 0, g
@@ -115,6 +116,7 @@ func ellipseNormRadius(p [6]float32, x, y int) float64 {
 	dy := float64(y) + 0.5 - cy
 	xr := dx*c + dy*s
 	yr := -dx*s + dy*c
+	xr -= float64(p[5]) * yr // inverse horizontal shear (0 for generated shapes)
 	return math.Sqrt(xr*xr/(rx*rx) + yr*yr/(ry*ry))
 }
 

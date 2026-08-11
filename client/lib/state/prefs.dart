@@ -53,15 +53,39 @@ class Prefs {
     } else {
       _values[key] = value;
     }
-    _save();
+    _scheduleSave();
   }
 
-  /// Written on every change and never awaited by the caller: losing the last
-  /// preference on a crash is not worth making every toggle asynchronous.
-  Future<void> _save() async {
+  Future<void>? _saving;
+  bool _dirty = false;
+
+  /// Fire-and-forget, but SERIALIZED: a burst of changes — a slider sweep firing
+  /// `set` continuously — must not launch overlapping writes to the same file,
+  /// which collide on Windows as sharing violations and were silently swallowed.
+  /// One writer drains a dirty flag, so the last state always lands and no two
+  /// writes run at once. Not awaited by the caller: losing the final preference
+  /// on a crash is not worth making every toggle asynchronous.
+  void _scheduleSave() {
+    _dirty = true;
+    _saving ??= _drain();
+  }
+
+  Future<void> _drain() async {
+    while (_dirty) {
+      _dirty = false;
+      await _writeOnce();
+    }
+    _saving = null;
+  }
+
+  Future<void> _writeOnce() async {
     try {
       await _file.parent.create(recursive: true);
-      await _file.writeAsString(jsonEncode(_values));
+      // Temp-file then rename, so a crash mid-write leaves the old file intact
+      // rather than a half-written one the next launch cannot parse.
+      final tmp = File('${_file.path}.tmp');
+      await tmp.writeAsString(jsonEncode(_values));
+      await tmp.rename(_file.path);
     } catch (_) {
       // Preferences are a convenience. An unwritable home directory must not
       // stop the app from working.

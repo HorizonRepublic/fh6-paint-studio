@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 
 import '../state/editor.dart';
 import '../state/studio.dart';
+import 'source.dart';
 import 'strings.dart';
 import 'tokens.dart';
 
@@ -51,13 +52,32 @@ bool _isCreate(_Tool t) =>
 /// What the pointer is over. The editor asks this before it asks which TOOL is
 /// active, because a corner handle means resize no matter what is selected in
 /// the tool column — that is what a handle is for.
-enum Grip { none, body, rotate, topLeft, topRight, bottomLeft, bottomRight }
+enum Grip {
+  none,
+  body,
+  rotate,
+  topLeft,
+  topRight,
+  bottomLeft,
+  bottomRight,
+  // Mid-edge handles: resize ONE axis (non-uniform), Photoshop-style.
+  left,
+  right,
+  top,
+  bottom,
+  // The skew handle below the frame (words / triangles only).
+  skew,
+}
+
+bool _isEdge(Grip g) =>
+    g == Grip.left || g == Grip.right || g == Grip.top || g == Grip.bottom;
 
 /// Half the side of a corner handle, in document pixels at the current zoom.
 double gripReach(double scale) => 7 / scale;
 
-/// Which grip is at [p], for the shape whose bounds are [b].
-Grip gripAt(Offset p, Rect? b, double scale) {
+/// Which grip is at [p], for the shape whose bounds are [b]. [canSkew] adds the
+/// skew handle below the frame for the kinds that support it.
+Grip gripAt(Offset p, Rect? b, double scale, {bool canSkew = false}) {
   if (b == null) return Grip.none;
   final r = b.inflate(3 / scale);
   final reach = gripReach(scale);
@@ -65,17 +85,31 @@ Grip gripAt(Offset p, Rect? b, double scale) {
   // Generous on purpose: the anchor is the smallest target on the canvas, and
   // a near miss used to fall through and SELECT whatever sat behind it.
   if ((p - anchor).distance < reach * 2.4) return Grip.rotate;
+  if (canSkew) {
+    final sk = Offset(r.center.dx, r.bottom + rotateHandleGap / scale);
+    if ((p - sk).distance < reach * 2.4) return Grip.skew;
+  }
   bool near(Offset c) => (p - c).distance < reach;
+  // Corners first: at a corner both axes resize, which beats a single edge.
   if (near(r.topLeft)) return Grip.topLeft;
   if (near(r.topRight)) return Grip.topRight;
   if (near(r.bottomLeft)) return Grip.bottomLeft;
   if (near(r.bottomRight)) return Grip.bottomRight;
+  if (near(r.centerLeft)) return Grip.left;
+  if (near(r.centerRight)) return Grip.right;
+  if (near(r.topCenter)) return Grip.top;
+  if (near(r.bottomCenter)) return Grip.bottom;
   return r.contains(p) ? Grip.body : Grip.none;
 }
 
 MouseCursor _cursorFor(Grip g, _Tool tool) => switch (g) {
   Grip.topLeft || Grip.bottomRight => SystemMouseCursors.resizeUpLeftDownRight,
   Grip.topRight || Grip.bottomLeft => SystemMouseCursors.resizeUpRightDownLeft,
+  Grip.left || Grip.right => SystemMouseCursors.resizeLeftRight,
+  Grip.top || Grip.bottom => SystemMouseCursors.resizeUpDown,
+  // No skew cursor on this platform; the column-resize arrows are the closest
+  // "slide this sideways" hint.
+  Grip.skew => SystemMouseCursors.resizeColumn,
   // There is no rotate cursor on this platform; grab is the closest thing that
   // still says "this is a thing you take hold of".
   Grip.rotate => SystemMouseCursors.grab,
@@ -124,6 +158,11 @@ class _EditorViewState extends State<EditorView> {
   /// Ctrl+wheel zoom, ×1 (fit) to ×8, and where the zoomed canvas is panned.
   double _zoom = 1;
   Offset _pan = Offset.zero;
+
+  /// Onion-skin: the source image ghosted over the work, 0 (off) to 1. Tracing
+  /// by hand wants the original in view, not remembered. Only offered on a fresh
+  /// generation — a run opened from the library carries no source to show.
+  double _onion = 0;
 
   Offset _clampPan(Offset p, Size viewport, Size content) {
     double axis(double view, double c, double v) =>
@@ -251,6 +290,8 @@ class _EditorViewState extends State<EditorView> {
                 : (ed.interBelow == null && _marked && _held != Grip.none
                       ? ed.current
                       : ed.settling),
+            source: ed.reference ?? widget.studio.sourceImage,
+            onion: _onion,
             onHover: _onHover,
             onScale: (v) => _scale = v,
             onWheel: _wheel,
@@ -313,8 +354,42 @@ class _EditorViewState extends State<EditorView> {
             onClose: widget.onClose,
           ),
         ),
+        // The onion-skin control, centred at the foot of the canvas where no
+        // other panel sits. Always present in the editor: with no reference it
+        // offers to load one, which is how a livery is traced from scratch.
+        Positioned(
+          left: 92,
+          right: 300,
+          bottom: 34,
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: _Onion(
+              value: _onion,
+              hasReference: (ed.reference ?? widget.studio.sourceImage) != null,
+              onChanged: (v) => setState(() => _onion = v),
+              onPick: _pickReference,
+              // Only a reference loaded HERE can be cleared; a generation's own
+              // source belongs to the run, not to this edit.
+              onClear: ed.reference != null ? _clearReference : null,
+            ),
+          ),
+        ),
       ],
     );
+  }
+
+  Future<void> _pickReference() async {
+    final path = await pickImage();
+    if (path == null) return;
+    await ed.setReference(path);
+    // Loading a reference is a request to see it: turn the ghost on if it was
+    // off, and leave a strength the user already set alone.
+    setState(() => _onion = _onion == 0 ? 0.6 : _onion);
+  }
+
+  void _clearReference() {
+    ed.clearReference();
+    setState(() {});
   }
 
   Rect? get _frame {
@@ -322,24 +397,47 @@ class _EditorViewState extends State<EditorView> {
     return g != null ? ed.layerBounds(g) : ed.current?.localBounds;
   }
 
+  /// The selected shape can take a skew (word / triangle) and is a single shape,
+  /// not a group — which is when the skew handle is offered.
+  bool get _canSkew => ed.groupLayer == null && (ed.current?.canSkew ?? false);
+
   /// The pointer in the selection frame's own space. The handles are drawn on
   /// the UNROTATED box turned with the shape, so hits are tested by turning
   /// the point back rather than chasing the corners forward.
   Offset _inFrame(Offset docPoint) {
     final s = ed.current;
-    if (s == null || ed.groupLayer != null || s.angle == 0) return docPoint;
+    if (s == null || ed.groupLayer != null) return docPoint;
+    final c = s.center;
+    var d = docPoint - c;
+    // Invert the frame's draw transform (rotate then skew about the centre) in
+    // reverse: un-rotate first, then un-shear, so a hit lands on the same base
+    // rect the grips are measured against.
+    if (s.angle != 0) {
+      final t = -s.angle * math.pi / 180;
+      d = Offset(
+        d.dx * math.cos(t) - d.dy * math.sin(t),
+        d.dx * math.sin(t) + d.dy * math.cos(t),
+      );
+    }
+    final sk = s.frameSkew;
+    if (sk != 0) d = Offset(d.dx - sk * d.dy, d.dy);
+    return c + d;
+  }
+
+  /// The pointer in the shape's own frame, RELATIVE to its centre (not re-added
+  /// to it). Used to read a local-axis extent while resizing or skewing.
+  Offset _toLocal(Offset docPoint, EditShape s) {
     final c = s.center;
     final t = -s.angle * math.pi / 180;
     final d = docPoint - c;
-    return c +
-        Offset(
-          d.dx * math.cos(t) - d.dy * math.sin(t),
-          d.dx * math.sin(t) + d.dy * math.cos(t),
-        );
+    return Offset(
+      d.dx * math.cos(t) - d.dy * math.sin(t),
+      d.dx * math.sin(t) + d.dy * math.cos(t),
+    );
   }
 
   void _onHover(Offset docPoint) {
-    final g = gripAt(_inFrame(docPoint), _frame, _scale);
+    final g = gripAt(_inFrame(docPoint), _frame, _scale, canSkew: _canSkew);
     if (g != _hover) setState(() => _hover = g);
   }
 
@@ -355,12 +453,17 @@ class _EditorViewState extends State<EditorView> {
     // the selection — and since the canvas does nothing else, a drag that
     // misses the frame still MOVES the selection instead of dying: losing
     // the drag to a near-miss on a small shape felt broken.
-    _held = gripAt(_inFrame(docPoint), _frame, _scale);
+    _held = gripAt(_inFrame(docPoint), _frame, _scale, canSkew: _canSkew);
     if (_held == Grip.none && ed.current != null) _held = Grip.body;
     // A move-group moves and does nothing else: resize/rotate of N shapes at
     // once is a different feature wearing the same handles.
     if (ed.extra.isNotEmpty && _held != Grip.none) _held = Grip.body;
-    if (_held != Grip.none && ed.groupLayer == null) {
+    // Non-uniform resize and skew are AFFINE, which the fast sprite composite (a
+    // similarity: translate-rotate-uniform-scale) cannot represent. Those drags
+    // take the draft-render path — the engine draws the real shape each frame —
+    // so the composite is only set up for move / rotate / uniform-scale.
+    final affine = _isEdge(_held) || _held == Grip.skew;
+    if (_held != Grip.none && ed.groupLayer == null && !affine) {
       // Split the stack around the shape now, so by the time the hand is
       // really moving the drag is composited locally at frame rate.
       unawaited(ed.beginInteraction());
@@ -426,6 +529,18 @@ class _EditorViewState extends State<EditorView> {
             if (i > 0 && i < ed.shapes.length && i != ed.selected) {
               ed.shapes[i].translate(d.dx, d.dy);
             }
+          }
+        // Mid-edge: resize ONE local axis about the centre (async sides).
+        case Grip.left || Grip.right:
+          s!.resizeLocal(halfW: _toLocal(docPoint, s).dx.abs());
+        case Grip.top || Grip.bottom:
+          s!.resizeLocal(halfH: _toLocal(docPoint, s).dy.abs());
+        // Skew: the horizontal slide of the pointer, over the shape's height, is
+        // the shear increment (word skew field / triangle vertices).
+        case Grip.skew:
+          final hh = s!.localBounds.height / 2;
+          if (hh > 1) {
+            s.skewBy((_toLocal(docPoint, s).dx - _toLocal(from, s).dx) / hh);
           }
         default:
           s!.scaleBy(growth().clamp(0.2, 5.0));
@@ -576,6 +691,8 @@ class _Canvas extends StatelessWidget {
     required this.pan,
     required this.group,
     required this.preview,
+    required this.source,
+    required this.onion,
     required this.onHover,
     required this.onWheel,
     required this.onScale,
@@ -595,6 +712,11 @@ class _Canvas extends StatelessWidget {
   /// The shape being dragged out or just added, drawn locally until the
   /// engine's picture includes it.
   final EditShape? preview;
+
+  /// The original picture, ghosted over the work at [onion] when [onion] > 0.
+  /// Null when there is nothing to trace against.
+  final ui.Image? source;
+  final double onion;
 
   final double zoom;
   final Offset pan;
@@ -672,6 +794,11 @@ class _Canvas extends StatelessWidget {
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
+                          // Transparency read-out: a checkerboard behind the
+                          // render, so a transparent vinyl looks transparent
+                          // instead of borrowing the desk. Opaque results cover
+                          // it completely.
+                          const RepaintBoundary(child: CustomPaint(painter: _Checker())),
                           // Its own compositor layer: without the boundary a
                           // gesture-rate repaint climbed to the ROUTE layer
                           // and re-recorded the whole window — desk dither,
@@ -690,6 +817,22 @@ class _Canvas extends StatelessWidget {
                                     painter: _LiveStack(editor, scale),
                                   ),
                           ),
+                          // The reference ghost, over the work and under the
+                          // handles: it is there to trace against, so it must
+                          // sit on top of the render but never eat a gesture.
+                          if (source != null && onion > 0)
+                            RepaintBoundary(
+                              child: IgnorePointer(
+                                child: Opacity(
+                                  opacity: onion.clamp(0.0, 1.0),
+                                  child: RawImage(
+                                    image: source,
+                                    fit: BoxFit.fill,
+                                    filterQuality: FilterQuality.medium,
+                                  ),
+                                ),
+                              ),
+                            ),
                           // Repainting on the pulse only: the handles are cheap and
                           // the image underneath is not, so the heartbeat must not
                           // drag the whole canvas into every frame.
@@ -726,6 +869,162 @@ class _Canvas extends StatelessWidget {
   }
 }
 
+/// The onion-skin control: a ghost of the reference over the work, a slider to
+/// fade it, and the way to load or swap the picture. A pill at the foot of the
+/// canvas rather than a checkbox in a panel, because it is a thing you reach for
+/// mid-edit and turn back down. With no reference yet, the whole pill is the
+/// invitation to load one — the entry to tracing a livery from scratch.
+class _Onion extends StatelessWidget {
+  const _Onion({
+    required this.value,
+    required this.hasReference,
+    required this.onChanged,
+    required this.onPick,
+    required this.onClear,
+  });
+
+  final double value;
+  final bool hasReference;
+  final void Function(double) onChanged;
+  final VoidCallback onPick;
+
+  /// Drops the reference. Null when the picture is a generation's own source,
+  /// which belongs to the run and is not this edit's to remove.
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!hasReference) {
+      return Glass(
+        radius: 11,
+        live: false,
+        child: Pressable(
+          onTap: onPick,
+          builder: (context, hover, down) => Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '＋',
+                  style: T.text(13, color: hover ? T.tealBright : T.dim),
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  context.s('reference'),
+                  style: T.text(11.5, color: hover ? T.title : T.dim),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    final on = value > 0;
+    return Glass(
+      radius: 11,
+      live: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Tooltip(
+              message: context.s('reference'),
+              // A tap turns it on at a readable strength and off again — the
+              // slider is for tuning, not for finding the switch.
+              child: Pressable(
+                onTap: () => onChanged(on ? 0 : 0.55),
+                builder: (context, hover, down) => AnimatedContainer(
+                  duration: Motion.fast,
+                  width: 30,
+                  height: 26,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: on
+                        ? T.tealWash
+                        : hoverOver(const Color(0x00000000), hover, down),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '◉',
+                    style: T.text(
+                      14,
+                      color: on ? T.tealBright : (hover ? T.title : T.dim),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (on) ...[
+              const SizedBox(width: 2),
+              SizedBox(
+                width: 116,
+                child: SliderTheme(
+                  data: SliderThemeData(
+                    trackHeight: 4,
+                    activeTrackColor: T.teal,
+                    inactiveTrackColor: T.fill,
+                    thumbColor: const Color(0xFFFFFFFF),
+                    overlayShape: SliderComponentShape.noOverlay,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 6,
+                    ),
+                  ),
+                  child: Slider(
+                    value: value.clamp(0.0, 1.0),
+                    onChanged: onChanged,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 5),
+              SizedBox(
+                width: 30,
+                child: Text(
+                  '${(value * 100).round()}%',
+                  style: T.monoText(11, color: T.hint),
+                ),
+              ),
+            ] else
+              const SizedBox(width: 4),
+            _Icon('⟳', on: false, tip: context.s('reference'), onTap: onPick),
+            if (onClear != null) ...[
+              const SizedBox(width: 2),
+              _Icon('✕', on: false, tip: context.s('reference'), onTap: onClear),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The transparency checkerboard drawn behind the canvas, so a transparent
+/// vinyl reads as transparent rather than as the desk showing through.
+class _Checker extends CustomPainter {
+  const _Checker();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const cell = 9.0;
+    canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFF2B2E33));
+    final light = Paint()..color = const Color(0xFF3A3D42);
+    for (var yi = 0; yi * cell < size.height; yi++) {
+      for (var xi = 0; xi * cell < size.width; xi++) {
+        if ((xi + yi).isEven) {
+          canvas.drawRect(
+            Rect.fromLTWH(xi * cell, yi * cell, cell, cell),
+            light,
+          );
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_Checker old) => false;
+}
+
 /// The gesture-time canvas: everything below the held shape, its own sprite
 /// under the live transform, everything above. sRGB and approximate on
 /// purpose — the commit render is the truth; this one only has to keep up
@@ -760,10 +1059,23 @@ class _LiveStack extends CustomPainter {
     final was = EditShape(s.type, List.of(start), s.color);
     final c0 = was.center;
     final c1 = s.center;
-    final r = was.size > 0.01 ? s.size / was.size : 1.0;
+    double rotDeg, r;
+    if (s.isBoxLike || s.isWordLike) {
+      // Parameterised by a stored angle and extents.
+      rotDeg = s.angle - was.angle;
+      r = was.size > 0.01 ? s.size / was.size : 1.0;
+    } else {
+      // Triangle/line: no stored angle. Every editor transform (move/scale/turn) moves the vertices
+      // as a similarity about the centre, so a single reference vertex recovers both the turn and the
+      // scale — which is what lets a triangle preview-rotate instead of snapping only on release.
+      final p0 = Offset(was.data[0], was.data[1]) - c0;
+      final p1 = Offset(s.data[0], s.data[1]) - c1;
+      r = p0.distance > 0.01 ? p1.distance / p0.distance : 1.0;
+      rotDeg = (math.atan2(p1.dy, p1.dx) - math.atan2(p0.dy, p0.dx)) * 180 / math.pi;
+    }
     canvas.save();
     canvas.translate(c1.dx * scale, c1.dy * scale);
-    canvas.rotate((s.angle - was.angle) * math.pi / 180);
+    canvas.rotate(rotDeg * math.pi / 180);
     canvas.scale(r);
     canvas.translate(-c0.dx * scale, -c0.dy * scale);
     canvas.drawImageRect(sprite, src(sprite), dst, paint);
@@ -880,6 +1192,14 @@ class _Handles extends CustomPainter {
     // inside it rotates says the wrong thing about what is being edited — the
     // shape is not becoming a different shape, it is turning.
     final angle = g == null ? (s?.angle ?? 0) : 0.0;
+    final skew = g == null ? (s?.frameSkew ?? 0) : 0.0;
+    // The frame becomes a parallelogram, but the handle GLYPHS must not: only
+    // their POSITIONS shear. shear() slides a point sideways by skew·(distance
+    // below the centre); the rotate-only canvas then turns everything rigidly,
+    // so a square handle stays a square sitting on the parallelogram's corner
+    // instead of collapsing into a rhombus.
+    Offset shear(Offset p) =>
+        skew == 0 ? p : Offset(p.dx + skew * (p.dy - r.center.dy), p.dy);
     canvas.save();
     if (angle != 0) {
       canvas.translate(r.center.dx, r.center.dy);
@@ -889,8 +1209,16 @@ class _Handles extends CustomPainter {
     // Two-tone marching ants: bright dashes crawling over a dark underlay.
     // A single-colour outline — pulsing or not — vanishes into artwork that
     // happens to match it; opposite tones cannot both match what is beneath.
-    canvas.drawRect(r, under);
-    canvas.drawPath(_dashed(Path()..addRect(r), pulse.value), ants);
+    final tl = shear(r.topLeft), tr = shear(r.topRight);
+    final br = shear(r.bottomRight), bl = shear(r.bottomLeft);
+    final outline = Path()
+      ..moveTo(tl.dx, tl.dy)
+      ..lineTo(tr.dx, tr.dy)
+      ..lineTo(br.dx, br.dy)
+      ..lineTo(bl.dx, bl.dy)
+      ..close();
+    canvas.drawPath(outline, under);
+    canvas.drawPath(_dashed(outline, pulse.value), ants);
     // A move-group gets frames but NO grips: it only translates, and handles
     // that resize one shape of five would be a lie.
     if (extras.isNotEmpty) {
@@ -926,7 +1254,12 @@ class _Handles extends CustomPainter {
       (Grip.bottomLeft, 2),
       (Grip.bottomRight, 3),
     ];
-    final points = [r.topLeft, r.topRight, r.bottomLeft, r.bottomRight];
+    final points = [
+      shear(r.topLeft),
+      shear(r.topRight),
+      shear(r.bottomLeft),
+      shear(r.bottomRight),
+    ];
     for (final (grip, i) in corners) {
       final on = hover == grip;
       // The one under the pointer grows and goes white. Without it there is no
@@ -942,11 +1275,61 @@ class _Handles extends CustomPainter {
       );
     }
 
+    // Mid-edge handles: async single-axis resize. Single shape only — a group
+    // scales uniformly, so it keeps corners but shows no edges.
+    if (g == null) {
+      const edges = [
+        (Grip.left, 0),
+        (Grip.right, 1),
+        (Grip.top, 2),
+        (Grip.bottom, 3),
+      ];
+      final epts = [
+        shear(r.centerLeft),
+        shear(r.centerRight),
+        shear(r.topCenter),
+        shear(r.bottomCenter),
+      ];
+      for (final (grip, i) in edges) {
+        final on = hover == grip;
+        final side = on ? 10.0 : 7.0;
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromCenter(center: epts[i], width: side, height: side),
+            const Radius.circular(2),
+          ),
+          on ? lit : handle,
+        );
+      }
+      // Skew handle below the frame, for the kinds the game can shear (word /
+      // triangle). A diamond, so it reads apart from the round rotate knob.
+      if (s != null && s.canSkew) {
+        final sk = shear(Offset(r.center.dx, r.bottom + rotateHandleGap));
+        canvas.drawLine(
+          shear(Offset(r.center.dx, r.bottom)),
+          sk,
+          Paint()
+            ..color = T.teal
+            ..strokeWidth = 1.5,
+        );
+        final onSkew = hover == Grip.skew;
+        final half = onSkew ? 7.0 : 5.5;
+        canvas.save();
+        canvas.translate(sk.dx, sk.dy);
+        canvas.rotate(math.pi / 4);
+        canvas.drawRect(
+          Rect.fromCenter(center: Offset.zero, width: half * 2, height: half * 2),
+          onSkew ? lit : handle,
+        );
+        canvas.restore();
+      }
+    }
+
     // Something to actually hold while turning the shape. Above the selection
     // rather than on a corner, so it cannot be confused with a resize grip.
-    final anchor = Offset(r.center.dx, r.top - rotateHandleGap);
+    final anchor = shear(Offset(r.center.dx, r.top - rotateHandleGap));
     canvas.drawLine(
-      Offset(r.center.dx, r.top),
+      shear(Offset(r.center.dx, r.top)),
       anchor,
       Paint()
         ..color = T.teal
@@ -1028,11 +1411,13 @@ class _Handles extends CustomPainter {
       } else {
         p.addRect(rect);
       }
-      if (s.angle == 0) return p;
+      final sk = s.frameSkew;
+      if (s.angle == 0 && sk == 0) return p;
       final m = Matrix4.identity()
-        ..translateByDouble(rect.center.dx, rect.center.dy, 0, 1)
-        ..rotateZ(s.angle * math.pi / 180)
-        ..translateByDouble(-rect.center.dx, -rect.center.dy, 0, 1);
+        ..translateByDouble(rect.center.dx, rect.center.dy, 0, 1);
+      if (s.angle != 0) m.rotateZ(s.angle * math.pi / 180);
+      if (sk != 0) m.multiply(Matrix4.identity()..setEntry(0, 1, sk));
+      m.translateByDouble(-rect.center.dx, -rect.center.dy, 0, 1);
       return p.transform(m.storage);
     }
     if (s.type == typeTriangle) {
@@ -1212,8 +1597,19 @@ class _Bar extends StatelessWidget {
           Btn(
             context.s('saveToRuns'),
             kind: BtnKind.primary,
-            onTap: () {
-              studio.adoptEdited(editor.toGeometry(), editor.render);
+            onTap: () async {
+              studio.adoptEdited(
+                editor.toGeometry(),
+                editor.render,
+                width: editor.width,
+                height: editor.height,
+                name: editor.referenceName,
+              );
+              // Persist it so it lands in Runs — an edit is not saved by the
+              // engine the way a finished fit is.
+              await studio.saveToLibrary(
+                studio.sourceName ?? editor.referenceName ?? 'Untitled',
+              );
               onClose();
             },
           ),
@@ -1270,6 +1666,20 @@ class _InspectorState extends State<_Inspector> {
   @override
   Widget build(BuildContext context) {
     final s = editor.current;
+    // The layer tree, flattened to a row list: a layer header, then its shapes
+    // (top of the stack first) when it is open. A plain list rather than nested
+    // widgets so the panel below can build LAZILY — only the visible rows, not a
+    // _ShapeRow per shape up to three thousand of them on every notify.
+    final rows = <Object>[];
+    for (final l in editor.layers) {
+      // Shape 0 is the canvas backing (the renderer's background slot), not a
+      // shape the user made — it never appears in the tree, and a layer that
+      // held only it is dropped so a from-scratch vinyl shows just real shapes.
+      final idx = editor.indicesIn(l.id).where((i) => i != 0).toList();
+      if (idx.isEmpty) continue;
+      rows.add(l);
+      if (!_collapsed.contains(l.id)) rows.addAll(idx.reversed);
+    }
     return Glass(
       live: false,
       child: SizedBox(
@@ -1324,6 +1734,20 @@ class _InspectorState extends State<_Inspector> {
                         ),
                       ],
                     ),
+                    if (s.canSkew) ...[
+                      const SizedBox(height: 7),
+                      Row(
+                        children: [
+                          _Field(
+                            'SKEW',
+                            (s.data.length > 5 ? s.data[5] : 0.0)
+                                .toStringAsFixed(2),
+                          ),
+                          const SizedBox(width: 7),
+                          const Spacer(),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 13),
                     Text(context.s('colour').toUpperCase(), style: T.label),
                     const SizedBox(height: 5),
@@ -1460,7 +1884,8 @@ class _InspectorState extends State<_Inspector> {
                   }),
                   const SizedBox(width: 6),
                   Text(
-                    '${editor.shapes.length}',
+                    // Minus the background backing slot — count only real shapes.
+                    '${editor.shapes.length - 1}',
                     style: T.monoText(11, color: T.hint),
                   ),
                 ],
@@ -1470,23 +1895,23 @@ class _InspectorState extends State<_Inspector> {
             // is a label; a layer you can open and see what is inside is the
             // thing the word means everywhere else.
             Expanded(
-              child: ListView(
+              child: ListView.builder(
                 padding: const EdgeInsets.fromLTRB(8, 4, 8, 9),
-                children: [
-                  for (final l in editor.layers) ...[
-                    _LayerRow(
+                itemCount: rows.length,
+                itemBuilder: (context, i) {
+                  final r = rows[i];
+                  if (r is EditLayer) {
+                    return _LayerRow(
                       editor: editor,
-                      layer: l,
-                      open: !_collapsed.contains(l.id),
-                      onToggleOpen: () => _toggleOpen(l.id),
-                    ),
-                    if (!_collapsed.contains(l.id))
-                      // Top of the stack first, so the list reads in the order
-                      // the shapes are painted over each other.
-                      for (final idx in editor.indicesIn(l.id).reversed)
-                        _ShapeRow(editor: editor, index: idx),
-                  ],
-                ],
+                      layer: r,
+                      open: !_collapsed.contains(r.id),
+                      onToggleOpen: () => _toggleOpen(r.id),
+                    );
+                  }
+                  // An index into the shape stack; the flattened list already
+                  // put the top of the stack first.
+                  return _ShapeRow(editor: editor, index: r as int);
+                },
               ),
             ),
           ],
