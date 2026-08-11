@@ -250,7 +250,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		// going below 3000 starts missing the true winner.
 		CoarseSearch: true,
 		CoarseBudget: 3000,
-		CoarseK:      8192,
+		CoarseK:      2048,
 		// FP16/half2 coarse FILTER (the FP32 re-eval still picks the winner): the eval is ALU-bound,
 		// so halving the per-pixel FMA work is the speed lever. Quality stays within coarse-to-fine's
 		// own ranking band; -coarse-fp16=false (CLI) restores FP32 filtering.
