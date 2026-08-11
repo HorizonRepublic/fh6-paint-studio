@@ -2049,7 +2049,7 @@ API void fp_polish_setup(const float* base, int n) {
     bool ok = createBufEx(npix * 16, SDS, dl, false, g_pbase)
            && createBufEx(npix * 16, SDS, dl, false, g_prender)
            && createBufEx(npix * 16, S, dl, false, g_pdC)
-           && createBufEx((size_t)n * 6 * 8, SD, dl, false, g_pP)
+           && createBufEx((size_t)n * 6 * 4, SD, dl, false, g_pP) // float32: see fp_polish_upload
            && createBufEx((size_t)n * 4 * 8, SD, dl, false, g_pcol)
            && createBufEx((size_t)n * 4, SD, dl, false, g_pkinds)
            && createBufEx((size_t)n * 16, SD, dl, false, g_pbbxBuf)
@@ -2262,9 +2262,17 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
         writeTiledForwardDescriptors(); // g_pbelow handle changed -> rebind binding 4
         writeBackwardDescriptors();     // g_pbelow + g_pdcsnap handles changed
     }
-    size_t szP = (size_t)g_pn * 6 * 8, szC = (size_t)g_pn * 4 * 8, szK = (size_t)g_pn * 4;
-    ensureStaging(szP); // szP >= szC >= szK >= n*16 (bbx) >= n*4 (boff)
-    memcpy(g_staging.map, P, szP);     copyBuf(g_staging.buf, g_pP.buf, szP);
+    // Params go to the device as FLOAT32. Every shader that reads them narrowed each value to float
+    // the moment it loaded it, so the doubles bought nothing on device and cost twice the traffic —
+    // and this loop is re-read per pixel per shape. Converting here is the same IEEE round-to-nearest
+    // the shaders were applying, so the values they see are bit-for-bit what they saw before.
+    size_t szP = (size_t)g_pn * 6 * 4, szC = (size_t)g_pn * 4 * 8, szK = (size_t)g_pn * 4;
+    ensureStaging(szC); // szC is now the largest: >= szP >= szK >= n*16 (bbx) >= n*4 (boff)
+    {
+        float* dst = (float*)g_staging.map;
+        for (size_t i = 0; i < (size_t)g_pn * 6; i++) dst[i] = (float)P[i];
+        copyBuf(g_staging.buf, g_pP.buf, szP);
+    }
     memcpy(g_staging.map, col, szC);   copyBuf(g_staging.buf, g_pcol.buf, szC);
     memcpy(g_staging.map, kinds, szK); copyBuf(g_staging.buf, g_pkinds.buf, szK);
     // bbx + boff(int32) -> device for the tiled forward/hard passes
