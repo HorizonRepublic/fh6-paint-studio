@@ -3,17 +3,16 @@
 package inject
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 )
 
 // locateTableByCount finds the live FH6 layer pointer-table for a group whose layer count == count.
 // It scans private writable memory for the uint16 count, derives the group (count - countOffset),
-// reads the table pointer (group + tableOffset), and validates that the table's entries look like
-// real layers. This is the fallback used when neither RTTI nor a cached vtable can anchor on
-// CLiveryGroup. It
-// also returns the group object's address (countAddr-countOffset) so the caller can learn the
-// CLiveryGroup vtable from it (object offset 0) and cache it for faster subsequent locates.
+// validates the table against the std::vector invariant + coverage, and returns the FIRST match with
+// its group address so the caller can learn+cache the vtable for faster subsequent locates. This is
+// the always-works fallback when neither the cache nor RTTI can anchor on CLiveryGroup.
 func locateTableByCount(p *proc, prof GameProfile, count int, log func(string)) (table, group uintptr, err error) {
 	if log == nil {
 		log = func(string) {}
@@ -27,6 +26,7 @@ func locateTableByCount(p *proc, prof GameProfile, count int, log func(string)) 
 	tableOff := uintptr(prof.LayerTableOffset)
 
 	var resultTable, resultGroup uintptr
+	var scanned, nextLog uint64 = 0, 1 << 30 // heartbeat every ~1 GiB so a long scan doesn't read as a freeze
 	p.iterPrivateWritable(func(r region) bool {
 		// Scan the region in chunks so regions LARGER than scanChunk are NOT skipped — after a long
 		// editing session the live editor heap can grow past the old 256 MB whole-region cap, which
@@ -46,17 +46,23 @@ func locateTableByCount(p *proc, prof GameProfile, count int, log func(string)) 
 				base += n
 				continue
 			}
-			for off := 0; off+2 <= len(mem); off++ {
-				if mem[off] != needle[0] || mem[off+1] != needle[1] {
-					continue
+			// bytes.Index is SIMD-accelerated; the old byte-by-byte compare walked the whole
+			// multi-GB editor heap in interpreted Go, which was the dominant cost of a first-inject
+			// count scan. Matching offsets are identical, so the validated table is unchanged.
+			for pos := 0; ; {
+				i := bytes.Index(mem[pos:], needle)
+				if i < 0 {
+					break
 				}
+				off := pos + i
+				pos = off + 1
 				countAddr := base + uintptr(off)
 				if countAddr < countOff {
 					continue
 				}
 				groupAddr := countAddr - countOff
-				tbl, ok := p.readU64(groupAddr + tableOff)
-				if !ok || !isUserPointer(tbl) || !p.isPrivateWritable(tbl) {
+				tbl, ok := tableVectorOK(p, groupAddr+tableOff, count)
+				if !ok {
 					continue
 				}
 				if scoreTable(p, prof, tbl, min(count, 64)) <= 0 {
@@ -69,6 +75,11 @@ func locateTableByCount(p *proc, prof GameProfile, count int, log func(string)) 
 				return false // first validated table wins
 			}
 			base += n
+			scanned += uint64(n)
+			if scanned >= nextLog {
+				log(fmt.Sprintf("count scan: %d MB searched…", scanned/(1024*1024)))
+				nextLog += 1 << 30
+			}
 		}
 		return true
 	})
@@ -78,6 +89,25 @@ func locateTableByCount(p *proc, prof GameProfile, count int, log func(string)) 
 	}
 	log(fmt.Sprintf("located layer table via layout-count scan @ 0x%x", resultTable))
 	return resultTable, resultGroup, nil
+}
+
+// tableVectorOK validates the CLiveryGroup's layer table against the std::vector<layer*> invariant.
+// The vector header at tableSlot is three consecutive pointers {begin, end, cap}, so a table holding
+// exactly `count` 8-byte entries must satisfy end == begin + count*8 and cap >= end. This is a
+// near-zero-cost, highly selective filter (two extra reads) that confirms the entry count before any
+// per-layer sampling — without it, every stray count value sitting above a plausible pointer dragged
+// the scan into a full coverage walk of thousands of reads. Returns the validated begin pointer.
+func tableVectorOK(p *proc, tableSlot uintptr, count int) (uintptr, bool) {
+	begin, ok := p.readU64(tableSlot)
+	if !ok || !isUserPointer(begin) || !p.isPrivateWritable(begin) {
+		return 0, false
+	}
+	end, okEnd := p.readU64(tableSlot + 8)
+	capacity, okCap := p.readU64(tableSlot + 16)
+	if !okEnd || !okCap || end != begin+uintptr(count)*8 || capacity < end {
+		return 0, false
+	}
+	return begin, true
 }
 
 // scoreLayerPointer scores how layer-like a pointer's target is (0..5).

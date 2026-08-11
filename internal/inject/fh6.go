@@ -2,6 +2,7 @@ package inject
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 
 	"fh6-paint-studio/internal/model"
@@ -16,11 +17,18 @@ type FH6 struct {
 	Layers      int        // exact template layer count of the open FH6 group (required)
 	Canvas      *CanvasMap // nil -> DefaultCanvasMap(w,h)
 	ClearUnused bool       // blank the template's leftover layers after the art
-	Log         func(string)
+	// WritePaths also rewrites each layer's mesh-file path (layer +0x80) to its shape's mesh, so FH6
+	// rebuilds the geometry live instead of showing the template's meshes until a save+reload. The
+	// resource pointer at 0xA8 is still never touched — the game re-derives it from the path itself.
+	WritePaths bool
+	Log        func(string)
 }
 
-// NewFH6 returns an FH6 injector with the default profile and clear-unused enabled.
-func NewFH6() *FH6 { return &FH6{Profile: FH6Profile(), ClearUnused: true} }
+// NewFH6 returns an FH6 injector with the default profile and clear-unused enabled. Live path
+// rewriting is on by default (set FH6_NOPATHS=1 to fall back to word-only injection).
+func NewFH6() *FH6 {
+	return &FH6{Profile: FH6Profile(), ClearUnused: true, WritePaths: os.Getenv("FH6_NOPATHS") == ""}
+}
 
 // Apply is the whole injection as one call: build the injector, map the canvas, write, and narrate.
 //
