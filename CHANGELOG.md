@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.2.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.1.1...v2.2.0) (2026-08-11)
+
+
+### Features
+
+* **editor:** onion-skin overlay, from-scratch canvas with a custom reference, and save-to-library ([3a68595](https://github.com/HorizonRepublic/fh6-paint-studio/commit/3a6859566c4ca72380e80b5f89ca4a61476caf57))
+* **editor:** skew handle, independent side resize, and a shape-hugging selection frame ([3a68595](https://github.com/HorizonRepublic/fh6-paint-studio/commit/3a6859566c4ca72380e80b5f89ca4a61476caf57))
+* **inject:** faster, restart-safe layer-table locate ([3a68595](https://github.com/HorizonRepublic/fh6-paint-studio/commit/3a6859566c4ca72380e80b5f89ca4a61476caf57))
+* **inject:** rebuild vinyl meshes on import so a paste renders without a reload ([3a68595](https://github.com/HorizonRepublic/fh6-paint-studio/commit/3a6859566c4ca72380e80b5f89ca4a61476caf57))
+
+
+### Performance
+
+* **engine:** parallelise the colour, edge, weight, and polish hotspots ([3a68595](https://github.com/HorizonRepublic/fh6-paint-studio/commit/3a6859566c4ca72380e80b5f89ca4a61476caf57))
+
+
+### Bug Fixes
+
+* **deps:** update module gioui.org to v0.10.2 ([#61](https://github.com/HorizonRepublic/fh6-paint-studio/issues/61)) ([31c9d70](https://github.com/HorizonRepublic/fh6-paint-studio/commit/31c9d707f35bc932e3c69f83dd92b32c87076ea5))
+* **engine:** close a run-registration race and clamp Vulkan candidate counts ([3a68595](https://github.com/HorizonRepublic/fh6-paint-studio/commit/3a6859566c4ca72380e80b5f89ca4a61476caf57))
+
 ## [2.1.1](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.1.0...v2.1.1) (2026-08-10)
 
 
