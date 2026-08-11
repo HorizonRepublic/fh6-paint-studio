@@ -3,11 +3,44 @@ package metric
 import (
 	"math"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"fh6-paint-studio/internal/model"
 )
+
+// heRows runs fn over row bands [y0,y1) of h, one per CPU, concurrently. For loops whose rows write
+// disjoint outputs and carry no cross-row reduction.
+func heRows(h int, fn func(y0, y1 int)) {
+	nb := runtime.GOMAXPROCS(0)
+	if nb > h {
+		nb = h
+	}
+	if nb <= 1 {
+		fn(0, h)
+		return
+	}
+	rows := (h + nb - 1) / nb
+	var wg sync.WaitGroup
+	for b := 0; b < nb; b++ {
+		y0 := b * rows
+		if y0 >= h {
+			break
+		}
+		y1 := y0 + rows
+		if y1 > h {
+			y1 = h
+		}
+		wg.Add(1)
+		go func(y0, y1 int) {
+			defer wg.Done()
+			fn(y0, y1)
+		}(y0, y1)
+	}
+	wg.Wait()
+}
 
 // Calibration of HardEdgeMap. edgeTau is the Sobel magnitude of a real drawn edge (~0.09 sRGB step;
 // shading stays below); densSat is the edge-pixel density at which a cell reads as fully structured;
@@ -51,11 +84,13 @@ func HardEdgeMap(target []float32, w, h int) []float32 {
 	// contrast (linear light crushes darks вЂ” dark-on-dark line-work vanished from a linear-luma
 	// map), and keep the channels separate so chroma-only edges (same luma) still register.
 	chans := [3][]float32{make([]float32, w*h), make([]float32, w*h), make([]float32, w*h)}
-	for i := 0; i < w*h; i++ {
-		for c := 0; c < 3; c++ {
-			chans[c][i] = model.LinearToSRGB(target[i*4+c])
+	heRows(h, func(y0, y1 int) {
+		for i := y0 * w; i < y1*w; i++ {
+			for c := 0; c < 3; c++ {
+				chans[c][i] = model.LinearToSRGB(target[i*4+c])
+			}
 		}
-	}
+	})
 	at := func(pl []float32, x, y int) float64 {
 		if x < 0 {
 			x = 0
@@ -75,28 +110,63 @@ func HardEdgeMap(target []float32, w, h int) []float32 {
 	vx := make([]float64, cw*ch)
 	vy := make([]float64, cw*ch)
 	msum := make([]float64, cw*ch)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			var m, gxb, gyb float64
-			for c := 0; c < 3; c++ {
-				pl := chans[c]
-				gx := (at(pl, x+1, y-1) + 2*at(pl, x+1, y) + at(pl, x+1, y+1)) - (at(pl, x-1, y-1) + 2*at(pl, x-1, y) + at(pl, x-1, y+1))
-				gy := (at(pl, x-1, y+1) + 2*at(pl, x, y+1) + at(pl, x+1, y+1)) - (at(pl, x-1, y-1) + 2*at(pl, x, y-1) + at(pl, x+1, y-1))
-				if mm := math.Hypot(gx, gy); mm > m {
-					m, gxb, gyb = mm, gx, gy
+	sobel := func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := 0; x < w; x++ {
+				var m, gxb, gyb float64
+				for c := 0; c < 3; c++ {
+					pl := chans[c]
+					gx := (at(pl, x+1, y-1) + 2*at(pl, x+1, y) + at(pl, x+1, y+1)) - (at(pl, x-1, y-1) + 2*at(pl, x-1, y) + at(pl, x-1, y+1))
+					gy := (at(pl, x-1, y+1) + 2*at(pl, x, y+1) + at(pl, x+1, y+1)) - (at(pl, x-1, y-1) + 2*at(pl, x, y-1) + at(pl, x+1, y-1))
+					if mm := math.Hypot(gx, gy); mm > m {
+						m, gxb, gyb = mm, gx, gy
+					}
 				}
+				c := (y/cell)*cw + x/cell
+				pxN[c]++
+				if m < edgeTau {
+					continue
+				}
+				edgeN[c]++
+				th2 := 2 * math.Atan2(gyb, gxb) // doubled angle: opposite gradients = same orientation
+				vx[c] += m * math.Cos(th2)
+				vy[c] += m * math.Sin(th2)
+				msum[c] += m
 			}
-			c := (y/cell)*cw + x/cell
-			pxN[c]++
-			if m < edgeTau {
-				continue
-			}
-			edgeN[c]++
-			th2 := 2 * math.Atan2(gyb, gxb) // doubled angle: opposite gradients = same orientation
-			vx[c] += m * math.Cos(th2)
-			vy[c] += m * math.Sin(th2)
-			msum[c] += m
 		}
+	}
+	// Cell-aligned row bands: a band owns whole cell-rows, so every cell is accumulated entirely
+	// within one band, in row-major order — the exact order the serial loop used. Per-cell sums are
+	// therefore bit-identical (float addition is not associative), and bands touch disjoint cells.
+	nb := runtime.GOMAXPROCS(0)
+	if nb > ch {
+		nb = ch
+	}
+	if nb <= 1 {
+		sobel(0, h)
+	} else {
+		cellRows := (ch + nb - 1) / nb
+		var wg sync.WaitGroup
+		for b := 0; b < nb; b++ {
+			cy0 := b * cellRows
+			if cy0 >= ch {
+				break
+			}
+			cy1 := cy0 + cellRows
+			if cy1 > ch {
+				cy1 = ch
+			}
+			y0, y1 := cy0*cell, cy1*cell
+			if y1 > h {
+				y1 = h
+			}
+			wg.Add(1)
+			go func(y0, y1 int) {
+				defer wg.Done()
+				sobel(y0, y1)
+			}(y0, y1)
+		}
+		wg.Wait()
 	}
 	cellH := make([]float64, cw*ch)
 	for c := range cellH {

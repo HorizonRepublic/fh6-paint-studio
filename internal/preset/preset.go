@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"fh6-paint-studio/internal/engine"
 	"fh6-paint-studio/internal/imageio"
@@ -625,30 +627,59 @@ func BuildWeightMap(prep imageio.Prepared, w, h int, c Choices, useV2 bool, wstr
 		clampY, capF := DarkWeightParams(DarkFrac(prep.Pixels))
 		expo, eps := PerceptualWeightExp()
 		wp := make([]float32, w*h)
+		// Compute the per-pixel weight in PARALLEL (each pixel independent), then sum it SERIALLY in
+		// index order below. The mean feeds the greedy's argmax normalisation, and float addition is
+		// not associative, so the reduction must keep the serial order to stay bit-identical — only the
+		// pow-per-pixel work fans out.
+		{
+			nb := runtime.GOMAXPROCS(0)
+			if nb > h {
+				nb = h
+			}
+			rows := (h + nb - 1) / nb
+			var wg sync.WaitGroup
+			for b := 0; b < nb; b++ {
+				lo := b * rows * w
+				if lo >= w*h {
+					break
+				}
+				hi := (b + 1) * rows * w
+				if hi > w*h {
+					hi = w * h
+				}
+				wg.Add(1)
+				go func(lo, hi int) {
+					defer wg.Done()
+					for i := lo; i < hi; i++ {
+						y := 0.2126*prep.Pixels[i*4] + 0.7152*prep.Pixels[i*4+1] + 0.0722*prep.Pixels[i*4+2]
+						yd := float64(y)
+						var f float32
+						if eps > 0 {
+							// Lightness model: a softened singularity instead of a hard clamp, so the
+							// weight is continuous through the darks rather than flat below a threshold.
+							f = float32(math.Pow(yd+eps, -expo))
+						} else {
+							// Left as the original expression, not refactored into a single pow: greedy is
+							// an argmax, so even a last-digit change in the weight moves the trajectory.
+							// Rewriting 0.4396²·y^-1.1666 with a rounded constant shifted dE 7.42 -> 7.53.
+							if yd < clampY {
+								yd = clampY // clamp the dark blow-up of the sRGB derivative
+							}
+							d := 0.4396 * math.Pow(yd, -0.5833) // d/dlin of 1.055*lin^(1/2.4)-0.055
+							f = float32(d * d)
+						}
+						if f > float32(capF) {
+							f = float32(capF)
+						}
+						wp[i] = f
+					}
+				}(lo, hi)
+			}
+			wg.Wait()
+		}
 		var sum float64
 		for i := 0; i < w*h; i++ {
-			y := 0.2126*prep.Pixels[i*4] + 0.7152*prep.Pixels[i*4+1] + 0.0722*prep.Pixels[i*4+2]
-			yd := float64(y)
-			var f float32
-			if eps > 0 {
-				// Lightness model: a softened singularity instead of a hard clamp, so the weight is
-				// continuous through the darks rather than flat below a threshold.
-				f = float32(math.Pow(yd+eps, -expo))
-			} else {
-				// Left as the original expression, not refactored into a single pow: greedy is an
-				// argmax, so even a last-digit change in the weight moves the trajectory. Rewriting
-				// 0.4396²·y^-1.1666 with a rounded constant shifted dE 7.42 -> 7.53 on img_9.
-				if yd < clampY {
-					yd = clampY // clamp the dark blow-up of the sRGB derivative
-				}
-				d := 0.4396 * math.Pow(yd, -0.5833) // d/dlin of 1.055*lin^(1/2.4)-0.055
-				f = float32(d * d)
-			}
-			if f > float32(capF) {
-				f = float32(capF)
-			}
-			wp[i] = f
-			sum += float64(f)
+			sum += float64(wp[i])
 		}
 		mean := float32(sum / float64(len(wp)))
 		if mean > 0 {

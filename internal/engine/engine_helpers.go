@@ -2,6 +2,8 @@ package engine
 
 import (
 	"math"
+	"runtime"
+	"sync"
 
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/model"
@@ -82,21 +84,55 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 	sumR2 := make([]float64, n)
 	sumG2 := make([]float64, n)
 	sumB2 := make([]float64, n)
-	for idx := 0; idx < w*h; idx++ {
-		j := owner[idx]
-		if j < 0 {
-			continue
+	// Accumulate each shape's owned-pixel sums, partitioned by SHAPE RANGE (not by pixels). A worker
+	// owns a contiguous block of shape indices and scans every pixel in ascending index order, summing
+	// only the pixels its shapes own. Each shape's sum then lands in the EXACT order the serial loop
+	// produced — float addition is not associative, so pixel-banding with partial-sum merges would
+	// change the result and move the shipped colours — and workers write disjoint shape slots, so
+	// there is no race. Bit-identical to the serial reduction.
+	accum := func(lo, hi int32) {
+		for idx := 0; idx < w*h; idx++ {
+			j := owner[idx]
+			if j < lo || j >= hi {
+				continue
+			}
+			wt := float64(weight[idx])
+			p := idx * 4
+			tr, tg, tb := float64(target[p]), float64(target[p+1]), float64(target[p+2])
+			sumW[j] += wt
+			sumR[j] += wt * tr
+			sumG[j] += wt * tg
+			sumB[j] += wt * tb
+			sumR2[j] += wt * tr * tr
+			sumG2[j] += wt * tg * tg
+			sumB2[j] += wt * tb * tb
 		}
-		wt := float64(weight[idx])
-		p := idx * 4
-		tr, tg, tb := float64(target[p]), float64(target[p+1]), float64(target[p+2])
-		sumW[j] += wt
-		sumR[j] += wt * tr
-		sumG[j] += wt * tg
-		sumB[j] += wt * tb
-		sumR2[j] += wt * tr * tr
-		sumG2[j] += wt * tg * tg
-		sumB2[j] += wt * tb * tb
+	}
+	nb := runtime.GOMAXPROCS(0)
+	if nb > n {
+		nb = n
+	}
+	if nb <= 1 {
+		accum(0, int32(n))
+	} else {
+		chunk := (n + nb - 1) / nb
+		var wg sync.WaitGroup
+		for b := 0; b < nb; b++ {
+			lo := int32(b * chunk)
+			if int(lo) >= n {
+				break
+			}
+			hi := int32((b + 1) * chunk)
+			if int(hi) > n {
+				hi = int32(n)
+			}
+			wg.Add(1)
+			go func(lo, hi int32) {
+				defer wg.Done()
+				accum(lo, hi)
+			}(lo, hi)
+		}
+		wg.Wait()
 	}
 	for j := range shapes {
 		if sumW[j] <= 0 || !opaqueShape(shapes[j]) {

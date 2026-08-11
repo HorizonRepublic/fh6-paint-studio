@@ -263,6 +263,21 @@ func newRun(be backend.Backend, opt Options) *run {
 		aspectCap = 0
 	}
 
+	// Region-weighted polish terms: build the 1−HardEdgeMap ONCE here instead of on every polish call.
+	// applyPolish takes opt by value, so base, back-fit, LOO re-polish, anneal and soft-swap each
+	// rebuilt this native-res Sobel map from scratch. The map depends only on the frozen target, so one
+	// build feeds them all — a path that derives its options inherits it through the slice, and any that
+	// does not simply rebuilds as before (identical value, so output is unchanged either way).
+	if opt.TermRegionWeight && opt.PolishOpts.TermWeight == nil &&
+		(opt.PolishOpts.FalseEdgeLambda > 0 || opt.PolishOpts.EagleLambda > 0) {
+		hard := metric.HardEdgeMap(be.Target(), w, h)
+		tw := make([]float32, len(hard))
+		for i, hv := range hard {
+			tw[i] = 1 - hv
+		}
+		opt.PolishOpts.TermWeight = tw
+	}
+
 	// Detail-weighted sampling (opt-in via DetailStrength>0): precompute a target-detail
 	// field at grid resolution ONCE. Past DetailSamplingStart progress, it biases the
 	// candidate-centre sampler toward intrinsically detailed regions (faces, linework) so

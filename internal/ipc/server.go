@@ -153,13 +153,39 @@ func (s *Server) generate(req Request) {
 	}
 
 	start := time.Now()
-	cancel := run.Start(func(ev runner.Event) {
+
+	// Register the run BEFORE starting it. run.Start's callback fires on its own
+	// goroutine and can emit a terminal event — whose finish() deletes the run —
+	// before Start even returns. Storing the canceller afterwards would then
+	// re-insert a defunct entry that never gets cleaned up. A placeholder holds
+	// the slot; the real canceller is patched in once Start hands it over, and a
+	// cancel that lands in the gap is honoured then.
+	var (
+		cancelMu   sync.Mutex
+		realCancel func()
+		cancelled  bool
+	)
+	s.mu.Lock()
+	s.runs[req.ID] = func() {
+		cancelMu.Lock()
+		defer cancelMu.Unlock()
+		cancelled = true
+		if realCancel != nil {
+			realCancel()
+		}
+	}
+	s.mu.Unlock()
+
+	rc := run.Start(func(ev runner.Event) {
 		s.emit(req.ID, ev, start, p.Output)
 	})
 
-	s.mu.Lock()
-	s.runs[req.ID] = cancel
-	s.mu.Unlock()
+	cancelMu.Lock()
+	realCancel = rc
+	if cancelled {
+		rc()
+	}
+	cancelMu.Unlock()
 }
 
 // emit translates one engine event onto the wire. Frames go out as binary; everything else is JSON.
@@ -386,9 +412,17 @@ func (s *Server) frame(id int32, img *image.NRGBA) {
 	}
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
-	pix := make([]byte, w*h*4)
-	for y := 0; y < h; y++ {
-		copy(pix[y*w*4:(y+1)*w*4], img.Pix[y*img.Stride:y*img.Stride+w*4])
+	var pix []byte
+	if img.Stride == w*4 {
+		// Contiguous rows — hand the pixels straight over. The write completes
+		// under the lock below before this returns, so a buffer the runner later
+		// reuses is already on the wire.
+		pix = img.Pix[:w*h*4]
+	} else {
+		pix = make([]byte, w*h*4)
+		for y := 0; y < h; y++ {
+			copy(pix[y*w*4:(y+1)*w*4], img.Pix[y*img.Stride:y*img.Stride+w*4])
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
