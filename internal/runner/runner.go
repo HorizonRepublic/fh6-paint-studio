@@ -84,6 +84,10 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		opt := r.Options
 		opt.Cancel = stop.Load
 		opt.Status = func(stage string) { onEvent(Status{Stage: stage}) }
+		// Already throttled by the engine (a few a second), so it can go straight onto the event stream.
+		opt.OnPhase = func(p engine.PhaseProgress) {
+			onEvent(Phase{Name: p.Phase, PhaseFrac: p.PhaseFrac, Overall: p.Overall, ETA: p.ETA})
+		}
 		total := opt.StopAt
 		if total < 1 {
 			total = 1

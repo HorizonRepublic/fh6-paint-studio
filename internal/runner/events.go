@@ -47,6 +47,16 @@ type Failed struct{ Err error }
 // Log is a human-readable line for the execution log.
 type Log struct{ Line string }
 
+// Phase is run-wide progress with a time estimate that spans EVERY phase, not just shape
+// placement. The shape counter can only describe the greedy loop; this one keeps counting through
+// the polish and the post-passes, which is most of the time the old bar spent frozen at 100%.
+type Phase struct {
+	Name      string
+	PhaseFrac float64
+	Overall   float64
+	ETA       time.Duration
+}
+
 // Status names the current post-greedy phase (polish / back-fit / standout)
 // so the UI can show what it's doing once the shape counter has hit 100%. Empty clears it.
 type Status struct{ Stage string }
@@ -57,3 +67,4 @@ func (Done) isEvent()     {}
 func (Failed) isEvent()   {}
 func (Log) isEvent()      {}
 func (Status) isEvent()   {}
+func (Phase) isEvent()    {}

@@ -50,6 +50,14 @@ type etaTracker struct {
 	last   time.Time
 	emit   func(PhaseProgress)
 	done   chan struct{}
+	seq    uint64 // snapshot order, assigned under mu
+
+	// emitMu serialises delivery. The snapshot is taken under mu and handed off OUTSIDE it, so the
+	// callback (a UI pump, an IPC write) can never stall the engine's hot loop behind the heartbeat.
+	// The cost of that is two goroutines racing to deliver: without ordering here, an older snapshot
+	// can land after a newer one and the bar visibly jumps backwards.
+	emitMu  sync.Mutex
+	emitted uint64
 }
 
 // greedyWeight is the shape-placing loop, which dominates a default run.
@@ -177,6 +185,11 @@ func (t *etaTracker) enter(name string) {
 // setFrac reports progress inside the running phase. Anything with a countable unit of work calls it
 // — placed shapes, polish iterations, colour-solve iterations — and the phases that have no such unit
 // simply hold at 0 and are carried by their weight alone.
+//
+// Progress inside a phase only ever moves FORWARD. One phase can contain several sweeps of the same
+// counter: the back-fit trio polishes two branches to compare them, and each LOO round re-polishes
+// from scratch, so the iteration counter restarts at 1 partway through. Taking that literally sent
+// the bar backwards, which is the one thing a progress bar must never do.
 func (t *etaTracker) setFrac(f float64) {
 	if t == nil {
 		return
@@ -188,6 +201,10 @@ func (t *etaTracker) setFrac(f float64) {
 		f = 1
 	}
 	t.mu.Lock()
+	if f <= t.frac {
+		t.mu.Unlock()
+		return
+	}
 	t.frac = f
 	t.mu.Unlock()
 	t.publish(false)
@@ -210,12 +227,18 @@ func (t *etaTracker) publish(force bool) {
 	frac := t.frac
 	done := w / t.total
 	elapsed := now.Sub(t.start)
+	t.seq++
+	seq := t.seq
 	t.mu.Unlock()
 	var eta time.Duration
 	if done > 0.01 && elapsed >= etaMinElapsed {
 		eta = time.Duration(float64(elapsed) * (1 - done) / done)
 	}
-	// Emitted outside the lock: the callback is the caller's (a UI pump, an IPC write) and must not
-	// be able to stall the engine goroutine behind the heartbeat, or vice versa.
+	t.emitMu.Lock()
+	defer t.emitMu.Unlock()
+	if seq <= t.emitted {
+		return // a newer snapshot already went out; this one would move the bar backwards
+	}
+	t.emitted = seq
 	t.emit(PhaseProgress{Phase: name, PhaseFrac: frac, Overall: done, ETA: eta})
 }
