@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -34,6 +35,20 @@ const etaMinElapsed = 1500 * time.Millisecond
 // of events at the UI.
 const etaEmitEvery = 250 * time.Millisecond
 
+// etaPhaseTimeCap bounds how far the time interpolation may carry a phase on its own. Only the phase
+// ending is allowed to complete it: a bar that reaches the end of a step while the step is still
+// running is a worse lie than one that is slightly behind.
+const etaPhaseTimeCap = 0.95
+
+// Smoothing is ASYMMETRIC, because the two directions mean different things. A rising raw estimate
+// usually means progress has stalled inside a phase while the clock keeps running, and following it
+// makes the countdown climb — so it is resisted. A falling one means work genuinely finished, and a
+// countdown that lingers above the truth is the more annoying error — so it is followed quickly.
+const (
+	etaSmoothUp   = 0.12
+	etaSmoothDown = 0.50
+)
+
 type etaPhase struct {
 	name   string
 	weight float64
@@ -51,6 +66,17 @@ type etaTracker struct {
 	emit   func(PhaseProgress)
 	done   chan struct{}
 	seq    uint64 // snapshot order, assigned under mu
+
+	// Per-phase time fallback. A phase's own counter is not always a clean 0..1 ramp: the polish
+	// extends its budget mid-flight (the fine phase raises the denominator), stops early when it
+	// converges, and runs several sweeps inside one phase (two back-fit branches, a re-polish per LOO
+	// round). Progress may only move forward, so a restarted counter leaves the bar STOPPED until it
+	// climbs past its old mark — and a stalled bar with a live clock makes the estimate creep upward
+	// and then collapse. Interpolating the phase over its expected duration keeps it moving.
+	phaseStart  time.Time
+	phaseExpect time.Duration
+
+	etaEMA float64 // smoothed estimate; the raw one steps whenever a phase boundary lands
 
 	// emitMu serialises delivery. The snapshot is taken under mu and handed off OUTSIDE it, so the
 	// callback (a UI pump, an IPC write) can never stall the engine's hot loop behind the heartbeat.
@@ -178,6 +204,14 @@ func (t *etaTracker) enter(name string) {
 		t.phases[t.idx].name = name
 	}
 	t.frac = 0
+	// How long this phase should take, from the pace the run has shown so far: the weights say how
+	// the work divides, and the elapsed time says what the division is worth on this machine.
+	t.phaseStart = time.Now()
+	t.phaseExpect = 0
+	if done := t.doneW / t.total; done > 0.05 && t.idx < len(t.phases) {
+		totalExpect := float64(t.phaseStart.Sub(t.start)) / done
+		t.phaseExpect = time.Duration(totalExpect * t.phases[t.idx].weight / t.total)
+	}
 	t.mu.Unlock()
 	t.publish(true)
 }
@@ -220,20 +254,43 @@ func (t *etaTracker) publish(force bool) {
 	t.last = now
 	w := t.doneW
 	name := ""
+	frac := t.frac
 	if t.idx < len(t.phases) {
-		w += t.frac * t.phases[t.idx].weight
+		// Whichever says more: the phase's own counter, or the share of its expected duration that
+		// has passed. The time term is capped below 1 — only the phase actually ending may claim the
+		// last of it, or the bar would sit full while work continues.
+		if t.phaseExpect > 0 {
+			if tf := float64(now.Sub(t.phaseStart)) / float64(t.phaseExpect); tf > frac {
+				frac = math.Min(tf, etaPhaseTimeCap)
+			}
+		}
+		w += frac * t.phases[t.idx].weight
 		name = t.phases[t.idx].name
 	}
-	frac := t.frac
 	done := w / t.total
 	elapsed := now.Sub(t.start)
+	var eta time.Duration
+	if done > 0.01 && elapsed >= etaMinElapsed {
+		raw := float64(elapsed) * (1 - done) / done
+		// Smoothed: a phase boundary steps the estimate, and the run's own pace varies. Following the
+		// raw value makes the number jitter; an average that still converges within a few updates
+		// reads as a countdown rather than a guess being retaken.
+		switch {
+		case t.etaEMA <= 0, raw < t.etaEMA*0.5:
+			// Either the first reading, or the smoothed one is stale by more than half — which is what
+			// the end of a phase looks like. Smoothing a number that is now plainly wrong just keeps
+			// showing the wrong number.
+			t.etaEMA = raw
+		case raw < t.etaEMA:
+			t.etaEMA += etaSmoothDown * (raw - t.etaEMA)
+		default:
+			t.etaEMA += etaSmoothUp * (raw - t.etaEMA)
+		}
+		eta = time.Duration(t.etaEMA)
+	}
 	t.seq++
 	seq := t.seq
 	t.mu.Unlock()
-	var eta time.Duration
-	if done > 0.01 && elapsed >= etaMinElapsed {
-		eta = time.Duration(float64(elapsed) * (1 - done) / done)
-	}
 	t.emitMu.Lock()
 	defer t.emitMu.Unlock()
 	if seq <= t.emitted {
