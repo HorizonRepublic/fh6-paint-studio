@@ -135,6 +135,12 @@ func TestPolishGradientFD(t *testing.T) {
 
 		for si := range ps {
 			for k := 0; k < 6; k++ { // 6 geo slots (ellipse/rect leave slot 5 = 0; triangle uses all 6)
+				// Slot 5 is skew for box kinds: a frozen editor field polish never optimises
+				// (analytic grad 0), while the render does respond to it — so an FD comparison on it
+				// is meaningless. Only the triangle uses slot 5 as a real vertex coordinate.
+				if k == 5 && ps[si].kind != model.KindTriangle {
+					continue
+				}
 				k := k
 				si := si
 				check(
