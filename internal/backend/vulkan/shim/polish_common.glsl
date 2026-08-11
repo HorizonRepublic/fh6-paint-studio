@@ -37,11 +37,13 @@ bool insideShape(int kind, float P[6], int x, int y) {
         float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
         float th = P[4] * PDEG2RAD, c = cos(th), s = sin(th);
         float dx = px - cx, dy = py - cy, xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        xr -= P[5] * yr; // inverse skew shear (parallelogram) — mirrors raster.RectInside
         return abs(xr) <= hw && abs(yr) <= hh;
     } else {
         float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
         float th = P[4] * PDEG2RAD, c = cos(th), s = sin(th);
         float dx = px - cx, dy = py - cy, xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        xr -= P[5] * yr; // skew (0 for generated ellipses) — mirrors raster.EllipseInside
         return xr * xr / (rx * rx) + yr * yr / (ry * ry) <= 1.0;
     }
 }
@@ -127,31 +129,35 @@ float ellipseSDFG(float P[6], float px, float py, out float g[6]) {
     return (k - 1.0) * m;
 }
 
-// rectSDFGrad: exact box SDF + gradient wrt P[0..4].
+// rectSDFGrad: box SDF + gradient wrt P[0..5]. Slot 5 = skew: xs=xr-skew*yr makes the rectangle a
+// parallelogram, mirroring internal/engine/polish_sdf.go rectSDFGrad (dxs/dcx=-(cs+k*sn),
+// dxs/dcy=-(sn-k*cs), dxs/dth=yr+k*xr, dxs/dskew=-yr). The polish freezes slot 5 host-side unless the
+// skew DOF is on, so skew=0 reduces exactly to the plain rotated rect (bit-identical default).
 float rectSDFG(float P[6], float px, float py, out float g[6]) {
     float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
     float th = P[4] * PDEG2RAD, cs = cos(th), sn = sin(th);
     float dx = px - cx, dy = py - cy;
     float xr = dx * cs + dy * sn, yr = -dx * sn + dy * cs;
-    float sx = psign(xr), sy = psign(yr);
-    float qx = abs(xr) - hw, qy = abs(yr) - hh;
-    float dqx[5]; dqx[0] = sx * (-cs); dqx[1] = sx * (-sn); dqx[2] = -1.0; dqx[3] = 0.0; dqx[4] = sx * yr;
-    float dqy[5]; dqy[0] = sy * (sn); dqy[1] = sy * (-cs); dqy[2] = 0.0; dqy[3] = -1.0; dqy[4] = sy * (-xr);
+    float k = P[5];
+    float xs = xr - k * yr;
+    float sx = psign(xs), sy = psign(yr);
+    float qx = abs(xs) - hw, qy = abs(yr) - hh;
+    float dqx[6]; dqx[0] = sx * -(cs + k * sn); dqx[1] = sx * -(sn - k * cs); dqx[2] = -1.0; dqx[3] = 0.0; dqx[4] = sx * (yr + k * xr); dqx[5] = sx * (-yr);
+    float dqy[6]; dqy[0] = sy * (sn); dqy[1] = sy * (-cs); dqy[2] = 0.0; dqy[3] = -1.0; dqy[4] = sy * (-xr); dqy[5] = 0.0;
     float sdf;
-    g[5] = 0.0;
     if (qx > 0.0 || qy > 0.0) {
         float mqx = max(qx, 0.0), mqy = max(qy, 0.0);
         sdf = sqrt(mqx * mqx + mqy * mqy);
         float inv = sdf > 1e-9 ? 1.0 / sdf : 0.0;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 6; i++) {
             float t = 0.0;
             if (qx > 0.0) t += mqx * dqx[i];
             if (qy > 0.0) t += mqy * dqy[i];
             g[i] = t * inv;
         }
     } else {
-        if (qx >= qy) { for (int i = 0; i < 5; i++) g[i] = dqx[i]; sdf = qx; }
-        else          { for (int i = 0; i < 5; i++) g[i] = dqy[i]; sdf = qy; }
+        if (qx >= qy) { for (int i = 0; i < 6; i++) g[i] = dqx[i]; sdf = qx; }
+        else          { for (int i = 0; i < 6; i++) g[i] = dqy[i]; sdf = qy; }
     }
     g[4] *= PDEG2RAD;
     return sdf;
