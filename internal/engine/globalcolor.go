@@ -95,11 +95,83 @@ func gcBuild(layers []model.Shape, w, h int) []gcLayer {
 	return out
 }
 
-// gcParallelMin is the layer footprint (in pixels) above which that single layer's composite splits
-// its rows across cores. A layer's own pixels are independent — out[p] reads and writes only p — so
-// the split is bit-identical to the serial blend; the threshold keeps the many small layers, where a
-// goroutine batch would cost more than the blend itself, on the serial path.
-const gcParallelMin = 1 << 16
+// gcBandRows is the smallest row count worth giving a band: below it the goroutine costs more than
+// the rows it walks.
+const gcBandRows = 8
+
+// gcBands splits the canvas into contiguous row bands, one per core.
+//
+// Every stack walk here is sequential over LAYERS — the composite blends bottom-up into a shared
+// canvas, the gradient carries transmittance top-down — so the layer loop cannot be split. The pixels
+// can: all of that state is indexed by pixel, and a band owns its rows exclusively, so a band
+// reproduces the serial sequence exactly for the rows it holds. One barrier per walk instead of one
+// per layer is what makes it worth doing: the stacks here are ~1000 mostly-small layers, and a
+// per-layer fan-out spends more time synchronising than blending.
+func gcBands(h int) [][2]int {
+	n := runtime.GOMAXPROCS(0)
+	if m := h / gcBandRows; n > m {
+		n = m
+	}
+	if n < 1 {
+		n = 1
+	}
+	rows := (h + n - 1) / n
+	bands := make([][2]int, 0, n)
+	for y := 0; y < h; y += rows {
+		y1 := y + rows - 1
+		if y1 > h-1 {
+			y1 = h - 1
+		}
+		bands = append(bands, [2]int{y, y1})
+	}
+	return bands
+}
+
+// gcRunBands runs fn once per band, concurrently.
+func gcRunBands(h int, fn func(y0, y1 int)) {
+	bands := gcBands(h)
+	if len(bands) == 1 {
+		fn(bands[0][0], bands[0][1])
+		return
+	}
+	var wg sync.WaitGroup
+	for _, b := range bands {
+		wg.Add(1)
+		go func(y0, y1 int) {
+			defer wg.Done()
+			fn(y0, y1)
+		}(b[0], b[1])
+	}
+	wg.Wait()
+}
+
+// gcReduceBands runs fn per band with a private accumulator of n float64s and sums them in BAND
+// ORDER. Fixed-order reduction keeps the result reproducible run to run; it is not bit-identical to
+// the serial sweep, which sums one continuous row-major sequence, because float addition does not
+// associate.
+func gcReduceBands(h, n int, out []float64, fn func(y0, y1 int, acc []float64)) {
+	bands := gcBands(h)
+	if len(bands) == 1 {
+		fn(bands[0][0], bands[0][1], out)
+		return
+	}
+	parts := make([][]float64, len(bands))
+	var wg sync.WaitGroup
+	for i, b := range bands {
+		parts[i] = make([]float64, n)
+		wg.Add(1)
+		go func(i, y0, y1 int) {
+			defer wg.Done()
+			fn(y0, y1, parts[i])
+		}(i, b[0], b[1])
+	}
+	wg.Wait()
+	for _, p := range parts {
+		for i, v := range p {
+			out[i] += v
+		}
+	}
+}
 
 // gcCompositeLayer blends one layer's colour over out across rows [y0,y1]. Rows are disjoint in out,
 // so several bands of the SAME layer may run concurrently without a race.
@@ -126,74 +198,70 @@ func gcCompositeLayer(l *gcLayer, cr, cg, cb float32, out []float32, w, y0, y1 i
 // ordered (each blends over the previous); only a LARGE layer's own rows fan out, which does not
 // reorder the blend.
 func gcComposite(gl []gcLayer, c []float64, out []float32, w int) {
-	for i := range gl {
-		l := &gl[i]
-		if !l.live {
-			continue
-		}
-		cr, cg, cb := float32(c[i*3+0]), float32(c[i*3+1]), float32(c[i*3+2])
-		lh := l.y1 - l.y0 + 1
-		if (l.x1-l.x0+1)*lh < gcParallelMin {
-			gcCompositeLayer(l, cr, cg, cb, out, w, l.y0, l.y1)
-			continue
-		}
-		nb := runtime.GOMAXPROCS(0)
-		if nb > lh {
-			nb = lh
-		}
-		rows := (lh + nb - 1) / nb
-		var wg sync.WaitGroup
-		for b := 0; b < nb; b++ {
-			by0 := l.y0 + b*rows
-			if by0 > l.y1 {
-				break
+	gcRunBands(len(out)/(4*w), func(by0, by1 int) {
+		for i := range gl {
+			l := &gl[i]
+			if !l.live || l.y1 < by0 || l.y0 > by1 {
+				continue
 			}
-			by1 := by0 + rows - 1
-			if by1 > l.y1 {
-				by1 = l.y1
+			y0, y1 := l.y0, l.y1
+			if y0 < by0 {
+				y0 = by0
 			}
-			wg.Add(1)
-			go func(y0, y1 int) {
-				defer wg.Done()
-				gcCompositeLayer(l, cr, cg, cb, out, w, y0, y1)
-			}(by0, by1)
+			if y1 > by1 {
+				y1 = by1
+			}
+			gcCompositeLayer(l, float32(c[i*3+0]), float32(c[i*3+1]), float32(c[i*3+2]), out, w, y0, y1)
 		}
-		wg.Wait()
-	}
+	})
 }
 
 // gcGradient accumulates g_k = Σ_p φ_k(p)·resid(p) per channel, where resid is the weighted
 // residual of the current composite. The top-down sweep carries the transmittance Π(1−a_j) over
 // layers ABOVE k, which is what makes φ available without ever storing it.
 func gcGradient(gl []gcLayer, resid, trans []float32, g []float64, w int) {
-	for i := range trans {
-		trans[i] = 1
+	for i := range g {
+		g[i] = 0
 	}
-	for i := len(gl) - 1; i >= 0; i-- {
-		l := &gl[i]
-		if !l.live {
-			continue
+	gcReduceBands(len(trans)/w, len(gl)*3, g, func(by0, by1 int, acc []float64) {
+		for i := by0 * w; i < (by1+1)*w; i++ {
+			trans[i] = 1
 		}
-		bw := l.x1 - l.x0 + 1
-		var gr, gg, gb float64
-		for y := l.y0; y <= l.y1; y++ {
-			row := (y - l.y0) * bw
-			for x := l.x0; x <= l.x1; x++ {
-				a := l.at(x, y, row)
-				if a <= 0 {
-					continue
-				}
-				ti := y*w + x
-				phi := float64(a * trans[ti])
-				p := ti * 4
-				gr += phi * float64(resid[p+0])
-				gg += phi * float64(resid[p+1])
-				gb += phi * float64(resid[p+2])
-				trans[ti] *= 1 - a
+		for i := len(gl) - 1; i >= 0; i-- {
+			l := &gl[i]
+			if !l.live || l.y1 < by0 || l.y0 > by1 {
+				continue
 			}
+			bw := l.x1 - l.x0 + 1
+			y0, y1 := l.y0, l.y1
+			if y0 < by0 {
+				y0 = by0
+			}
+			if y1 > by1 {
+				y1 = by1
+			}
+			var gr, gg, gb float64
+			for y := y0; y <= y1; y++ {
+				row := (y - l.y0) * bw
+				for x := l.x0; x <= l.x1; x++ {
+					a := l.at(x, y, row)
+					if a <= 0 {
+						continue
+					}
+					ti := y*w + x
+					phi := float64(a * trans[ti])
+					p := ti * 4
+					gr += phi * float64(resid[p+0])
+					gg += phi * float64(resid[p+1])
+					gb += phi * float64(resid[p+2])
+					trans[ti] *= 1 - a
+				}
+			}
+			acc[i*3+0] += gr
+			acc[i*3+1] += gg
+			acc[i*3+2] += gb
 		}
-		g[i*3+0], g[i*3+1], g[i*3+2] = gr, gg, gb
-	}
+	})
 }
 
 // gcDiag computes the Gram's diagonal G_kk = Σ_p w_p·φ_k(p)², one entry per layer. It is the
@@ -202,31 +270,43 @@ func gcGradient(gl []gcLayer, resid, trans []float32, g []float64, w int) {
 // single global step size is therefore paced by the largest layer and crawls on every small one,
 // which is exactly why plain FISTA had not converged after 300 iterations.
 func gcDiag(gl []gcLayer, weight, trans []float32, d []float64, w int) {
-	for i := range trans {
-		trans[i] = 1
+	for i := range d {
+		d[i] = 0
 	}
-	for i := len(gl) - 1; i >= 0; i-- {
-		l := &gl[i]
-		if !l.live {
-			continue
+	gcReduceBands(len(trans)/w, len(gl), d, func(by0, by1 int, out []float64) {
+		for i := by0 * w; i < (by1+1)*w; i++ {
+			trans[i] = 1
 		}
-		bw := l.x1 - l.x0 + 1
-		var acc float64
-		for y := l.y0; y <= l.y1; y++ {
-			row := (y - l.y0) * bw
-			for x := l.x0; x <= l.x1; x++ {
-				a := l.at(x, y, row)
-				if a <= 0 {
-					continue
-				}
-				ti := y*w + x
-				phi := float64(a * trans[ti])
-				acc += float64(weight[ti]) * phi * phi
-				trans[ti] *= 1 - a
+		for i := len(gl) - 1; i >= 0; i-- {
+			l := &gl[i]
+			if !l.live || l.y1 < by0 || l.y0 > by1 {
+				continue
 			}
+			bw := l.x1 - l.x0 + 1
+			y0, y1 := l.y0, l.y1
+			if y0 < by0 {
+				y0 = by0
+			}
+			if y1 > by1 {
+				y1 = by1
+			}
+			var acc float64
+			for y := y0; y <= y1; y++ {
+				row := (y - l.y0) * bw
+				for x := l.x0; x <= l.x1; x++ {
+					a := l.at(x, y, row)
+					if a <= 0 {
+						continue
+					}
+					ti := y*w + x
+					phi := float64(a * trans[ti])
+					acc += float64(weight[ti]) * phi * phi
+					trans[ti] *= 1 - a
+				}
+			}
+			out[i] += acc
 		}
-		d[i] = acc
-	}
+	})
 }
 
 // gcStep is one gradient evaluation at colours c: composites, forms the weighted residual, and
