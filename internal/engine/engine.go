@@ -130,8 +130,9 @@ type Options struct {
 	AnnealIters       int           // EXPERIMENTAL basin-hopping / iterated local search (0 = off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget "economy" regime (50-300 shapes) where greedy is most stuck; too costly at full budget. Keep-best gated -> never finishes worse. Host-side -> golden-diff safe.
 	LockColor         *model.RGBA   // MONO single-colour mode (brand logo / decal): when set, EVERY reconstruction shape is snapped to this exact working-space colour at the end of the run. Pairs with a target binarized to the same colour (engine.BinarizeForLock at the call site) so the grey antialiased-edge shapes never appear. nil = off. Host-side -> golden-diff safe.
 	Progress          func(shapes int, currentError float64)
-	Status            func(stage string) // optional: called at the START of each post-greedy phase (polish / back-fit / standout) with a human label, so a UI can show "what it's doing now" instead of a bar stuck at 100%. nil = ignored.
-	Cancel            func() bool        // optional: checked at the loop top + before the polish/backfit post-process; return true to stop early (keeps the shapes placed so far). nil = never cancel.
+	Status            func(stage string)  // optional: called at the START of each post-greedy phase (polish / back-fit / standout) with a human label, so a UI can show "what it's doing now" instead of a bar stuck at 100%. nil = ignored.
+	OnPhase           func(PhaseProgress) // optional: run-wide progress + a time estimate covering EVERY phase, not just the greedy loop (see eta.go). nil = not computed.
+	Cancel            func() bool         // optional: checked at the loop top + before the polish/backfit post-process; return true to stop early (keeps the shapes placed so far). nil = never cancel.
 }
 
 type Result struct {

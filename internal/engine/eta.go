@@ -1,0 +1,221 @@
+package engine
+
+import (
+	"sync"
+	"time"
+)
+
+// Run-wide progress with a time estimate.
+//
+// The greedy loop could always be estimated — it places a known number of shapes, so shapes/second
+// gives the remainder. Everything after it could not: the polish and the post-passes reported a name
+// and nothing else, which is most of the wall time on a photo run and all of the time the progress
+// bar looked frozen.
+//
+// The estimate deliberately does NOT carry per-machine constants. Phase weights below are a PRIOR for
+// how the work divides, measured on the bench; the seconds come from THIS run's own elapsed time
+// (eta = elapsed·(1−done)/done). A card half as fast makes every phase twice as slow, elapsed grows
+// with it, and the estimate follows on its own — nothing to calibrate, nothing to ship per GPU. The
+// prior only has to be roughly right about the SHAPE of the split, and it self-corrects as phases
+// complete: by the time the greedy is done its real cost is known, and the remainder is rescaled.
+type PhaseProgress struct {
+	Phase     string        // human name of the running phase
+	PhaseFrac float64       // 0..1 within the phase (0 when the phase reports no progress of its own)
+	Overall   float64       // 0..1 across the whole run
+	ETA       time.Duration // estimated time remaining; 0 while there is not enough signal yet
+}
+
+// etaMinElapsed is how much of a run must have passed before an estimate is worth showing. The first
+// second is dominated by setup and the largest shapes, so extrapolating from it produces a wild
+// number that then visibly collapses — worse than showing nothing.
+const etaMinElapsed = 1500 * time.Millisecond
+
+// etaEmitEvery throttles emission; a phase that reports per-iteration would otherwise fire thousands
+// of events at the UI.
+const etaEmitEvery = 250 * time.Millisecond
+
+type etaPhase struct {
+	name   string
+	weight float64
+}
+
+type etaTracker struct {
+	mu     sync.Mutex
+	phases []etaPhase
+	total  float64
+	idx    int     // index of the running phase, len(phases) once finished
+	doneW  float64 // summed weight of completed phases
+	frac   float64 // progress inside the running phase
+	start  time.Time
+	last   time.Time
+	emit   func(PhaseProgress)
+	done   chan struct{}
+}
+
+// greedyWeight is the shape-placing loop, which dominates a default run.
+const greedyWeight = 60
+
+// passWeight is the prior cost of one post-greedy pass RELATIVE to the greedy loop, as a wall-clock
+// segment — a pass that re-polishes internally is credited with that re-polish here, because the
+// progress bar cares about elapsed time, not about which bucket the time is billed to.
+func passWeight(p pass, opt Options) float64 {
+	polish := 18.0
+	if opt.PolishOpts.Iters > 0 {
+		polish *= float64(opt.PolishOpts.Iters) / 250
+	}
+	switch p.(type) {
+	case backfitPolishPass:
+		return 8 + 2*polish // polishes both branches
+	case backfitPass:
+		return 8
+	case softSwapPolishPass:
+		return polish + 2
+	case polishPass:
+		return polish
+	case looRefitPass:
+		// Each round prunes, regrows and re-polishes, but the re-polish is a SHORT one from an
+		// already-converged stack — measured at about a quarter of the main polish per round, not a
+		// half. Overstating it here was worth a systematic 50% overestimate in the countdown.
+		return float64(opt.LooRefit) * (polish/4 + 1)
+	case globalColorPass:
+		return 22 * float64(opt.GlobalColorIters) / 100
+	case annealPass:
+		return float64(opt.AnnealIters) * polish / 10
+	case artifactFixPass, zswapPass, softSwapPass, standoutPass:
+		return 2
+	}
+	return 1
+}
+
+// newETA plans the run: the greedy loop, then every pass that is actually enabled. A pass that will
+// not run must not hold weight, or the bar stalls at the end waiting for work that never comes.
+func newETA(opt Options, start time.Time, emit func(PhaseProgress)) *etaTracker {
+	if emit == nil {
+		return nil
+	}
+	t := &etaTracker{start: start, emit: emit}
+	if opt.SmoothBase {
+		t.phases = append(t.phases, etaPhase{"Claiming smooth regions…", 3})
+	}
+	if opt.ShadePrepass {
+		t.phases = append(t.phases, etaPhase{"Claiming shading…", 1})
+	}
+	if opt.GlyphPrepass {
+		t.phases = append(t.phases, etaPhase{"Claiming words…", 1})
+	}
+	t.phases = append(t.phases, etaPhase{"Placing shapes…", greedyWeight})
+	for _, p := range postPasses() {
+		if p.enabled(opt) {
+			t.phases = append(t.phases, etaPhase{"", passWeight(p, opt)})
+		}
+	}
+	for _, p := range t.phases {
+		t.total += p.weight
+	}
+	if t.total <= 0 {
+		t.total = 1
+	}
+	// Heartbeat. Only the loops with a countable unit report progress; a pass like the colour re-solve
+	// runs for seconds in one call and would otherwise leave the estimate frozen at whatever it read
+	// when the phase started — the exact complaint the bar had after the greedy. Re-publishing on a
+	// timer keeps the countdown moving through every silent pass without threading a callback into
+	// each one.
+	done := make(chan struct{})
+	t.done = done
+	go func() {
+		tick := time.NewTicker(etaEmitEvery * 2)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done: // the captured channel, not t.done: stop() clears the field
+				return
+			case <-tick.C:
+				t.publish(false)
+			}
+		}
+	}()
+	return t
+}
+
+// stop ends the heartbeat. Safe to call more than once.
+func (t *etaTracker) stop() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.done != nil {
+		close(t.done)
+		t.done = nil
+	}
+}
+
+// enter advances to the next phase. Passes announce themselves through setStatus, so the tracker
+// follows the same call and needs no second wiring; a repeated announcement of the SAME name (a pass
+// that reports per round) does not advance.
+func (t *etaTracker) enter(name string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	if t.idx < len(t.phases) && t.phases[t.idx].name == name {
+		t.mu.Unlock()
+		return
+	}
+	if t.idx < len(t.phases) {
+		t.doneW += t.phases[t.idx].weight
+		t.idx++
+	}
+	if t.idx < len(t.phases) {
+		t.phases[t.idx].name = name
+	}
+	t.frac = 0
+	t.mu.Unlock()
+	t.publish(true)
+}
+
+// setFrac reports progress inside the running phase. Anything with a countable unit of work calls it
+// — placed shapes, polish iterations, colour-solve iterations — and the phases that have no such unit
+// simply hold at 0 and are carried by their weight alone.
+func (t *etaTracker) setFrac(f float64) {
+	if t == nil {
+		return
+	}
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	t.mu.Lock()
+	t.frac = f
+	t.mu.Unlock()
+	t.publish(false)
+}
+
+func (t *etaTracker) publish(force bool) {
+	t.mu.Lock()
+	now := time.Now()
+	if !force && now.Sub(t.last) < etaEmitEvery {
+		t.mu.Unlock()
+		return
+	}
+	t.last = now
+	w := t.doneW
+	name := ""
+	if t.idx < len(t.phases) {
+		w += t.frac * t.phases[t.idx].weight
+		name = t.phases[t.idx].name
+	}
+	frac := t.frac
+	done := w / t.total
+	elapsed := now.Sub(t.start)
+	t.mu.Unlock()
+	var eta time.Duration
+	if done > 0.01 && elapsed >= etaMinElapsed {
+		eta = time.Duration(float64(elapsed) * (1 - done) / done)
+	}
+	// Emitted outside the lock: the callback is the caller's (a UI pump, an IPC write) and must not
+	// be able to stall the engine goroutine behind the heartbeat, or vice versa.
+	t.emit(PhaseProgress{Phase: name, PhaseFrac: frac, Overall: done, ETA: eta})
+}

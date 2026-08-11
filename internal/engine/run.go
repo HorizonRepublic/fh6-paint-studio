@@ -59,6 +59,7 @@ type run struct {
 	w   int
 	h   int
 	tm  Timings
+	eta *etaTracker
 
 	// Normalised options + schedule, resolved once in newRun.
 	kinds       []model.ShapeKind
@@ -115,6 +116,7 @@ type run struct {
 func Run(be backend.Backend, opt Options) Result {
 	runStart := time.Now()
 	r := newRun(be, opt)
+	defer r.eta.stop()
 	if opt.LiveBatch > 0 {
 		r.live() // EXPERIMENTAL co-adaptation scheduler for the structural base...
 		if len(r.shapes)-1 < r.genTarget {
@@ -122,16 +124,20 @@ func Run(be backend.Backend, opt Options) Result {
 		}
 	} else {
 		if r.opt.SmoothBase {
+			r.phase("Claiming smooth regions…")
 			r.timePass(&r.tm.SmoothBase, func() {
 				r.smoothBase() // broad smooth-region stacks claim FIRST (deepest in the z-stack)
 			})
 		}
 		if r.opt.ShadePrepass && r.glyphs {
+			r.phase("Claiming shading…")
 			r.timePass(&r.tm.ShadePre, func() { r.shadePrepass() })
 		}
 		if r.opt.GlyphPrepass && r.glyphs {
+			r.phase("Claiming words…")
 			r.timePass(&r.tm.GlyphPre, func() { r.glyphPrepass() })
 		}
+		r.phase("Placing shapes…")
 		r.greedy()
 	}
 	if r.opt.CompSeeds > 0 {
@@ -149,6 +155,20 @@ func Run(be backend.Backend, opt Options) Result {
 // on-device search handles. It consumes no randomness — the RNG is first used in the greedy loop.
 func newRun(be backend.Backend, opt Options) *run {
 	var tm Timings
+	eta := newETA(opt, time.Now(), opt.OnPhase)
+	// The polish counts its own iterations, and so does every re-polish a later pass runs, so routing
+	// it here gives the estimate a live signal through the longest phases without each pass wiring one.
+	if eta != nil {
+		prev := opt.PolishOpts.OnProgress
+		opt.PolishOpts.OnProgress = func(iter, total int) {
+			if total > 0 {
+				eta.setFrac(float64(iter) / float64(total))
+			}
+			if prev != nil {
+				prev(iter, total)
+			}
+		}
+	}
 	rng := rand.New(rand.NewSource(seed(opt.Seed)))
 	w, h := opt.Width, opt.Height
 	if opt.RandomSamples < 1 {
@@ -498,7 +518,7 @@ func newRun(be backend.Backend, opt Options) *run {
 	}
 
 	return &run{
-		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm,
+		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm, eta: eta,
 		kinds: kinds, kindWeights: kindWeights, kindCDF: kindCDF,
 		allowAlpha: allowAlpha, alphaMin: alphaMin, maxNI: maxNI, genTarget: genTarget,
 		moveStep: moveStep, radiusStep: radiusStep, rounds: rounds, perRound: perRound,
@@ -610,6 +630,9 @@ func (r *run) greedy() {
 		}
 		r.tm.Sampler += time.Since(t0)
 		curErr := sumGrid(r.grid)
+		if r.eta != nil && r.opt.StopAt > 0 {
+			r.eta.setFrac(float64(len(r.shapes)-1) / float64(r.opt.StopAt))
+		}
 		if r.opt.Progress != nil {
 			r.opt.Progress(len(r.shapes)-1, curErr)
 		}
@@ -738,7 +761,13 @@ func (r *run) refine() {
 // setStatus reports the current post-greedy phase to the optional Options.Status callback (a UI
 // hook), so a progress bar stuck at 100% can show what the run is doing. nil callback = ignored.
 func (r *run) setStatus(s string) {
+	r.phase(s)
 	if r.opt.Status != nil {
 		r.opt.Status(s)
 	}
 }
+
+// phase advances the run-wide estimate without announcing a stage. The pre-greedy claims and the
+// greedy loop itself use it: Status has always meant "a post-greedy pass started" to its consumers,
+// and the estimate needs the boundaries of every phase, not just those.
+func (r *run) phase(s string) { r.eta.enter(s) }

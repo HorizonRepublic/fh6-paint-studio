@@ -716,6 +716,13 @@ func main() {
 		Status: func(stage string) {
 			applog.Printf("  stage: %s (%.1fs)", stage, time.Since(start).Seconds())
 		},
+		OnPhase: func(p engine.PhaseProgress) {
+			eta := "—"
+			if p.ETA > 0 {
+				eta = p.ETA.Round(time.Second).String()
+			}
+			fmt.Printf("\r%-28s %3.0f%%  overall %3.0f%%  ETA %-6s", p.Phase, 100*p.PhaseFrac, 100*p.Overall, eta)
+		},
 	}
 	res := engine.RunBest(be, o, *bestOf)
 	applog.Printf("done: %d shapes, error %.1f -> %.1f in %.1fs",
