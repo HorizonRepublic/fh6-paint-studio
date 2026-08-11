@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -90,6 +91,7 @@ func (looRefitPass) apply(r *run) {
 	env := r.newBackfitEnv()
 	target, weight := r.be.Target(), r.be.Weight()
 	for round := 0; round < r.opt.LooRefit; round++ {
+		r.tm.LooRounds++
 		// Colours first, then the ranking. looFitContrib asks what each shape CONTRIBUTES, but a
 		// shape still carrying the colour the greedy fitted against a canvas later shapes have
 		// overwritten looks harmful for a reason that has nothing to do with redundancy — so the
@@ -97,6 +99,7 @@ func (looRefitPass) apply(r *run) {
 		// is named after. Gated like everything else: a solve that does not lower the hard render is
 		// discarded and the round proceeds on the original stack.
 		if r.opt.GlobalColorInLoo && r.opt.GlobalColorIters > 0 {
+			t0 := time.Now()
 			if cand, _, _, ok := globalColorSolve(r.shapes, target, weight, r.w, r.h,
 				r.opt.Background, r.opt.TransparentBG, r.opt.GlobalColorIters); ok {
 				if e := rerender(r.be, r.initCanvas, cand); e+1e-9 < r.finalErr {
@@ -105,6 +108,7 @@ func (looRefitPass) apply(r *run) {
 					rerender(r.be, r.initCanvas, r.shapes)
 				}
 			}
+			r.tm.GlobalColor += time.Since(t0)
 		}
 		fit := looFitContrib(r.shapes, target, weight, r.w, r.h)
 		drop := looSelectPrune(fit)
@@ -119,7 +123,9 @@ func (looRefitPass) apply(r *run) {
 		// restores quality for both (see mergerefit.go).
 		merged := 0
 		if r.opt.MergeRefit {
+			t0 := time.Now()
 			kept, merged = mergePairs(kept, r.w, r.h)
+			r.tm.MergeRefit += time.Since(t0)
 			applog.Printf("loo round %d: pruned %d, merged %d pairs", round, len(r.shapes)-len(kept)+merged, merged)
 		}
 		if len(drop)+merged < looMinRegrow {

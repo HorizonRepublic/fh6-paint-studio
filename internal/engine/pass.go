@@ -34,6 +34,37 @@ func postPasses() []pass {
 	}
 }
 
+// passTimer returns the Timings field a pass bills its own cost to, or nil when the pass is already
+// billed from inside (the back-fit/polish trio times its two components at their call sites).
+func (r *run) passTimer(p pass) *time.Duration {
+	switch p.(type) {
+	case looRefitPass:
+		return &r.tm.LooRefit
+	case globalColorPass:
+		return &r.tm.GlobalColor
+	case artifactFixPass:
+		return &r.tm.ArtifactFix
+	case annealPass:
+		return &r.tm.Anneal
+	case zswapPass:
+		return &r.tm.ZSwap
+	case softSwapPass, softSwapPolishPass:
+		return &r.tm.SoftSwap
+	case standoutPass:
+		return &r.tm.Standout
+	}
+	return nil
+}
+
+// timePass bills f's wall time to d, minus whatever f nested into a field of its own — a pass that
+// re-polishes or re-solves colours must not be credited with that time twice.
+func (r *run) timePass(d *time.Duration, f func()) {
+	nested := r.tm.Polish + r.tm.GlobalColor + r.tm.MergeRefit
+	t0 := time.Now()
+	f()
+	*d += time.Since(t0) - (r.tm.Polish + r.tm.GlobalColor + r.tm.MergeRefit - nested)
+}
+
 // newBackfitEnv captures the greedy search context the back-fitting re-greedy needs: the same
 // backend, RNG, kind mix, schedule, and on-device search as the main loop. tm is nil so the back-fit
 // search time is billed to the BackFit bucket rather than the main phase timings.

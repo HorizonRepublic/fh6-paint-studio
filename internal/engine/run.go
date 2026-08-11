@@ -122,13 +122,15 @@ func Run(be backend.Backend, opt Options) Result {
 		}
 	} else {
 		if r.opt.SmoothBase {
-			r.smoothBase() // broad smooth-region stacks claim FIRST (deepest in the z-stack)
+			r.timePass(&r.tm.SmoothBase, func() {
+				r.smoothBase() // broad smooth-region stacks claim FIRST (deepest in the z-stack)
+			})
 		}
 		if r.opt.ShadePrepass && r.glyphs {
-			r.shadePrepass()
+			r.timePass(&r.tm.ShadePre, func() { r.shadePrepass() })
 		}
 		if r.opt.GlyphPrepass && r.glyphs {
-			r.glyphPrepass()
+			r.timePass(&r.tm.GlyphPre, func() { r.glyphPrepass() })
 		}
 		r.greedy()
 	}
@@ -250,18 +252,29 @@ func newRun(be backend.Backend, opt Options) *run {
 		genTarget = int(float32(opt.StopAt) * opt.Overdraw)
 	}
 
+	// The target-derived metric maps below are native-resolution CPU sweeps; they bill to Timings.Maps
+	// rather than hiding inside Setup.
+	var mapsDur time.Duration
+	timeMaps := func(f func()) {
+		t0 := time.Now()
+		f()
+		mapsDur += time.Since(t0)
+	}
+
 	// Edge-orientation map: seed elongated shapes along local edges (hair, folds). With
 	// OrientAspect > 1 the same structure tensor also yields the per-pixel COHERENCE, which the
 	// generator uses to decide HOW elongated a candidate should be — the orientation alone is
 	// defined even in flat regions, where it is noise.
 	var orient, coh []float32
 	aspectCap := float32(opt.OrientAspect)
-	if aspectCap > 1 {
-		orient, coh = metric.OrientationCoherenceMap(be.Target(), w, h)
-	} else {
-		orient = metric.OrientationMap(be.Target(), w, h)
-		aspectCap = 0
-	}
+	timeMaps(func() {
+		if aspectCap > 1 {
+			orient, coh = metric.OrientationCoherenceMap(be.Target(), w, h)
+		} else {
+			orient = metric.OrientationMap(be.Target(), w, h)
+			aspectCap = 0
+		}
+	})
 
 	// Region-weighted polish terms: build the 1−HardEdgeMap ONCE here instead of on every polish call.
 	// applyPolish takes opt by value, so base, back-fit, LOO re-polish, anneal and soft-swap each
@@ -270,12 +283,14 @@ func newRun(be backend.Backend, opt Options) *run {
 	// does not simply rebuilds as before (identical value, so output is unchanged either way).
 	if opt.TermRegionWeight && opt.PolishOpts.TermWeight == nil &&
 		(opt.PolishOpts.FalseEdgeLambda > 0 || opt.PolishOpts.EagleLambda > 0) {
-		hard := metric.HardEdgeMap(be.Target(), w, h)
-		tw := make([]float32, len(hard))
-		for i, hv := range hard {
-			tw[i] = 1 - hv
-		}
-		opt.PolishOpts.TermWeight = tw
+		timeMaps(func() {
+			hard := metric.HardEdgeMap(be.Target(), w, h)
+			tw := make([]float32, len(hard))
+			for i, hv := range hard {
+				tw[i] = 1 - hv
+			}
+			opt.PolishOpts.TermWeight = tw
+		})
 	}
 
 	// Detail-weighted sampling (opt-in via DetailStrength>0): precompute a target-detail
@@ -289,7 +304,7 @@ func newRun(be backend.Backend, opt Options) *run {
 		detailStart = defaultDetailStart
 	}
 	if opt.DetailStrength > 0 || opt.SaliencyQuota > 0 {
-		detailGrid = metric.DetailGrid(be.Target(), w, h, gw, gh)
+		timeMaps(func() { detailGrid = metric.DetailGrid(be.Target(), w, h, gw, gh) })
 	}
 
 	// Boundary-aware radius (opt-in via BoundaryRadius): precompute a distance-to-boundary
@@ -306,9 +321,11 @@ func newRun(be backend.Backend, opt Options) *run {
 		if bstart <= 0 {
 			bstart = defaultBoundaryStart
 		}
-		if dist := metric.BoundaryDistance(be.Target(), w, h, boundaryEdgeThreshold); dist != nil {
-			boundCtx = &boundaryCtx{dist: dist, padding: pad, start: bstart}
-		}
+		timeMaps(func() {
+			if dist := metric.BoundaryDistance(be.Target(), w, h, boundaryEdgeThreshold); dist != nil {
+				boundCtx = &boundaryCtx{dist: dist, padding: pad, start: bstart}
+			}
+		})
 	}
 
 	// Region-gated kinds (RegionKinds; anime default): precompute the target's hard-structure map
@@ -320,11 +337,13 @@ func newRun(be backend.Backend, opt Options) *run {
 	// DLL, or force host gating with OnDeviceSearch off).
 	var kg *kindGate
 	if opt.RegionKinds {
-		glowTau, glowProb := resolveSmoothGlow(opt.SmoothGlowTau, opt.SmoothGlowProb)
-		kg = &kindGate{hard: gateHardMap(be.Target(), w, h, opt), w: w, h: h, tau: glowTau, prob: glowProb}
-		if opt.RampGlow {
-			kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
-		}
+		timeMaps(func() {
+			glowTau, glowProb := resolveSmoothGlow(opt.SmoothGlowTau, opt.SmoothGlowProb)
+			kg = &kindGate{hard: gateHardMap(be.Target(), w, h, opt), w: w, h: h, tau: glowTau, prob: glowProb}
+			if opt.RampGlow {
+				kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
+			}
+		})
 	}
 	// The size-conditioned glow swap does not need the hardness map, so it gets a gate of its own
 	// when region-kinds is off (kindGate.pick falls straight through when hard is nil).
@@ -468,7 +487,8 @@ func newRun(be backend.Backend, opt Options) *run {
 		}
 	}
 	kindCDF := buildKindCDF(kinds, kindWeights)
-	tm.Setup = time.Since(setupStart)
+	tm.Maps = mapsDur
+	tm.Setup = time.Since(setupStart) - mapsDur
 
 	glyphs := false
 	if opt.GlyphDict || opt.GlyphPrepass || opt.ShadePrepass || opt.SmoothBase {
@@ -701,9 +721,14 @@ func (r *run) refine() {
 		return
 	}
 	for _, p := range postPasses() {
-		if p.enabled(r.opt) {
-			p.apply(r)
+		if !p.enabled(r.opt) {
+			continue
 		}
+		if d := r.passTimer(p); d != nil {
+			r.timePass(d, func() { p.apply(r) })
+			continue
+		}
+		p.apply(r)
 	}
 	// MONO mode: snap every shape to the exact lock colour LAST, after polish/back-fit/standout have
 	// finished moving colours — guaranteeing one pure brand colour in the output.

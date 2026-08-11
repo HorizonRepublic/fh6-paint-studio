@@ -145,7 +145,8 @@ type Result struct {
 // phases (Evaluate/Apply/ErrorGrid) are split so we can see whether the GPU or
 // the host serial work dominates. Sum of phases ≈ Total (minus tiny untimed glue).
 type Timings struct {
-	Setup        time.Duration    // one-time: initial canvas/grid + orientation map
+	Setup        time.Duration    // one-time: initial canvas/grid + backend wiring (metric maps split into Maps)
+	Maps         time.Duration    // setup's metric maps: orientation/coherence, hard-edge, detail grid, boundary distance, ramp
 	Generate     time.Duration    // RandomShapes — host candidate generation
 	Mutate       time.Duration    // MutateShape — host hill-climb mutation
 	Evaluate     time.Duration    // backend.Evaluate — scoring (GPU eval + transfer)
@@ -161,7 +162,32 @@ type Timings struct {
 	PolishPost   float64          // soft-render weighted SSE after polish
 	PolishPhases [7]time.Duration // GPU-polish per-phase breakdown: upload,forward,loss,backward,readgrad,adam,hardloss
 	PolishIters  int              // actual polish iterations run (plateau early-stop may cut the configured Iters short)
-	Total        time.Duration
+
+	// Pre-greedy claims and post-greedy passes. Each is the pass's OWN cost: the polish, colour solve
+	// and merge a pass nests are billed to their own field and subtracted here, so the fields stay
+	// disjoint and Total-Accounted is a real blind spot rather than double counting.
+	SmoothBase  time.Duration // smooth-region gradient base claims (smoothbase.go)
+	ShadePre    time.Duration // shading pre-pass (shadepre.go)
+	GlyphPre    time.Duration // glyph pre-pass (glyphpre.go)
+	LooRefit    time.Duration // LOO refit rounds (loorefit.go)
+	LooRounds   int           // LOO rounds entered (the loop stops early when a round finds nothing to regrow or fails its gate)
+	MergeRefit  time.Duration // near-duplicate merge inside the LOO rounds (mergerefit.go)
+	GlobalColor time.Duration // joint colour/alpha re-solve (globalcolor.go), incl. the in-LOO solves
+	ArtifactFix time.Duration // artifact-repair pass (artifactfix.go)
+	Anneal      time.Duration // basin-hopping / iterated local search (anneal.go)
+	ZSwap       time.Duration // z-order swap trials (zswap.go)
+	SoftSwap    time.Duration // standout soft-swap, pre- and post-polish forms (softswap.go)
+	Standout    time.Duration // standout suppression (standout.go)
+
+	Total time.Duration
+}
+
+// Accounted is the sum of every measured phase. Total minus this is the run's UNMEASURED time — the
+// number that makes a new blind spot visible instead of silently absorbing the next expensive pass.
+func (t Timings) Accounted() time.Duration {
+	return t.Setup + t.Maps + t.Generate + t.Mutate + t.Evaluate + t.Apply + t.ErrorGrid + t.Sampler +
+		t.PostProcess + t.BackFit + t.Polish + t.SmoothBase + t.ShadePre + t.GlyphPre + t.LooRefit +
+		t.MergeRefit + t.GlobalColor + t.ArtifactFix + t.Anneal + t.ZSwap + t.SoftSwap + t.Standout
 }
 
 const maxNoImprove = 100
