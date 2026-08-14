@@ -90,6 +90,8 @@ type Options struct {
 	RampGlow          bool          // ramp-aware hotter glow swap (opt-in, BUST — not defaulted; needs RegionKinds): precompute metric.RampMap of the target and, where a cell reads as a genuine smooth gradient (ramp > thresh), run the deep-smooth glow swap at a HOTTER tau/prob than the global pair. Aimed to recover the img_10 win from a global tau-raise without its structured-content regression; measured noise (img_10 SSE +0.01% parity) because the global win came from moderate-hardness cells RampMap excludes. Code kept + CLI-reachable; on-device via fp_set_ramp_glow (rides fp_set_kind_gate + fp_set_glow_swap), inert when off. See regionkinds.go.
 	SoftSwapTol       float64       // post-polish SOFT-SWAP standout repair (opt-in, 0 = off): replace the worst standout rect/triangle shapes (rim draws an edge the target lacks) with a soft/round shape moment-fitted to the SAME footprint (ellipse / feathered disk / glow; same colour + z), gated so the GLOBAL error rises at most this fraction. Substitution keeps the coverage, so — unlike StandoutTol's recolour/fade/remove menu, which live polish starves at the gate — many repairs fit in the same budget. ~0.005-0.02. Judge by eye; see softswap.go.
 	RimAim            bool          // aim the soft-swap by RIM DEBT instead of interior false-edge mass, and let it consider ELLIPSES (rimsalience.go). The artefact the owner names — a contour of the reconstruction standing on ground the picture leaves smooth — is a property of a shape's boundary and sits mostly on ellipses, which the original ordering never even offered as candidates. Measured out of the engine (post-hoc on finished stacks): softening the worst offenders removes ~23% of the rim debt at no SSE cost, while softening the same NUMBER of random shapes makes the rim debt worse — so the aim, not the softening, is what does the work. Needs SoftSwapTol.
+	SkewRefine        bool          // post-polish monotone SHEAR refine (skewrefine.go): line-search slot 5 for every rectangle and bank word, keep it only where the exact occlusion-aware local error falls, then gate the whole pass end to end. Ellipse/glow/disk are excluded — a sheared ellipse is another rotated ellipse, so the shear buys them nothing. Chosen over a sixth polish DOF, which cleared the bar on only 4 of 7 pairs because the shear trades against rotation and width and moves the whole basin.
+	GeomRefine        bool          // post-polish monotone COORDINATE refine (skewrefine.go): the same monotone machinery walking EVERY geometry parameter of every shape, not just the shear. Motivated by a measurement — a line search over an ellipse shear, a parameter that buys the ellipse no new shape, still recovered 0.5-3%, so the polish leaves its shapes short of the local optimum and any spare direction cashes that in. Supersedes SkewRefine when both are set.
 	SoftSwapPre       bool          // soft-swap PRE-polish variant: run the swap on the GREEDY result and let the joint polish co-adapt around the substitutions, gated end-to-end (polish(greedy) vs polish(swap(greedy)): keep the swap branch only if SSE lands within SoftSwapTol AND the global false-edge ratio improves). The post-polish pass starves at the cumulative gate (~4-7 swaps — every substitution on a converged optimum costs irreducible SSE); pre-polish the redistribution is the polish's job. Needs Polish; no-op with BackFit (trio partition).
 	ZSwapTrials       int           // z-order local swap EXPERIMENT (opt-in, 0 = off): after polish, try swapping up to this many z-adjacent overlapping pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render — keep the cap modest. Aimed at opaque/flat content where stack order owns contested pixels.
 	PersistGain       float64       // persistent-error sampling EXPERIMENT (opt-in, 0 = off): upweight sampling cells whose error stagnates across refreshes by (1 + gain·stagnation), so small stubborn details (a saturated iris) stop losing the importance lottery to big soft regions. Sampling-only — the accept gate, knee and progress stay on the raw grid. See persist.go.
@@ -179,6 +181,7 @@ type Timings struct {
 	ZSwap       time.Duration // z-order swap trials (zswap.go)
 	SoftSwap    time.Duration // standout soft-swap, pre- and post-polish forms (softswap.go)
 	Standout    time.Duration // standout suppression (standout.go)
+	SkewRefine  time.Duration // monotone shear refine (skewrefine.go)
 
 	Total time.Duration
 }
@@ -188,7 +191,8 @@ type Timings struct {
 func (t Timings) Accounted() time.Duration {
 	return t.Setup + t.Maps + t.Generate + t.Mutate + t.Evaluate + t.Apply + t.ErrorGrid + t.Sampler +
 		t.PostProcess + t.BackFit + t.Polish + t.SmoothBase + t.ShadePre + t.GlyphPre + t.LooRefit +
-		t.MergeRefit + t.GlobalColor + t.ArtifactFix + t.Anneal + t.ZSwap + t.SoftSwap + t.Standout
+		t.MergeRefit + t.GlobalColor + t.ArtifactFix + t.Anneal + t.ZSwap + t.SoftSwap + t.Standout +
+		t.SkewRefine
 }
 
 const maxNoImprove = 100

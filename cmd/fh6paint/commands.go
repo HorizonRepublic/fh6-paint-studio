@@ -281,7 +281,10 @@ func logTimings(t engine.Timings) {
 	addPass("smoothbase", t.SmoothBase)
 	addPass("shadepre", t.ShadePre)
 	addPass("glyphpre", t.GlyphPre)
-	addPass("loorefit", t.LooRefit)
+	// EXCLUSIVE of the re-polish each round runs: timePass bills that to `polish`, so this number is a
+	// small fraction of the wall the "LOO refit" status covers. Labelled so the two stop looking
+	// contradictory — on img_26 it read 19.75s while the stage itself ran for minutes.
+	addPass("loorefit(excl.repolish)", t.LooRefit)
 	if t.LooRefit > 0 {
 		passes += fmt.Sprintf("[rounds=%d]", t.LooRounds)
 	}
@@ -292,6 +295,7 @@ func logTimings(t engine.Timings) {
 	addPass("zswap", t.ZSwap)
 	addPass("softswap", t.SoftSwap)
 	addPass("standout", t.Standout)
+	addPass("skewrefine", t.SkewRefine)
 	if passes != "" {
 		applog.Printf("profile passes:%s", passes)
 	}

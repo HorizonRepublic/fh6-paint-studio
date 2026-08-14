@@ -107,14 +107,20 @@ func passWeight(p pass, opt Options) float64 {
 	case polishPass:
 		return polish
 	case looRefitPass:
-		// Each round prunes, regrows and re-polishes, but the re-polish is a SHORT one from an
-		// already-converged stack — measured at about a quarter of the main polish per round, not a
-		// half. Overstating it here was worth a systematic 50% overestimate in the countdown.
-		return float64(opt.LooRefit) * (polish/4 + 1)
+		// Each round prunes, regrows and re-polishes. The re-polish is a warm one, measured at
+		// 0.35-0.4 of the main polish per round (img_26 @3000: 8.8-11.1s vs a 28s main polish), and
+		// the regrow adds a couple of seconds; the old polish/4+1 understated the pass ~2×, which
+		// parked the bar in the low eighties for the back half of the pass.
+		return float64(opt.LooRefit) * (0.4*polish + 1)
 	case globalColorPass:
 		return 22 * float64(opt.GlobalColorIters) / 100
 	case annealPass:
 		return float64(opt.AnnealIters) * polish / 10
+	case skewRefinePass:
+		// A pattern search over every geometry parameter of every shape, repeated in rounds until the
+		// returns dry up. Measured at 8-10% of a run once the rounds became adaptive; the old weight of
+		// 4 left the bar parked in the eighties while the pass was still going.
+		return 8
 	case artifactFixPass, zswapPass, softSwapPass, standoutPass:
 		return 2
 	}
@@ -258,10 +264,14 @@ func (t *etaTracker) publish(force bool) {
 	if t.idx < len(t.phases) {
 		// Whichever says more: the phase's own counter, or the share of its expected duration that
 		// has passed. The time term is capped below 1 — only the phase actually ending may claim the
-		// last of it, or the bar would sit full while work continues.
+		// last of it, or the bar would sit full while work continues. It may only RAISE the counter:
+		// clamping an overrun time term to the cap used to pull a phase that had already counted to
+		// 100% back down to 95%.
 		if t.phaseExpect > 0 {
 			if tf := float64(now.Sub(t.phaseStart)) / float64(t.phaseExpect); tf > frac {
-				frac = math.Min(tf, etaPhaseTimeCap)
+				if c := math.Min(tf, etaPhaseTimeCap); c > frac {
+					frac = c
+				}
 			}
 		}
 		w += frac * t.phases[t.idx].weight
