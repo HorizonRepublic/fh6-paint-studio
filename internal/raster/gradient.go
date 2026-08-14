@@ -84,24 +84,26 @@ func GaussianCovGrad(kind model.ShapeKind, p [6]float32, x, y int) (cov float64,
 	dy := float64(y) + 0.5 - cy
 	xr := dx*c + dy*s
 	yr := -dx*s + dy*c
-	xr -= float64(p[5]) * yr // inverse horizontal shear (0 for generated shapes)
-	u := xr*xr/(rx*rx) + yr*yr/(ry*ry)
+	k := float64(p[5])
+	xs := xr - k*yr // inverse horizontal shear (0 for generated shapes)
+	u := xs*xs/(rx*rx) + yr*yr/(ry*ry)
 	if u >= 1 {
 		return 0, g
 	}
 	cov = glowPeak * glowNorm * (math.Exp(-glowK*u) - glowEdge)
 	dcov := glowPeak * glowNorm * (-glowK * math.Exp(-glowK*u)) // dcov/du
-	dudxr := 2 * xr / (rx * rx)
+	dudxr := 2 * xs / (rx * rx)
 	dudyr := 2 * yr / (ry * ry)
-	g[0] = dcov * (dudxr*(-c) + dudyr*(s))  // d/dcx
-	g[1] = dcov * (dudxr*(-s) + dudyr*(-c)) // d/dcy
-	if float64(p[2]) > 1 {                  // respect the max(1,·) clamp: no gradient below the floor
-		g[2] = dcov * (-2 * xr * xr / (rx * rx * rx)) // d/drx
+	g[0] = dcov * (dudxr*-(c+k*s) + dudyr*(s))  // d/dcx
+	g[1] = dcov * (dudxr*-(s-k*c) + dudyr*(-c)) // d/dcy
+	if float64(p[2]) > 1 {                      // respect the max(1,·) clamp: no gradient below the floor
+		g[2] = dcov * (-2 * xs * xs / (rx * rx * rx)) // d/drx
 	}
 	if float64(p[3]) > 1 {
 		g[3] = dcov * (-2 * yr * yr / (ry * ry * ry)) // d/dry
 	}
-	g[4] = dcov * (2 * deg2rad * xr * yr * (1/(rx*rx) - 1/(ry*ry))) // d/dthetaDeg
+	g[4] = dcov * deg2rad * (dudxr*(yr+k*xr) + dudyr*(-xr)) // d/dthetaDeg
+	// slot 5 stays 0: shearing an ellipse yields another rotated ellipse, so the DOF is redundant here.
 	return cov, g
 }
 

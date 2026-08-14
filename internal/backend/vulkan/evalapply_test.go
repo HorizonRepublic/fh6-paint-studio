@@ -64,8 +64,26 @@ func evalFamilies() []evalFamily {
 		fs = append(fs, evalFamily{fmt.Sprintf("word %d", bank[i].Word),
 			model.Candidate{Kind: bank[i].Kind, P: [6]float32{23.5, 15.5, 10, 8, 20, 0}, Color: col(0.7, 0.4, 0.2, 0.85)}})
 	}
+	// Sheared variants of every kind that reads slot 5 as a shear. The scoring and compositing
+	// shaders each carry their own copy of the inside test, so a shear ported into one and not the
+	// other is a disagreement only these entries can see. Extents are chosen to keep each footprint
+	// clear of the transparent band the cutout variant adds at y=32.
+	for _, f := range fs {
+		switch {
+		case f.c.Kind == model.KindEllipse, f.c.Kind == model.KindRectangle,
+			f.c.Kind == model.KindGlow, f.c.Kind == model.KindDisk, model.IsMask(f.c.Kind):
+			s := f
+			s.name += "+skew"
+			s.c.P[5] = shearProbe
+			fs = append(fs, s)
+		}
+	}
 	return fs
 }
+
+// shearProbe is big enough that a shader ignoring it lands tens of percent away, and small enough
+// that every probe footprint stays on the canvas.
+const shearProbe = 0.4
 
 // checkEvalApply asserts the measured ΔSSE of applying each family matches the score Evaluate
 // promised for it.
@@ -115,8 +133,17 @@ func TestEvalMatchesApply(t *testing.T) {
 	if !gpu.MasksOnDevice() {
 		t.Fatal("mask atlas is not on the device — the dictionary family would go unchecked")
 	}
-	if len(evalFamilies()) < 7 {
-		t.Fatalf("only %d families placed — the word family is missing", len(evalFamilies()))
+	var words, sheared int
+	for _, f := range evalFamilies() {
+		if model.IsMask(f.c.Kind) {
+			words++
+		}
+		if f.c.P[5] != 0 {
+			sheared++
+		}
+	}
+	if words == 0 || sheared == 0 {
+		t.Fatalf("families are incomplete: %d words, %d sheared", words, sheared)
 	}
 	// Honest gradient scoring. The shipped search deliberately scores a glow as a solid ellipse
 	// (see TestGradientGateIsLive), which is exactly an eval/apply disagreement on purpose — so the
@@ -125,6 +152,114 @@ func TestEvalMatchesApply(t *testing.T) {
 
 	canvas := flatCanvas(caW, caH, 0.5)
 	checkEvalApply(t, gpu, canvas)
+}
+
+// TestShearReachesTheShaders asserts the shaders READ slot 5. The consistency check above cannot say
+// so on its own: two shaders that both ignore the shear agree perfectly with each other while
+// disagreeing with the raster, the preview and the game — which is exactly the state this backend was
+// in until the shear was ported.
+//
+// The probe is the composited canvas, not the score. A score is the wrong instrument here: shearing
+// an ellipse yields another ellipse of nearly the same area, and the re-solved colour absorbs most of
+// what is left, so a real shear can move ΔSSE by a fraction of a percent. Pixels do not lie.
+// Consistency then carries the result across to Evaluate.
+func TestShearReachesTheShaders(t *testing.T) {
+	// Roomy canvas and a strong shear on purpose. The footprint of a shape sheared by k widens by
+	// k·halfHeight, and the point of the second assertion below is that the widened part must still
+	// be reachable — so both variants have to fit with room to spare.
+	const w, h = 96, 80
+	// A shear past what the engine itself will ever ask for. The clipping assertion below is about
+	// the bounding-box contract, and a shear gentle enough for the UNSHEARED box to still contain the
+	// parallelogram proves nothing about it: at k=1.2 an omitted widening loses a 2% corner, which is
+	// indistinguishable from rasterisation noise. At this shear the sheared footprint is more than
+	// twice the unsheared box, so a box that does not follow the shear cannot hide.
+	const k = 3.0
+	rng := rand.New(rand.NewSource(107))
+	target, weight := smoothTarget(rng, w, h)
+	gpu, err := New(target, weight, w, h, 8)
+	if err != nil {
+		t.Skipf("vulkan unavailable: %v", err)
+	}
+	defer gpu.Close()
+	gpu.SetGradients(true)
+	canvas := flatCanvas(w, h, 0.5)
+
+	col := model.RGBA{R: 0.9, G: 0.2, B: 0.1, A: 1}
+	probes := []struct {
+		name string
+		kind model.ShapeKind
+		p    [6]float32
+	}{
+		{"ellipse", model.KindEllipse, [6]float32{48, 40, 12, 8, 20, 0}},
+		{"rectangle", model.KindRectangle, [6]float32{48, 40, 10, 8, 20, 0}},
+		{"glow", model.KindGlow, [6]float32{48, 40, 14, 10, 20, 0}},
+		{"disk", model.KindDisk, [6]float32{48, 40, 13, 9, 20, 0}},
+	}
+	if bank := maskbank.All(); len(bank) > 0 {
+		probes = append(probes, struct {
+			name string
+			kind model.ShapeKind
+			p    [6]float32
+		}{fmt.Sprintf("word %d", bank[0].Word), bank[0].Kind, [6]float32{48, 40, 20, 14, 20, 0}})
+	}
+
+	paint := func(kind model.ShapeKind, p [6]float32) []float32 {
+		t.Helper()
+		if err := gpu.Reset(canvas); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		if err := gpu.Apply(model.Candidate{Kind: kind, P: p, Color: col}); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		out := make([]float32, w*h*4)
+		if err := gpu.ReadCanvas(out); err != nil {
+			t.Fatalf("ReadCanvas: %v", err)
+		}
+		return out
+	}
+	// mass is the total ink laid down: the per-pixel departure from the flat ground, summed. It is
+	// proportional to the integral of coverage, which lets the second assertion below use a fact
+	// about the transform rather than a second rasteriser.
+	mass := func(c []float32) float64 {
+		var s float64
+		for i := 0; i < w*h; i++ {
+			s += math.Abs(float64(c[i*4] - 0.5))
+		}
+		return s
+	}
+
+	for _, pr := range probes {
+		flat := pr.p
+		sheared := pr.p
+		sheared[5] = k
+		a, b := paint(pr.kind, flat), paint(pr.kind, sheared)
+
+		moved := 0
+		for i := 0; i < w*h; i++ {
+			if math.Abs(float64(a[i*4]-b[i*4])) > 1e-4 {
+				moved++
+			}
+		}
+		if frac := float64(moved) / float64(w*h); frac < 0.01 {
+			t.Errorf("%s: shear %.1f changed %d px (%.2f%%) — the inside test is ignoring slot 5",
+				pr.name, k, moved, frac*100)
+		}
+
+		// A shear has determinant 1, so it moves ink around without creating or destroying any. The
+		// painted mass therefore has to survive it. It does NOT survive a bounding box that forgot to
+		// widen with the shear: the shape is then quietly clipped to its unsheared extent and the
+		// missing corner shows up here as lost mass. Nothing else in the suite can see that, because
+		// scoring and compositing share one bbox routine and would agree on the same truncated shape.
+		ma, mb := mass(a), mass(b)
+		if ma <= 0 {
+			t.Errorf("%s: unsheared probe painted nothing", pr.name)
+			continue
+		}
+		if lost := (ma - mb) / ma; lost > 0.10 {
+			t.Errorf("%s: shear %.1f lost %.1f%% of the painted mass (%.1f -> %.1f) — the bounding box is clipping it",
+				pr.name, k, lost*100, ma, mb)
+		}
+	}
 }
 
 // TestEvalMatchesApplyTransparent repeats the check on a cutout target. The candidates stay clear

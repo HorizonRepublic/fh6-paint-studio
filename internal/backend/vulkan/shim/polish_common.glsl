@@ -71,6 +71,7 @@ float gradCovP(int kind, float P[6], int x, int y) {
     float th = P[4] * PDEG2RAD, c = cos(th), sn = sin(th);
     float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
     float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    xr -= P[5] * yr; // mirrors raster.ellipseNormRadius
     return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
 }
 
@@ -91,18 +92,30 @@ float gaussianCovGrad(int kind, float P[6], int x, int y, out float g[6]) {
     float th = P[4] * PDEG2RAD, c = cos(th), sn = sin(th);
     float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
     float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
-    float u = xr * xr / (rx * rx) + yr * yr / (ry * ry);
+    float k = P[5];
+    float xs = xr - k * yr; // the footprint shears with the shape — mirrors raster.ellipseNormRadius
+    float u = xs * xs / (rx * rx) + yr * yr / (ry * ry);
     if (u >= 1.0) return 0.0;
     float norm = 1.0 / (1.0 - float(PGRAD_GLOW_E));
     float cov = 0.89 * norm * (exp(-2.5 * u) - float(PGRAD_GLOW_E));
     float dcov = 0.89 * norm * (-2.5 * exp(-2.5 * u));
-    float dudxr = 2.0 * xr / (rx * rx);
+    float dudxr = 2.0 * xs / (rx * rx);
     float dudyr = 2.0 * yr / (ry * ry);
-    g[0] = dcov * (dudxr * (-c) + dudyr * (sn));
-    g[1] = dcov * (dudxr * (-sn) + dudyr * (-c));
-    if (P[2] > 1.0) g[2] = dcov * (-2.0 * xr * xr / (rx * rx * rx));
+    if (k != 0.0) {
+        // Sheared: the chain picks up dxs/dcx = -(c + k·sn), dxs/dcy = -(sn − k·c), dxs/dθ = yr + k·xr.
+        // Split from the plain path so an unsheared glow stays bit-identical to what shipped.
+        g[0] = dcov * (dudxr * -(c + k * sn) + dudyr * (sn));
+        g[1] = dcov * (dudxr * -(sn - k * c) + dudyr * (-c));
+        g[4] = dcov * PDEG2RAD * (dudxr * (yr + k * xr) + dudyr * (-xr));
+    } else {
+        g[0] = dcov * (dudxr * (-c) + dudyr * (sn));
+        g[1] = dcov * (dudxr * (-sn) + dudyr * (-c));
+        g[4] = dcov * (2.0 * PDEG2RAD * xr * yr * (1.0 / (rx * rx) - 1.0 / (ry * ry)));
+    }
+    if (P[2] > 1.0) g[2] = dcov * (-2.0 * xs * xs / (rx * rx * rx));
     if (P[3] > 1.0) g[3] = dcov * (-2.0 * yr * yr / (ry * ry * ry));
-    g[4] = dcov * (2.0 * PDEG2RAD * xr * yr * (1.0 / (rx * rx) - 1.0 / (ry * ry)));
+    // g[5] stays 0. A sheared ellipse is just another rotated ellipse, so the DOF is redundant for the
+    // radial kinds and would only feed the optimiser a degenerate direction.
     return cov;
 }
 

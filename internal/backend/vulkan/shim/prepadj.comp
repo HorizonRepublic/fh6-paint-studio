@@ -24,10 +24,16 @@ void bboxSpan(int kind, float P[6], int W, int H, out int dw, out int dh) {
         float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
         if (kind == 1) {
             float hw = max(0.5, P[2]), hh = max(0.5, P[3]);
-            ex = abs(hw * c) + abs(hh * s); ey = abs(hw * s) + abs(hh * c);
+            float shx = hw + abs(P[5]) * hh;
+            ex = abs(shx * c) + abs(hh * s); ey = abs(shx * s) + abs(hh * c);
         } else {
             float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
-            ex = sqrt(rx * rx * c * c + ry * ry * s * s); ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+            if (P[5] != 0.0) {
+                float shx = sqrt(rx * rx + P[5] * P[5] * ry * ry);
+                ex = abs(shx * c) + abs(ry * s); ey = abs(shx * s) + abs(ry * c);
+            } else {
+                ex = sqrt(rx * rx * c * c + ry * ry * s * s); ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+            }
         }
         xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
         yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
