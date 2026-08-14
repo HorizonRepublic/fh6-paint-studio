@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 
 	"fh6-paint-studio/internal/metric"
@@ -42,6 +43,25 @@ const (
 
 var smoothDebug = os.Getenv("FH6_SMOOTH_DEBUG") != ""
 
+// smoothShear turns on the sheared word placements (shearedWordFits). BUST, kept behind the env for
+// the record: 25 paired runs over 9 images x 3 seeds, 6 better / 7 worse / 12 bit-identical, mean
+// +0.364% WORSE. Two lessons, both structural rather than about shears.
+//
+// First, twelve of twenty-five pairs came back byte-identical — on most images no claim ever holds a
+// ramp word, so the lever cannot fire at all. A change inert on half the sample can never clear a
+// "90% of the sample" bar however well it does where it does fire, which makes narrow pre-pass levers
+// the wrong place to spend measurement time.
+//
+// Second, where it did fire it swung hard both ways (-0.76% to +6.7%). A pre-placed claim sits under
+// the whole greedy, so changing it moves the basin the run lands in; the paired noise for that class
+// of change is about 2.8%, so the signal was never going to be readable at any affordable n.
+var smoothShear = os.Getenv("FH6_SMOOTHSHEAR") == "1"
+
+const (
+	smoothShearMin = 0.10 // under ~6° apart the sheared placement just duplicates the gradient-frame one
+	smoothShearMax = 2.00 // tan runs away as the moment and gradient axes approach a right angle
+)
+
 func smdbg(format string, a ...interface{}) {
 	if smoothDebug {
 		fmt.Fprintf(os.Stderr, "[smoothbase] "+format+"\n", a...)
@@ -52,6 +72,9 @@ func smdbg(format string, a ...interface{}) {
 // ramp; 2202/2219/2220 = arc bands for curved shading. Missing words just drop out of the menu.
 var smoothWords = []uint16{2204, 2202, 2219, 2220}
 
+// smoothRampWord is the one word in that list that shades along a straight axis.
+const smoothRampWord = 2204
+
 type smoothRegion struct {
 	cells    []int
 	px       int
@@ -60,6 +83,7 @@ type smoothRegion struct {
 	deg      float64 // principal orientation
 	gdeg     float64 // mean luma-gradient direction (ramp axis)
 	hgu, hgv float64 // half extents along the gradient axes (ramp-word frame)
+	hsu      float64 // half extent along the SHEARED x axis (sheared ramp-word frame)
 }
 
 // smoothBase segments large smooth regions and claims each with a jointly-solved minimal stack.
@@ -213,8 +237,8 @@ func (r *run) smoothBase() int {
 			return claimed
 		}
 		claimed++
-		smdbg("region %d px=%d CLAIM layers=%d Δ=%.1f soft=%.1f frame c=(%.0f,%.0f) ext=(%.0f,%.0f) θ=%.0f° ∇θ=%.0f°",
-			qi, rg.px, len(stack), delta, soft, rg.cx, rg.cy, rg.hu, rg.hv, rg.deg, rg.gdeg)
+		smdbg("region %d px=%d CLAIM layers=%d Δ=%.1f soft=%.1f frame c=(%.0f,%.0f) ext=(%.0f,%.0f) θ=%.0f° ∇θ=%.0f° picked=%s",
+			qi, rg.px, len(stack), delta, soft, rg.cx, rg.cy, rg.hu, rg.hv, rg.deg, rg.gdeg, layerTags(stack))
 	}
 	smdbg("done: regions=%d claimed=%d stacks", len(regs), claimed)
 	return claimed
@@ -291,6 +315,23 @@ func (rg *smoothRegion) computeFrame(cw, w, h int, lum []float32) {
 	}
 	rg.hgu = maxGU + smoothCell/2 + smoothPad
 	rg.hgv = maxGV + smoothCell/2 + smoothPad
+
+	// Extent along the sheared axis, measured from the cells rather than bounded from the moment box.
+	// The bound hu + |k|·hv is the value at a CORNER, and a region rarely reaches its own corner — so
+	// the bound oversizes the footprint, which is not a neutral error: spill outside the region is
+	// charged at only smoothSpill of full weight, so an oversized candidate is systematically
+	// under-penalised against the unsheared one it competes with.
+	k := math.Tan((rg.deg - rg.gdeg) * math.Pi / 180)
+	var maxS float64
+	for _, ci := range rg.cells {
+		dx := (float64(ci%cw)+0.5)*smoothCell - rg.cx
+		dy := (float64(ci/cw)+0.5)*smoothCell - rg.cy
+		u, v := dx*ca+dy*sa, -dx*sa+dy*ca
+		if s := math.Abs(u - k*v); s > maxS {
+			maxS = s
+		}
+	}
+	rg.hsu = maxS + smoothCell/2 + smoothPad
 }
 
 // split partitions the region's cells across its LONGER principal axis through the centroid.
@@ -491,9 +532,62 @@ func (r *run) smoothMenu(rg *smoothRegion) []model.Candidate {
 					menu = append(menu, wc)
 				}
 			}
+			menu = append(menu, shearedWordFits(word, kind, rg)...)
 		}
 	}
 	return menu
+}
+
+// shearedWordFits offers each gradient word a second placement, on the region's OWN moment frame
+// with a shear that aims the ramp along the luma gradient.
+//
+// Rotation alone cannot do this. A word's ramp runs along its frame's u axis, so pointing the ramp
+// at the shading direction also turns the footprint to face that way — and a region shaded across
+// its short axis then gets a box sized to the wrong axis, spilling past the region on two sides.
+// The shear decouples them: the sampler reads u from sx = kx − k·ky, whose iso-lines sit at
+// deg − atan(k), so k = tan(deg − gdeg) leaves the footprint square to the region while the ramp
+// still follows the light. Half the width has to grow by |k|·hv for the sheared box to still cover
+// the region's moment box.
+// Only the linear ramp is eligible. The identity below aims a RAMP, and a ramp is the only word here
+// whose coverage is a function of one linear coordinate; the arc bands vary with radius about a
+// centre, so "the direction the word shades in" does not exist for them and the shear would just
+// bend the arc for a reason that does not apply to it. Measured, when they were included: img_24
+// took a sheared arc and lost 16%.
+func shearedWordFits(word uint16, kind model.ShapeKind, rg *smoothRegion) []model.Candidate {
+	if !smoothShear || word != smoothRampWord {
+		return nil
+	}
+	k := math.Tan((rg.deg - rg.gdeg) * math.Pi / 180)
+	if a := math.Abs(k); a < smoothShearMin || a > smoothShearMax {
+		return nil
+	}
+	halfW := rg.hsu
+	if halfW <= 0 {
+		halfW = rg.hu + math.Abs(k)*rg.hv
+	}
+	var out []model.Candidate
+	for _, a2 := range [2]float64{rg.deg, rg.deg + 180} {
+		if wc, ok := maskShearFit(kind, rg.cx, rg.cy, halfW, rg.hv, a2, k); ok {
+			out = append(out, wc)
+		}
+	}
+	return out
+}
+
+// layerTags names the chosen stack for the debug log, marking any layer that carries a shear — the
+// one thing worth seeing when asking whether the sheared placements are being taken or merely offered.
+func layerTags(stack []model.Candidate) string {
+	var b strings.Builder
+	for i, l := range stack {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%d", l.Kind)
+		if l.P[5] != 0 {
+			fmt.Fprintf(&b, "/skew%.2f", l.P[5])
+		}
+	}
+	return b.String()
 }
 
 func isSoftKind(k model.ShapeKind) bool {
