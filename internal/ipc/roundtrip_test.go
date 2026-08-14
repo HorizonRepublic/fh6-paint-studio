@@ -121,6 +121,9 @@ func TestGenerateOverTheWire(t *testing.T) {
 		}
 		_ = eta // a 12-shape run can finish before the estimate's warm-up elapses
 	case err := <-failed:
+		if err != nil && strings.Contains(err.Error(), "vulkan init failed") {
+			t.Skipf("vulkan unavailable: %v", err) // CI box without a device/DLL — same convention as the engine suite
+		}
 		t.Fatalf("run failed over the wire: %v", err)
 	case <-time.After(4 * time.Minute):
 		t.Fatal("timed out waiting for the run to finish")
