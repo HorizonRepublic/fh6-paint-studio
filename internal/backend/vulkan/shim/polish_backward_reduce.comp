@@ -1,49 +1,70 @@
 #version 450
 #extension GL_ARB_gpu_shader_fp64 : require
 #extension GL_GOOGLE_include_directive : require
-// polish_backward_reduce.comp — TILED backward Pass B: one workgroup per shape (dispatched
-// as N workgroups in ONE call, so there are NO inter-shape barriers — each shape reads only
-// its own dcsnap region and writes only its own pgrad slot). 128 threads stride the shape's
-// bbox, re-deriving the geometry gradient and accumulating the 10 parameter gradients in
-// double, summed by a fixed-order tree reduction matching engine.polishBackward (so the
-// result is bit-identical). dC was already propagated + snapshotted by Pass A
-// (polish_dcwalk_tiled), so this pass only reads dcsnap; it never writes dC.
+// polish_backward_reduce.comp — TILED backward Pass B: gradient reduce, SLICED for load balance.
+// The original one-workgroup-per-shape layout made the dispatch wait on its largest shape: the
+// stack's summed bbox area is ~1.1 Gpx at 3000 shapes while the median shape is ~1 kpx, so a
+// canvas-sized shape ran a 100k+ iteration loop in one workgroup while thousands of others sat
+// finished (measured: capping the loop cut the pass 26×; fp64 vs fp32 accumulation moved it 9%).
+// Now the dispatch is (n, S): workgroup (si, s) reduces one contiguous CHUNK of shape si's bbox
+// — same 128-thread stride, same fixed-order tree, in double — and writes a per-slice partial.
+// polish_backward_combine.comp then sums the slice partials in ascending slice order into pgrad.
+// Deterministic (no atomics, fixed orders throughout); the summation GROUPING differs from the
+// single-workgroup original, so gradients moved at fp64 rounding level — validated by the FD test
+// (polishgrad_test.go) and re-recorded in the vkregress baseline.
+// dC was already propagated + snapshotted by Pass A (polish_dcwalk_tiled); this pass only reads
+// dcsnap; it never writes dC.
 
 layout(local_size_x = 128) in;
-layout(std430, binding = 0) readonly  buffer Pb { double Pbuf[]; };
+layout(std430, binding = 0) readonly  buffer Pb { float Pbuf[]; };
 layout(std430, binding = 1) readonly  buffer Cb { double Cbuf[]; };
 layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
 layout(std430, binding = 4) readonly  buffer Bb { float  belowb[]; };
 layout(std430, binding = 5) readonly  buffer Sb { float  dcsnap[]; };
-layout(std430, binding = 6) writeonly buffer Gb { double pgrad[]; };
 layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
 layout(std430, binding = 8) readonly  buffer Ob { int    boff[]; };
 layout(std430, binding = 11) readonly buffer MA { float maskAtlas[]; };
 layout(std430, binding = 12) readonly buffer MM { int   maskMeta[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; } pc;
+layout(std430, binding = 13) writeonly buffer Wb { double partialb[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices; } pc;
 #include "mask_common.glsl"
 #include "polish_common.glsl"
 
 const int NG = 10;
+const int SLICE_PX = 4096; // target chunk per workgroup (128 threads x 32 strided iterations)
 shared double sh[128 * NG];
+
+// sliceCount for a shape's bbox: enough slices to keep chunks near SLICE_PX, capped by the
+// dispatch height. MUST match polish_backward_combine.comp exactly.
+int sliceCount(int total) {
+    int s = (total + SLICE_PX - 1) / SLICE_PX;
+    return s < 1 ? 1 : (s > pc.slices ? pc.slices : s);
+}
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
     int si = int(gl_WorkGroupID.x);
     if (si >= pc.n) si = pc.n - 1; // never fires (exactly n workgroups dispatched); keeps si uniform-safe
+    int sl = int(gl_WorkGroupID.y);
+
+    int xMin = bbx[si * 4], yMin = bbx[si * 4 + 1], xMax = bbx[si * 4 + 2], yMax = bbx[si * 4 + 3];
+    int bw = xMax - xMin + 1, bh = yMax - yMin + 1;
+    int total = (bw < 1 || bh < 1) ? 0 : bw * bh;
+    if (total < 1 || sl >= sliceCount(total)) return; // combine never reads this slice's slot
+
     int kind = Kbuf[si];
-    float P[6]; for (int k = 0; k < 6; k++) P[k] = float(Pbuf[si * 6 + k]);
+    float P[6]; for (int k = 0; k < 6; k++) P[k] = Pbuf[si * 6 + k];
     float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]), A = float(Cbuf[si * 4 + 3]);
     bool opt = optGeoKind(kind);
 
     double acc[NG];
     for (int k = 0; k < NG; k++) acc[k] = 0.0LF;
 
-    int xMin = bbx[si * 4], yMin = bbx[si * 4 + 1], xMax = bbx[si * 4 + 2], yMax = bbx[si * 4 + 3];
-    int bw = xMax - xMin + 1, bh = yMax - yMin + 1;
-    int total = (bw < 1 || bh < 1) ? 0 : bw * bh;
+    int chunk = (total + sliceCount(total) - 1) / sliceCount(total);
+    int lo = sl * chunk;
+    int hi = lo + chunk; if (hi > total) hi = total;
     int bo = boff[si];
-    for (int tid = int(lid); tid < total; tid += 128) {
+    for (int tid = lo + int(lid); tid < hi; tid += 128) {
         int x = xMin + tid % bw, y = yMin + tid / bw;
         int bi = bo + tid * 4;
 
@@ -97,5 +118,5 @@ void main() {
         barrier();
     }
     if (lid == 0u)
-        for (int k = 0; k < NG; k++) pgrad[si * NG + k] = sh[uint(k)];
+        for (int k = 0; k < NG; k++) partialb[(si * pc.slices + sl) * NG + k] = sh[uint(k)];
 }

@@ -45,12 +45,14 @@ bool insideShape(int kind, float P[6], int x, int y) {
         float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
         float dx = px - cx, dy = py - cy;
         float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        xr -= P[5] * yr; // inverse shear — mirrors raster.RectInside
         return abs(xr) <= hw && abs(yr) <= hh;
     } else {
         float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
         float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
         float dx = px - cx, dy = py - cy;
         float xr = dx * c + dy * s, yr = -dx * s + dy * c;
+        xr -= P[5] * yr; // mirrors raster.EllipseInside
         return xr * xr / (rx * rx) + yr * yr / (ry * ry) <= 1.0;
     }
 }
@@ -75,6 +77,7 @@ float gradCovP(int kind, float P[6], int x, int y) {
     float c = cos(th), sn = sin(th);
     float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
     float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    xr -= P[5] * yr; // mirrors raster.ellipseNormRadius
     return gradFalloff(kind, xr * xr / (rx * rx) + yr * yr / (ry * ry));
 }
 
@@ -99,13 +102,20 @@ void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out 
     } else if (kind == 1) {
         float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
         float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
-        float ex = abs(hw * c) + abs(hh * s), ey = abs(hw * s) + abs(hh * c);
+        float shx = hw + abs(P[5]) * hh; // shear widens the x half-extent — mirrors raster.RectBBox
+        float ex = abs(shx * c) + abs(hh * s), ey = abs(shx * s) + abs(hh * c);
         xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
         yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
     } else {
         float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
         float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
-        float ex = sqrt(rx * rx * c * c + ry * ry * s * s), ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+        float ex, ey;
+        if (P[5] != 0.0) { // mirrors raster.EllipseBBox: conservative box around the sheared ellipse
+            float shx = sqrt(rx * rx + P[5] * P[5] * ry * ry);
+            ex = abs(shx * c) + abs(ry * s); ey = abs(shx * s) + abs(ry * c);
+        } else {
+            ex = sqrt(rx * rx * c * c + ry * ry * s * s); ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+        }
         xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
         yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
     }

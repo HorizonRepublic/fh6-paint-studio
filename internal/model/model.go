@@ -96,8 +96,13 @@ func (c Candidate) ToShape(score float64) Shape {
 	}
 	switch c.Kind {
 	case KindRectangle:
-		return Shape{Type: TypeRotatedRectangle, Color: col, Score: score,
-			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
+		// A sheared rectangle (skew != 0) is a parallelogram — carry the raw skew as a 6th field so the
+		// render/injector reproduce it. skew == 0 stays 5 fields, so every non-sheared rect is unchanged.
+		data := []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}
+		if c.P[5] != 0 {
+			data = append(data, float64(c.P[5]))
+		}
+		return Shape{Type: TypeRotatedRectangle, Color: col, Score: score, Data: data}
 	case KindTriangle:
 		return Shape{Type: TypeTriangle, Color: col, Score: score,
 			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), float64(c.P[4]), float64(c.P[5])}}

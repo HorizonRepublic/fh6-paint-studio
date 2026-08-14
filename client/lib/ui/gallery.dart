@@ -213,7 +213,7 @@ class _GalleryState extends State<Gallery> {
     //
     // Offering only known modes was wrong in the other direction: a library
     // built by the previous studio stores whatever that build called the
-    // preset — including localised names like "гібрид" — so filtering by the
+    // preset — including localised names in the user's language — so filtering by the
     // engine's vocabulary alone left a library of a hundred runs with no
     // filters at all. What is on disk decides; the label is cosmetic.
     final present = <String>{

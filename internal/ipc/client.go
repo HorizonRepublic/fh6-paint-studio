@@ -31,8 +31,9 @@ type Client struct {
 // A closed sum type would be tidier, but a UI switches on this in one place and a flat struct keeps
 // the callback signature stable as events are added.
 type Update struct {
-	Kind     string // "progress" | "status" | "log" | "frame" | "done" | "failed"
+	Kind     string // "progress" | "phase" | "status" | "log" | "frame" | "done" | "failed"
 	Progress ProgressEvent
+	Phase    PhaseEvent
 	Stage    string
 	Line     string
 	Frame    *image.NRGBA
@@ -101,6 +102,10 @@ func (c *Client) route(resp Response) {
 		var p ProgressEvent
 		_ = json.Unmarshal(resp.Result, &p)
 		c.deliver(resp.ID, Update{Kind: "progress", Progress: p})
+	case "phase":
+		var p PhaseEvent
+		_ = json.Unmarshal(resp.Result, &p)
+		c.deliver(resp.ID, Update{Kind: "phase", Phase: p})
 	case "status":
 		var p StatusEvent
 		_ = json.Unmarshal(resp.Result, &p)

@@ -100,7 +100,7 @@ func TestResolvePhotoMode(t *testing.T) {
 
 func TestResolveTransparentForcesOpaque(t *testing.T) {
 	// A transparent image is classified by CONTENT (not a blanket "cutout"), but transparency must
-	// still force opaque shapes + the transparent-bg pipeline regardless of the classified mode вЂ”
+	// still force opaque shapes + the transparent-bg pipeline regardless of the classified mode —
 	// so a smooth anime cutout gets its content's soft treatment while staying solid on the car.
 	r := Resolve(fixture(true), DefaultChoices()) // auto: classify content, force opaque
 

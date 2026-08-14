@@ -90,6 +90,8 @@ type Options struct {
 	RampGlow          bool          // ramp-aware hotter glow swap (opt-in, BUST — not defaulted; needs RegionKinds): precompute metric.RampMap of the target and, where a cell reads as a genuine smooth gradient (ramp > thresh), run the deep-smooth glow swap at a HOTTER tau/prob than the global pair. Aimed to recover the img_10 win from a global tau-raise without its structured-content regression; measured noise (img_10 SSE +0.01% parity) because the global win came from moderate-hardness cells RampMap excludes. Code kept + CLI-reachable; on-device via fp_set_ramp_glow (rides fp_set_kind_gate + fp_set_glow_swap), inert when off. See regionkinds.go.
 	SoftSwapTol       float64       // post-polish SOFT-SWAP standout repair (opt-in, 0 = off): replace the worst standout rect/triangle shapes (rim draws an edge the target lacks) with a soft/round shape moment-fitted to the SAME footprint (ellipse / feathered disk / glow; same colour + z), gated so the GLOBAL error rises at most this fraction. Substitution keeps the coverage, so — unlike StandoutTol's recolour/fade/remove menu, which live polish starves at the gate — many repairs fit in the same budget. ~0.005-0.02. Judge by eye; see softswap.go.
 	RimAim            bool          // aim the soft-swap by RIM DEBT instead of interior false-edge mass, and let it consider ELLIPSES (rimsalience.go). The artefact the owner names — a contour of the reconstruction standing on ground the picture leaves smooth — is a property of a shape's boundary and sits mostly on ellipses, which the original ordering never even offered as candidates. Measured out of the engine (post-hoc on finished stacks): softening the worst offenders removes ~23% of the rim debt at no SSE cost, while softening the same NUMBER of random shapes makes the rim debt worse — so the aim, not the softening, is what does the work. Needs SoftSwapTol.
+	SkewRefine        bool          // post-polish monotone SHEAR refine (skewrefine.go): line-search slot 5 for every rectangle and bank word, keep it only where the exact occlusion-aware local error falls, then gate the whole pass end to end. Ellipse/glow/disk are excluded — a sheared ellipse is another rotated ellipse, so the shear buys them nothing. Chosen over a sixth polish DOF, which cleared the bar on only 4 of 7 pairs because the shear trades against rotation and width and moves the whole basin.
+	GeomRefine        bool          // post-polish monotone COORDINATE refine (skewrefine.go): the same monotone machinery walking EVERY geometry parameter of every shape, not just the shear. Motivated by a measurement — a line search over an ellipse shear, a parameter that buys the ellipse no new shape, still recovered 0.5-3%, so the polish leaves its shapes short of the local optimum and any spare direction cashes that in. Supersedes SkewRefine when both are set.
 	SoftSwapPre       bool          // soft-swap PRE-polish variant: run the swap on the GREEDY result and let the joint polish co-adapt around the substitutions, gated end-to-end (polish(greedy) vs polish(swap(greedy)): keep the swap branch only if SSE lands within SoftSwapTol AND the global false-edge ratio improves). The post-polish pass starves at the cumulative gate (~4-7 swaps — every substitution on a converged optimum costs irreducible SSE); pre-polish the redistribution is the polish's job. Needs Polish; no-op with BackFit (trio partition).
 	ZSwapTrials       int           // z-order local swap EXPERIMENT (opt-in, 0 = off): after polish, try swapping up to this many z-adjacent overlapping pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render — keep the cap modest. Aimed at opaque/flat content where stack order owns contested pixels.
 	PersistGain       float64       // persistent-error sampling EXPERIMENT (opt-in, 0 = off): upweight sampling cells whose error stagnates across refreshes by (1 + gain·stagnation), so small stubborn details (a saturated iris) stop losing the importance lottery to big soft regions. Sampling-only — the accept gate, knee and progress stay on the raw grid. See persist.go.
@@ -130,8 +132,9 @@ type Options struct {
 	AnnealIters       int           // EXPERIMENTAL basin-hopping / iterated local search (0 = off): after greedy+polish, run N outer iterations that randomly kick (remove low-value shapes + regrow vs residual), short-re-polish, and Metropolis-accept (escaping the greedy local minimum), keeping the best. For the LOW-budget "economy" regime (50-300 shapes) where greedy is most stuck; too costly at full budget. Keep-best gated -> never finishes worse. Host-side -> golden-diff safe.
 	LockColor         *model.RGBA   // MONO single-colour mode (brand logo / decal): when set, EVERY reconstruction shape is snapped to this exact working-space colour at the end of the run. Pairs with a target binarized to the same colour (engine.BinarizeForLock at the call site) so the grey antialiased-edge shapes never appear. nil = off. Host-side -> golden-diff safe.
 	Progress          func(shapes int, currentError float64)
-	Status            func(stage string) // optional: called at the START of each post-greedy phase (polish / back-fit / standout) with a human label, so a UI can show "what it's doing now" instead of a bar stuck at 100%. nil = ignored.
-	Cancel            func() bool        // optional: checked at the loop top + before the polish/backfit post-process; return true to stop early (keeps the shapes placed so far). nil = never cancel.
+	Status            func(stage string)  // optional: called at the START of each post-greedy phase (polish / back-fit / standout) with a human label, so a UI can show "what it's doing now" instead of a bar stuck at 100%. nil = ignored.
+	OnPhase           func(PhaseProgress) // optional: run-wide progress + a time estimate covering EVERY phase, not just the greedy loop (see eta.go). nil = not computed.
+	Cancel            func() bool         // optional: checked at the loop top + before the polish/backfit post-process; return true to stop early (keeps the shapes placed so far). nil = never cancel.
 }
 
 type Result struct {
@@ -145,7 +148,8 @@ type Result struct {
 // phases (Evaluate/Apply/ErrorGrid) are split so we can see whether the GPU or
 // the host serial work dominates. Sum of phases ≈ Total (minus tiny untimed glue).
 type Timings struct {
-	Setup        time.Duration    // one-time: initial canvas/grid + orientation map
+	Setup        time.Duration    // one-time: initial canvas/grid + backend wiring (metric maps split into Maps)
+	Maps         time.Duration    // setup's metric maps: orientation/coherence, hard-edge, detail grid, boundary distance, ramp
 	Generate     time.Duration    // RandomShapes — host candidate generation
 	Mutate       time.Duration    // MutateShape — host hill-climb mutation
 	Evaluate     time.Duration    // backend.Evaluate — scoring (GPU eval + transfer)
@@ -161,7 +165,34 @@ type Timings struct {
 	PolishPost   float64          // soft-render weighted SSE after polish
 	PolishPhases [7]time.Duration // GPU-polish per-phase breakdown: upload,forward,loss,backward,readgrad,adam,hardloss
 	PolishIters  int              // actual polish iterations run (plateau early-stop may cut the configured Iters short)
-	Total        time.Duration
+
+	// Pre-greedy claims and post-greedy passes. Each is the pass's OWN cost: the polish, colour solve
+	// and merge a pass nests are billed to their own field and subtracted here, so the fields stay
+	// disjoint and Total-Accounted is a real blind spot rather than double counting.
+	SmoothBase  time.Duration // smooth-region gradient base claims (smoothbase.go)
+	ShadePre    time.Duration // shading pre-pass (shadepre.go)
+	GlyphPre    time.Duration // glyph pre-pass (glyphpre.go)
+	LooRefit    time.Duration // LOO refit rounds (loorefit.go)
+	LooRounds   int           // LOO rounds entered (the loop stops early when a round finds nothing to regrow or fails its gate)
+	MergeRefit  time.Duration // near-duplicate merge inside the LOO rounds (mergerefit.go)
+	GlobalColor time.Duration // joint colour/alpha re-solve (globalcolor.go), incl. the in-LOO solves
+	ArtifactFix time.Duration // artifact-repair pass (artifactfix.go)
+	Anneal      time.Duration // basin-hopping / iterated local search (anneal.go)
+	ZSwap       time.Duration // z-order swap trials (zswap.go)
+	SoftSwap    time.Duration // standout soft-swap, pre- and post-polish forms (softswap.go)
+	Standout    time.Duration // standout suppression (standout.go)
+	SkewRefine  time.Duration // monotone shear refine (skewrefine.go)
+
+	Total time.Duration
+}
+
+// Accounted is the sum of every measured phase. Total minus this is the run's UNMEASURED time — the
+// number that makes a new blind spot visible instead of silently absorbing the next expensive pass.
+func (t Timings) Accounted() time.Duration {
+	return t.Setup + t.Maps + t.Generate + t.Mutate + t.Evaluate + t.Apply + t.ErrorGrid + t.Sampler +
+		t.PostProcess + t.BackFit + t.Polish + t.SmoothBase + t.ShadePre + t.GlyphPre + t.LooRefit +
+		t.MergeRefit + t.GlobalColor + t.ArtifactFix + t.Anneal + t.ZSwap + t.SoftSwap + t.Standout +
+		t.SkewRefine
 }
 
 const maxNoImprove = 100
@@ -281,12 +312,10 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	if opt.PolishOpts.AlphaMin == 0 && opt.AllowAlpha && !opt.TransparentBG {
 		opt.PolishOpts.AlphaMin = polishAlphaFloor(opt.AlphaMin)
 	}
-	// Use the GPU polish primitives when the backend provides them (CUDA), else the pure-Go
-	// reference. Both run the same algorithm; the GPU path just moves forward/loss/backward
-	// onto the device. A non-zero false-edge λ needs the device-side term (fp_set_polish_false_edge);
-	// when the backend lacks it the CPU driver carries the experiment.
+	// Polish runs on the device (the only backend). A non-zero false-edge λ needs the device-side
+	// term (fp_set_polish_false_edge); when the backend lacks it the term is dropped, not the polish.
 	// Region-weighted terms: build the 1−hard map once per run (Options.TermRegionWeight); the
-	// setters below ship it to the device, the CPU driver reads it natively.
+	// setters below ship it to the device.
 	if opt.TermRegionWeight && opt.PolishOpts.TermWeight == nil &&
 		(opt.PolishOpts.FalseEdgeLambda > 0 || opt.PolishOpts.EagleLambda > 0) {
 		hard := metric.HardEdgeMap(be.Target(), w, h)
@@ -326,12 +355,11 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		}
 	}
 	var pr PolishResult
-	// The collision diagnostic instruments the host backward pass only, so asking for it forces the
-	// CPU driver — otherwise it would silently report nothing on the backend we actually ship.
-	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK && !absGradOn() {
+	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() && feOK && ssimOK && eagleOK {
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
-		pr = Polish(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts)
+		applog.Printf("polish: device lacks polish support — skipping polish (shapes returned unpolished)")
+		pr = PolishResult{Shapes: shapes}
 	}
 	recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
 	_ = be.Reset(initCanvas)

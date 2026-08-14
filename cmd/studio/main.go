@@ -118,8 +118,8 @@ func loop(w *app.Window) error {
 	}
 	st.Version = version
 	backends := backendOptions()
-	st.SetBackends(backends)               // a picker when >1 GPU backend works (allgpu build), else a static label
-	runner.BackendPreference = backends[0] // default to the system's preferred (CUDA where present, else Vulkan)
+	st.SetBackends(backends)               // a static label: Vulkan is the only backend
+	runner.BackendPreference = backends[0] // Vulkan — the only backend
 	st.UpdateCheckEnabled = updateCheckEnabled
 	prefs := loadConfig()
 	st.SoundOn.Value = prefs.SoundOn() // restore the persisted "sound on finish" preference

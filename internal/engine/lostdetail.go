@@ -6,7 +6,7 @@ import "math"
 // The MIRROR of the false-edge term (falseedge.go), and the artifact it exists to catch is the one
 // that survived every detector we had:
 //
-//	L = SSE + λ · Σ_q relu(|∇L_target|(q) − |∇L_recon|(q))ну
+//	L = SSE + λ · Σ_q relu(|∇L_target|(q) − |∇L_recon|(q))
 //
 // FE charges edges the recon INVENTS (a shape rim in smooth content — the classic standout). Nothing
 // charged the opposite: structure the recon ERASES. A rimless glow has no edge by construction, so

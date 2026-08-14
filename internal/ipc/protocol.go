@@ -78,6 +78,14 @@ type (
 		Err       float64 `json:"err"`
 		ElapsedMs int64   `json:"elapsedMs"`
 	}
+	// PhaseEvent is run-wide progress with a time estimate. ProgressEvent counts shapes, which stops
+	// meaning anything once placement ends; this one spans the polish and the post-passes too.
+	PhaseEvent struct {
+		Phase     string  `json:"phase"`
+		PhaseFrac float64 `json:"phaseFrac"`
+		Overall   float64 `json:"overall"`
+		EtaMs     int64   `json:"etaMs"`
+	}
 	// StatusEvent names the current post-greedy phase; an empty stage clears it.
 	StatusEvent struct {
 		Stage string `json:"stage"`

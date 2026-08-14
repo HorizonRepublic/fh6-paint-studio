@@ -15,7 +15,7 @@ import (
 	"fh6-paint-studio/internal/preset"
 )
 
-// BackendPreference biases newBackend toward a named GPU backend ("CUDA"/"Vulkan") on allgpu builds
+// BackendPreference names the GPU backend the UI shows ("Vulkan" — the only one)
 // where both are compiled in. Empty = the build's default order (CUDA first). Single-backend builds
 // ignore it. Set by the studio's engine picker.
 var BackendPreference string
@@ -84,6 +84,10 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		opt := r.Options
 		opt.Cancel = stop.Load
 		opt.Status = func(stage string) { onEvent(Status{Stage: stage}) }
+		// Already throttled by the engine (a few a second), so it can go straight onto the event stream.
+		opt.OnPhase = func(p engine.PhaseProgress) {
+			onEvent(Phase{Name: p.Phase, PhaseFrac: p.PhaseFrac, Overall: p.Overall, ETA: p.ETA})
+		}
 		total := opt.StopAt
 		if total < 1 {
 			total = 1
@@ -173,7 +177,7 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		// injection places, IDENTICAL to the CLI's WYSIWYG preview. NOT readCanvas: the engine's working
 		// canvas composites in the working space (sRGB-byte when not linear) at float precision, so it
 		// does NOT match the injected 8-bit shapes composited in LINEAR by the game. That mismatch was
-		// the "preview perfect, inject квашня" gap. RenderFH6 closes it: preview == inject == game.
+		// the "preview perfect, injected result mushy" gap. RenderFH6 closes it: preview == inject == game.
 		canvas := renderInGame(res.Shapes, opt.TransparentBG, w, h)
 		release()
 		onEvent(Done{Result: res, Canvas: canvas, Backend: name})

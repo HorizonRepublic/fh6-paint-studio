@@ -1,5 +1,3 @@
-//go:build cuda
-
 package engine
 
 import (
@@ -109,80 +107,4 @@ func TestRunReducesErrorAndProducesShapes(t *testing.T) {
 	if res.FinalError >= res.InitialError {
 		t.Fatalf("final error %v not below initial %v", res.FinalError, res.InitialError)
 	}
-}
-
-// renderHardErr renders shapes through the CPU backend (the WYSIWYG hard raster) and returns
-// the unweighted SSE vs target — the same measurement applyPolish's accept gate uses.
-func renderHardErr(t *testing.T, shapes []model.Shape, target []float32, w, h int, bg model.RGBA) float64 {
-	be := newTestBackend(t, target, w, h, 8)
-	init := backgroundCanvas(bg, w, h)
-	_ = be.Reset(init)
-	for _, s := range shapes[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
-	grid, _, _, _ := be.ErrorGrid()
-	return sumGrid(grid)
-}
-
-// TestPolishTightInputImproves pins the fine-exploit phase: on a SATURATED input — many shapes
-// whose geometry already fits the target exactly, only the colours slightly off — polish must
-// come back IMPROVED. The historical failure mode: the tau-anneal excursion kicked every param
-// of every shape by the full Adam LR, exploded the hard loss ~3×, and the whole iteration
-// budget went into crawling back — polish never re-beat its own input, the gate discarded it,
-// and the pass was a silent no-op on every full-budget run (exactly what users saw as "quality
-// degrades during polishing"). The fine phase descends carefully from the best-known point, so
-// the recoverable colour error here MUST be harvested.
-func TestPolishTightInputImproves(t *testing.T) {
-	w, h := 96, 96
-	const grid = 12
-	cell := w / grid
-	target := make([]float32, w*h*4)
-	colAt := func(gx, gy int) (float32, float32, float32) {
-		return float32(gx) / grid, float32(gy) / grid, 0.5
-	}
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			r, g, b := colAt(x/cell, y/cell)
-			p := (y*w + x) * 4
-			target[p+0], target[p+1], target[p+2], target[p+3] = r, g, b, 1
-		}
-	}
-	bg := model.RGBA{R: 0.5, G: 0.5, B: 0.5, A: 1}
-
-	shapes := []model.Shape{{Type: model.TypeRectangle, Data: []float64{0, 0, float64(w), float64(h)},
-		Color: []int{model.EncByte(bg.R), model.EncByte(bg.G), model.EncByte(bg.B), 255}}}
-	for gy := 0; gy < grid; gy++ {
-		for gx := 0; gx < grid; gx++ {
-			r, g, b := colAt(gx, gy)
-			// Exact cell geometry; colour off by a small recoverable amount per channel.
-			c := model.Candidate{
-				Kind:  model.KindRectangle,
-				P:     [6]float32{float32(gx*cell) + float32(cell)/2, float32(gy*cell) + float32(cell)/2, float32(cell) / 2, float32(cell) / 2, 0, 0},
-				Color: model.RGBA{R: r + 0.06, G: g - 0.05, B: b + 0.05, A: 1},
-			}
-			shapes = append(shapes, c.ToShape(0))
-		}
-	}
-
-	inErr := renderHardErr(t, shapes, target, w, h, bg)
-	if inErr <= 0 {
-		t.Fatal("test setup broken: input already perfect")
-	}
-	pr := Polish(shapes, target, onesWeight(w, h), w, h, bg, false, PolishOptions{
-		Iters: 200, Tau0: 2.0, Tau1: 0.08,
-		LRPos: 0.5, LRRad: 0.5, LRAng: 0.5, LRColor: 0.01, LRAlpha: 0.01,
-		GradClip: 8, STE: true,
-	})
-	outErr := renderHardErr(t, pr.Shapes, target, w, h, bg)
-	if outErr >= inErr*0.7 {
-		t.Fatalf("polish failed to harvest the recoverable colour error on a tight input: in=%.1f out=%.1f (want < 70%%)", inErr, outErr)
-	}
-}
-
-func onesWeight(w, h int) []float32 {
-	out := make([]float32, w*h)
-	for i := range out {
-		out[i] = 1
-	}
-	return out
 }

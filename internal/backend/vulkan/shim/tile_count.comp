@@ -7,7 +7,7 @@
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Xb { int bbx[]; };    // n*4: xMin,yMin,xMax,yMax
 layout(std430, binding = 1) writeonly buffer Cb { int counts[]; };
-layout(push_constant) uniform PC { int n, tilesX, nTiles, tile; } pc;
+layout(push_constant) uniform PC { int n, tilesX, nTiles, tile, cap; } pc;
 
 void main() {
     int t = int(gl_GlobalInvocationID.x);

@@ -1,5 +1,3 @@
-//go:build vulkan || cuda
-
 package ipc
 
 import (
@@ -10,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -42,8 +41,10 @@ func TestGenerateOverTheWire(t *testing.T) {
 	go func() { _ = c.Listen() }()
 
 	var mu sync.Mutex
-	var logs, progress, frames int
+	var logs, progress, frames, phases int
 	var lastShapes int
+	var lastOverall float64
+	var sawETA, overallWentBack bool
 	var frameW, frameH int
 	done := make(chan DoneEvent, 1)
 	failed := make(chan error, 1)
@@ -61,6 +62,15 @@ func TestGenerateOverTheWire(t *testing.T) {
 		case "progress":
 			progress++
 			lastShapes = u.Progress.Shapes
+		case "phase":
+			phases++
+			if u.Phase.Overall < lastOverall {
+				overallWentBack = true
+			}
+			lastOverall = u.Phase.Overall
+			if u.Phase.EtaMs > 0 {
+				sawETA = true
+			}
 		case "frame":
 			frames++
 			frameW, frameH = u.Frame.Bounds().Dx(), u.Frame.Bounds().Dy()
@@ -95,7 +105,25 @@ func TestGenerateOverTheWire(t *testing.T) {
 		if _, err := os.Stat(out); err != nil {
 			t.Errorf("geometry not written: %v", err)
 		}
+		// Run-wide progress has to reach the client, or its countdown goes quiet the moment shape
+		// placement ends — which is most of a real run.
+		mu.Lock()
+		p, ov, back, eta := phases, lastOverall, overallWentBack, sawETA
+		mu.Unlock()
+		if p == 0 {
+			t.Error("no phase events arrived over the wire")
+		}
+		if back {
+			t.Error("overall progress went backwards")
+		}
+		if ov <= 0 || ov > 1.0001 {
+			t.Errorf("final overall progress = %.4f, want (0,1]", ov)
+		}
+		_ = eta // a 12-shape run can finish before the estimate's warm-up elapses
 	case err := <-failed:
+		if err != nil && strings.Contains(err.Error(), "vulkan init failed") {
+			t.Skipf("vulkan unavailable: %v", err) // CI box without a device/DLL — same convention as the engine suite
+		}
 		t.Fatalf("run failed over the wire: %v", err)
 	case <-time.After(4 * time.Minute):
 		t.Fatal("timed out waiting for the run to finish")
@@ -179,6 +207,9 @@ func TestRegionAndSurroundSurviveTheWire(t *testing.T) {
 			t.Errorf("base rect starts at x=%.1f, want a negative origin — the surround was not taken back off", x)
 		}
 	case err := <-failed:
+		if err != nil && strings.Contains(err.Error(), "vulkan init failed") {
+			t.Skipf("vulkan unavailable: %v", err) // CI box without a device/DLL — same convention as the engine suite
+		}
 		t.Fatalf("run failed: %v", err)
 	case <-time.After(4 * time.Minute):
 		t.Fatal("timed out")

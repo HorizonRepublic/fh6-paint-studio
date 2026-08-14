@@ -59,6 +59,7 @@ type run struct {
 	w   int
 	h   int
 	tm  Timings
+	eta *etaTracker
 
 	// Normalised options + schedule, resolved once in newRun.
 	kinds       []model.ShapeKind
@@ -115,6 +116,7 @@ type run struct {
 func Run(be backend.Backend, opt Options) Result {
 	runStart := time.Now()
 	r := newRun(be, opt)
+	defer r.eta.stop()
 	if opt.LiveBatch > 0 {
 		r.live() // EXPERIMENTAL co-adaptation scheduler for the structural base...
 		if len(r.shapes)-1 < r.genTarget {
@@ -122,14 +124,20 @@ func Run(be backend.Backend, opt Options) Result {
 		}
 	} else {
 		if r.opt.SmoothBase {
-			r.smoothBase() // broad smooth-region stacks claim FIRST (deepest in the z-stack)
+			r.phase("Claiming smooth regions…")
+			r.timePass(&r.tm.SmoothBase, func() {
+				r.smoothBase() // broad smooth-region stacks claim FIRST (deepest in the z-stack)
+			})
 		}
 		if r.opt.ShadePrepass && r.glyphs {
-			r.shadePrepass()
+			r.phase("Claiming shading…")
+			r.timePass(&r.tm.ShadePre, func() { r.shadePrepass() })
 		}
 		if r.opt.GlyphPrepass && r.glyphs {
-			r.glyphPrepass()
+			r.phase("Claiming words…")
+			r.timePass(&r.tm.GlyphPre, func() { r.glyphPrepass() })
 		}
+		r.phase("Placing shapes…")
 		r.greedy()
 	}
 	if r.opt.CompSeeds > 0 {
@@ -147,6 +155,20 @@ func Run(be backend.Backend, opt Options) Result {
 // on-device search handles. It consumes no randomness — the RNG is first used in the greedy loop.
 func newRun(be backend.Backend, opt Options) *run {
 	var tm Timings
+	eta := newETA(opt, time.Now(), opt.OnPhase)
+	// The polish counts its own iterations, and so does every re-polish a later pass runs, so routing
+	// it here gives the estimate a live signal through the longest phases without each pass wiring one.
+	if eta != nil {
+		prev := opt.PolishOpts.OnProgress
+		opt.PolishOpts.OnProgress = func(iter, total int) {
+			if total > 0 {
+				eta.setFrac(float64(iter) / float64(total))
+			}
+			if prev != nil {
+				prev(iter, total)
+			}
+		}
+	}
 	rng := rand.New(rand.NewSource(seed(opt.Seed)))
 	w, h := opt.Width, opt.Height
 	if opt.RandomSamples < 1 {
@@ -250,18 +272,29 @@ func newRun(be backend.Backend, opt Options) *run {
 		genTarget = int(float32(opt.StopAt) * opt.Overdraw)
 	}
 
+	// The target-derived metric maps below are native-resolution CPU sweeps; they bill to Timings.Maps
+	// rather than hiding inside Setup.
+	var mapsDur time.Duration
+	timeMaps := func(f func()) {
+		t0 := time.Now()
+		f()
+		mapsDur += time.Since(t0)
+	}
+
 	// Edge-orientation map: seed elongated shapes along local edges (hair, folds). With
 	// OrientAspect > 1 the same structure tensor also yields the per-pixel COHERENCE, which the
 	// generator uses to decide HOW elongated a candidate should be — the orientation alone is
 	// defined even in flat regions, where it is noise.
 	var orient, coh []float32
 	aspectCap := float32(opt.OrientAspect)
-	if aspectCap > 1 {
-		orient, coh = metric.OrientationCoherenceMap(be.Target(), w, h)
-	} else {
-		orient = metric.OrientationMap(be.Target(), w, h)
-		aspectCap = 0
-	}
+	timeMaps(func() {
+		if aspectCap > 1 {
+			orient, coh = metric.OrientationCoherenceMap(be.Target(), w, h)
+		} else {
+			orient = metric.OrientationMap(be.Target(), w, h)
+			aspectCap = 0
+		}
+	})
 
 	// Region-weighted polish terms: build the 1−HardEdgeMap ONCE here instead of on every polish call.
 	// applyPolish takes opt by value, so base, back-fit, LOO re-polish, anneal and soft-swap each
@@ -270,12 +303,14 @@ func newRun(be backend.Backend, opt Options) *run {
 	// does not simply rebuilds as before (identical value, so output is unchanged either way).
 	if opt.TermRegionWeight && opt.PolishOpts.TermWeight == nil &&
 		(opt.PolishOpts.FalseEdgeLambda > 0 || opt.PolishOpts.EagleLambda > 0) {
-		hard := metric.HardEdgeMap(be.Target(), w, h)
-		tw := make([]float32, len(hard))
-		for i, hv := range hard {
-			tw[i] = 1 - hv
-		}
-		opt.PolishOpts.TermWeight = tw
+		timeMaps(func() {
+			hard := metric.HardEdgeMap(be.Target(), w, h)
+			tw := make([]float32, len(hard))
+			for i, hv := range hard {
+				tw[i] = 1 - hv
+			}
+			opt.PolishOpts.TermWeight = tw
+		})
 	}
 
 	// Detail-weighted sampling (opt-in via DetailStrength>0): precompute a target-detail
@@ -289,7 +324,7 @@ func newRun(be backend.Backend, opt Options) *run {
 		detailStart = defaultDetailStart
 	}
 	if opt.DetailStrength > 0 || opt.SaliencyQuota > 0 {
-		detailGrid = metric.DetailGrid(be.Target(), w, h, gw, gh)
+		timeMaps(func() { detailGrid = metric.DetailGrid(be.Target(), w, h, gw, gh) })
 	}
 
 	// Boundary-aware radius (opt-in via BoundaryRadius): precompute a distance-to-boundary
@@ -306,9 +341,11 @@ func newRun(be backend.Backend, opt Options) *run {
 		if bstart <= 0 {
 			bstart = defaultBoundaryStart
 		}
-		if dist := metric.BoundaryDistance(be.Target(), w, h, boundaryEdgeThreshold); dist != nil {
-			boundCtx = &boundaryCtx{dist: dist, padding: pad, start: bstart}
-		}
+		timeMaps(func() {
+			if dist := metric.BoundaryDistance(be.Target(), w, h, boundaryEdgeThreshold); dist != nil {
+				boundCtx = &boundaryCtx{dist: dist, padding: pad, start: bstart}
+			}
+		})
 	}
 
 	// Region-gated kinds (RegionKinds; anime default): precompute the target's hard-structure map
@@ -320,11 +357,13 @@ func newRun(be backend.Backend, opt Options) *run {
 	// DLL, or force host gating with OnDeviceSearch off).
 	var kg *kindGate
 	if opt.RegionKinds {
-		glowTau, glowProb := resolveSmoothGlow(opt.SmoothGlowTau, opt.SmoothGlowProb)
-		kg = &kindGate{hard: gateHardMap(be.Target(), w, h, opt), w: w, h: h, tau: glowTau, prob: glowProb}
-		if opt.RampGlow {
-			kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
-		}
+		timeMaps(func() {
+			glowTau, glowProb := resolveSmoothGlow(opt.SmoothGlowTau, opt.SmoothGlowProb)
+			kg = &kindGate{hard: gateHardMap(be.Target(), w, h, opt), w: w, h: h, tau: glowTau, prob: glowProb}
+			if opt.RampGlow {
+				kg.ramp = metric.RampMap(be.Target(), w, h) // hotter glow swap in genuine gradient zones
+			}
+		})
 	}
 	// The size-conditioned glow swap does not need the hardness map, so it gets a gate of its own
 	// when region-kinds is off (kindGate.pick falls straight through when hard is nil).
@@ -468,7 +507,8 @@ func newRun(be backend.Backend, opt Options) *run {
 		}
 	}
 	kindCDF := buildKindCDF(kinds, kindWeights)
-	tm.Setup = time.Since(setupStart)
+	tm.Maps = mapsDur
+	tm.Setup = time.Since(setupStart) - mapsDur
 
 	glyphs := false
 	if opt.GlyphDict || opt.GlyphPrepass || opt.ShadePrepass || opt.SmoothBase {
@@ -478,7 +518,7 @@ func newRun(be backend.Backend, opt Options) *run {
 	}
 
 	return &run{
-		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm,
+		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm, eta: eta,
 		kinds: kinds, kindWeights: kindWeights, kindCDF: kindCDF,
 		allowAlpha: allowAlpha, alphaMin: alphaMin, maxNI: maxNI, genTarget: genTarget,
 		moveStep: moveStep, radiusStep: radiusStep, rounds: rounds, perRound: perRound,
@@ -590,6 +630,9 @@ func (r *run) greedy() {
 		}
 		r.tm.Sampler += time.Since(t0)
 		curErr := sumGrid(r.grid)
+		if r.eta != nil && r.opt.StopAt > 0 {
+			r.eta.setFrac(float64(len(r.shapes)-1) / float64(r.opt.StopAt))
+		}
 		if r.opt.Progress != nil {
 			r.opt.Progress(len(r.shapes)-1, curErr)
 		}
@@ -701,19 +744,54 @@ func (r *run) refine() {
 		return
 	}
 	for _, p := range postPasses() {
-		if p.enabled(r.opt) {
-			p.apply(r)
+		if !p.enabled(r.opt) {
+			continue
 		}
+		if d := r.passTimer(p); d != nil {
+			r.timePass(d, func() { p.apply(r) })
+			continue
+		}
+		p.apply(r)
 	}
 	// MONO mode: snap every shape to the exact lock colour LAST, after polish/back-fit/standout have
 	// finished moving colours — guaranteeing one pure brand colour in the output.
 	r.lockColors()
+	r.clampToBudget()
+}
+
+// clampToBudget enforces the user's shape count on the FINAL list.
+//
+// postProcess prunes to the budget at the end of the GREEDY, but every pass after it moves the count:
+// the LOO refit prunes and regrows, the back-fit regrows, merge-refit collapses pairs. Nothing put the
+// result back inside the budget, and flat measured 1001 layers for a budget of 1000 on all five
+// recorded cases — systematically one over. That is not cosmetic: shapes[0] is the background and IS
+// injected as the bottom layer (inject/fh6.go), so a budget of 3000 was shipping 3001 layers into a
+// group whose in-game ceiling is exactly 3000.
+//
+// Only the OVER case is corrected here. Coming in under budget is also real — anime measured 987 of
+// 1000 — but topping that back up means placing shapes the passes decided were not worth having, which
+// is a quality change and has to be measured, not slipped in behind a bug fix.
+func (r *run) clampToBudget() {
+	if r.opt.StopAt < 1 || len(r.shapes) <= r.opt.StopAt+1 {
+		return
+	}
+	over := len(r.shapes) - (r.opt.StopAt + 1)
+	r.shapes = pruneToBudget(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt,
+		r.opt.Background, r.opt.TransparentBG)
+	r.finalErr = rerender(r.be, r.initCanvas, r.shapes)
+	applog.Printf("clamp: %d layers over the budget, pruned to %d", over, len(r.shapes))
 }
 
 // setStatus reports the current post-greedy phase to the optional Options.Status callback (a UI
 // hook), so a progress bar stuck at 100% can show what the run is doing. nil callback = ignored.
 func (r *run) setStatus(s string) {
+	r.phase(s)
 	if r.opt.Status != nil {
 		r.opt.Status(s)
 	}
 }
+
+// phase advances the run-wide estimate without announcing a stage. The pre-greedy claims and the
+// greedy loop itself use it: Status has always meant "a post-greedy pass started" to its consumers,
+// and the estimate needs the boundaries of every phase, not just those.
+func (r *run) phase(s string) { r.eta.enter(s) }

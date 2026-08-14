@@ -1,5 +1,3 @@
-//go:build vulkan
-
 package vulkan
 
 import (

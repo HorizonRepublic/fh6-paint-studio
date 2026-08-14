@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 
 	"fh6-paint-studio/internal/model"
 	"fh6-paint-studio/internal/raster"
@@ -90,13 +91,24 @@ func (looRefitPass) apply(r *run) {
 	env := r.newBackfitEnv()
 	target, weight := r.be.Target(), r.be.Weight()
 	for round := 0; round < r.opt.LooRefit; round++ {
+		// Progress inside the phase is per-round: base..base+span. Without this the re-polish below
+		// reports its own iterations through the run-wide hook and drives the PHASE counter to 100%
+		// in round 0 — the bar then sits frozen for the remaining rounds (the counter is forward-only).
+		base := float64(round) / float64(r.opt.LooRefit)
+		span := 1.0 / float64(r.opt.LooRefit)
+		r.eta.setFrac(base)
+		r.tm.LooRounds++
+		tRound := time.Now()
+		errBefore := r.finalErr
 		// Colours first, then the ranking. looFitContrib asks what each shape CONTRIBUTES, but a
 		// shape still carrying the colour the greedy fitted against a canvas later shapes have
 		// overwritten looks harmful for a reason that has nothing to do with redundancy — so the
 		// prune would be ranking staleness. Re-solving first makes the ranking measure the thing it
 		// is named after. Gated like everything else: a solve that does not lower the hard render is
 		// discarded and the round proceeds on the original stack.
+		var gcDur time.Duration
 		if r.opt.GlobalColorInLoo && r.opt.GlobalColorIters > 0 {
+			t0 := time.Now()
 			if cand, _, _, ok := globalColorSolve(r.shapes, target, weight, r.w, r.h,
 				r.opt.Background, r.opt.TransparentBG, r.opt.GlobalColorIters); ok {
 				if e := rerender(r.be, r.initCanvas, cand); e+1e-9 < r.finalErr {
@@ -105,8 +117,12 @@ func (looRefitPass) apply(r *run) {
 					rerender(r.be, r.initCanvas, r.shapes)
 				}
 			}
+			gcDur = time.Since(t0)
+			r.tm.GlobalColor += gcDur
 		}
+		tRank := time.Now()
 		fit := looFitContrib(r.shapes, target, weight, r.w, r.h)
+		rankDur := time.Since(tRank)
 		drop := looSelectPrune(fit)
 		kept := make([]model.Shape, 0, len(r.shapes))
 		for j := range r.shapes {
@@ -119,13 +135,16 @@ func (looRefitPass) apply(r *run) {
 		// restores quality for both (see mergerefit.go).
 		merged := 0
 		if r.opt.MergeRefit {
+			t0 := time.Now()
 			kept, merged = mergePairs(kept, r.w, r.h)
+			r.tm.MergeRefit += time.Since(t0)
 			applog.Printf("loo round %d: pruned %d, merged %d pairs", round, len(r.shapes)-len(kept)+merged, merged)
 		}
 		if len(drop)+merged < looMinRegrow {
 			break
 		}
 		// Re-render the survivors, regrow the freed budget against the residual (backFit's loop).
+		tRegrow := time.Now()
 		_ = r.be.Reset(r.initCanvas)
 		for _, s := range kept[1:] {
 			_ = r.be.Apply(shapeToCandidate(s))
@@ -133,6 +152,7 @@ func (looRefitPass) apply(r *run) {
 		targetCount := len(r.shapes)
 		grid, gw, gh, _ := r.be.ErrorGrid()
 		sampler := NewErrorSampler(grid, gw, gh, r.w, r.h)
+		regrown := 0
 		for len(kept) < targetCount {
 			progress := float32(len(kept)-1) / float32(targetCount-1)
 			best, bestScore := env.searchOne(sampler, grid, gw, gh, len(kept)-1, progress)
@@ -141,11 +161,26 @@ func (looRefitPass) apply(r *run) {
 			}
 			_ = r.be.Apply(best)
 			kept = append(kept, best.ToShape(float64(bestScore)))
+			regrown++
 			grid, gw, gh, _ = r.be.ErrorGrid()
 			sampler = NewErrorSampler(grid, gw, gh, r.w, r.h)
 		}
-		// Re-polish the refitted set and gate END-TO-END on the rendered error.
-		candShapes, candErr := applyPolish(r.be, kept, rerender(r.be, r.initCanvas, kept), r.initCanvas, r.warmRepolishOpts(), r.w, r.h, &r.tm)
+		regrowDur := time.Since(tRegrow)
+		r.eta.setFrac(base + 0.2*span)
+		// Re-polish the refitted set and gate END-TO-END on the rendered error. Its iteration
+		// progress is rescaled into this round's remaining window — the run-wide hook would report
+		// it as 0..100% of the whole phase.
+		popt := r.warmRepolishOpts()
+		popt.PolishOpts.OnProgress = func(iter, total int) {
+			if total > 0 {
+				r.eta.setFrac(base + span*(0.2+0.8*float64(iter)/float64(total)))
+			}
+		}
+		tPol := time.Now()
+		candShapes, candErr := applyPolish(r.be, kept, rerender(r.be, r.initCanvas, kept), r.initCanvas, popt, r.w, r.h, &r.tm)
+		applog.Printf("loo round %d walls: gcolor %.1fs rank %.1fs regrow %.1fs(%d shapes) repolish %.1fs total %.1fs err %.1f -> %.1f",
+			round, gcDur.Seconds(), rankDur.Seconds(), regrowDur.Seconds(), regrown, time.Since(tPol).Seconds(), time.Since(tRound).Seconds(),
+			errBefore, math.Min(candErr, r.finalErr))
 		if candErr+1e-9 < r.finalErr {
 			r.shapes, r.finalErr = candShapes, candErr
 		} else {

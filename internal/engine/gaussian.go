@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/model"
 )
@@ -66,7 +67,7 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 	if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() {
 		shapes = PolishWithBackend(shapes, target, weight, w, h, bg, opt.TransparentBG, po, acc).Shapes
 	} else {
-		shapes = Polish(shapes, target, weight, w, h, bg, opt.TransparentBG, po).Shapes
+		applog.Printf("gaussian: device lacks polish support — glows left untrained (grid init only)")
 	}
 
 	finalErr := gaussRenderErr(be, shapes, w, h)

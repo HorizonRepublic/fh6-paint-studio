@@ -296,19 +296,30 @@ func solveSPD3(m [][]float64, rhs [3][]float64, n int) ([3][]float64, bool) {
 // carry transparent margins inside their unit square) covers exactly the requested frame
 // cx±halfW, cy±halfH rotated by deg. ok=false for words without usable coverage.
 func maskFrameFit(kind model.ShapeKind, cx, cy, halfW, halfH, deg float64) (model.Candidate, bool) {
+	return maskShearFit(kind, cx, cy, halfW, halfH, deg, 0)
+}
+
+// maskShearFit is maskFrameFit with a shear. The requested frame is read in the word's own
+// (sx, sy) coordinates, which the placement then shears by k and rotates by deg — so the covered
+// screen region is a parallelogram, and a caller wanting to cover a box of half-extents (hu, hv) at
+// this angle must ask for halfW = hu + |k|·hv.
+//
+// Shearing moves the active box's centre by K·(sxc, syc) before the rotation; miss that and the word
+// lands off by the width of its own transparent margin.
+func maskShearFit(kind model.ShapeKind, cx, cy, halfW, halfH, deg, skew float64) (model.Candidate, bool) {
 	u0, v0, u1, v1, ok := raster.MaskActiveUV(kind)
 	if !ok || u1-u0 <= 0.01 || v1-v0 <= 0.01 {
 		return model.Candidate{}, false
 	}
 	hx := 2 * halfW / (u1 - u0)
 	hy := 2 * halfH / (v1 - v0)
-	sxc := ((u0+u1)/2 - 0.5) * hx
+	sxc := ((u0+u1)/2-0.5)*hx + skew*((v0+v1)/2-0.5)*hy
 	syc := ((v0+v1)/2 - 0.5) * hy
 	th := deg * math.Pi / 180
 	c, s := math.Cos(th), math.Sin(th)
 	return model.Candidate{Kind: kind, Color: model.RGBA{A: 1},
 		P: [6]float32{float32(cx - (sxc*c - syc*s)), float32(cy - (sxc*s + syc*c)),
-			float32(hx), float32(hy), float32(deg), 0}}, true
+			float32(hx), float32(hy), float32(deg), float32(skew)}}, true
 }
 
 func clamp01f(v float64) float64 {

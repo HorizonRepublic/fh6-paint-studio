@@ -151,7 +151,14 @@ class Studio extends ChangeNotifier {
   EngineClient? get engine => _engine;
 
   bool get isRunning => phase == Phase.running || phase == Phase.loading;
-  double get progress => total == 0 ? 0 : (shapes / total).clamp(0.0, 1.0);
+  /// Fraction of the WHOLE run. The shape counter only describes placement, so
+  /// a bar driven by it reached 100% and then sat there for the polish and the
+  /// post-passes — close to half the run. The engine reports its own overall
+  /// progress across every phase; the shape ratio stays as the fallback for an
+  /// older engine and for the moment before the first phase event lands.
+  double get progress => overall > 0
+      ? overall.clamp(0.0, 1.0)
+      : (total == 0 ? 0 : (shapes / total).clamp(0.0, 1.0));
 
   /// Connects to the engine service and loads what a first screen needs.
   Future<void> connect(String executable) async {
@@ -289,6 +296,9 @@ class Studio extends ChangeNotifier {
     error = 0;
     error0 = 0;
     stage = '';
+    phaseName = '';
+    overall = 0;
+    engineEta = null;
     elapsed = Duration.zero;
     ssim = null;
     deltaE = null;
@@ -350,6 +360,9 @@ class Studio extends ChangeNotifier {
     error0 = 0;
     elapsed = Duration.zero;
     stage = '';
+    phaseName = '';
+    overall = 0;
+    engineEta = null;
     ssim = null;
     deltaE = null;
     failure = null;
@@ -455,6 +468,12 @@ class Studio extends ChangeNotifier {
         // whole run's elapsed on all three rows.
         buildEnd ??= elapsed;
         stage = u.line ?? '';
+      case 'phase':
+        final d = u.data ?? const {};
+        phaseName = (d['phase'] as String?) ?? phaseName;
+        overall = (d['overall'] as num?)?.toDouble() ?? overall;
+        final ms = (d['etaMs'] as num?)?.toInt() ?? 0;
+        engineEta = ms > 0 ? Duration(milliseconds: ms) : null;
       case 'progress':
         final d = u.data ?? const {};
         shapes = (d['shapes'] as num?)?.toInt() ?? shapes;
@@ -895,11 +914,22 @@ class Studio extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// A rough time remaining, from the RECENT rate rather than the average.
-  /// Shape placement is front-loaded — the early ones are cheap — so an average
-  /// over the whole run predicts a finish that keeps receding.
+  /// The engine's own estimate when it sends one: it spans the polish and the
+  /// post-passes, which the shape counter below cannot see at all — it goes
+  /// quiet the moment placement ends, and that is close to half the run.
+  Duration? engineEta;
+
+  /// Name of the phase the engine is in, and how far the whole run has got.
+  String phaseName = '';
+  double overall = 0;
+
+  /// A rough time remaining. Prefers the engine's estimate; the shape-rate
+  /// fallback keeps an older engine build working, and covers the window
+  /// before the first phase event arrives.
   Duration? get eta {
-    if (!isRunning || shapes < 20 || total <= shapes) return null;
+    if (!isRunning) return null;
+    if (engineEta != null) return engineEta;
+    if (shapes < 20 || total <= shapes) return null;
     final rate = shapes / elapsed.inMilliseconds.clamp(1, 1 << 30);
     if (rate <= 0) return null;
     return Duration(milliseconds: ((total - shapes) / rate).round());

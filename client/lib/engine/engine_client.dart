@@ -139,6 +139,8 @@ class EngineClient {
         );
       case 'progress':
         handler(Update('progress', data: _asMap(resp['result'])));
+      case 'phase':
+        handler(Update('phase', data: _asMap(resp['result'])));
       // Deliver before forgetting: the terminal event is the one the UI most
       // needs, and dropping the handler first makes the run go quiet forever.
       case 'done':

@@ -26,9 +26,9 @@ jobs:
       # Backend-tagged code is NOT covered by the untagged vet/test above (the engine, runner and
       # backend tests all sit behind build tags), so vet it explicitly. Runners have no GPU and no
       # shim DLL, so the tagged TESTS cannot run here — vet + build is the honest ceiling on CI, and
-      # the real gate is `go test -tags vulkan ./internal/backend/vulkan` on a machine with a GPU.
+      # the real gate is `go test ./...` on a machine with a GPU (Vulkan is the only backend, no build tags).
       - name: Vet (Vulkan-tagged)
-        run: go vet -tags vulkan ./...
+        run: go vet ./...
       - name: Build (no backend)
         run: |
           go build ./cmd/studio
@@ -38,25 +38,16 @@ jobs:
       # vulkan-tagged Go compiles; the real fh6vk.dll is built in release-build.yml.
       - name: Build (Vulkan-tagged)
         run: |
-          go build -tags vulkan ./cmd/studio
-          go build -tags vulkan ./cmd/fh6paint
-          go build -tags vulkan ./cmd/engined
-      # CUDA is kept in the tree as an unmaintained fallback (owner decision 2026-08-03). It is not
-      # shipped and not benchmarked, but it must still COMPILE — both on its own and in the allgpu
-      # build that offers both backends — or the fallback silently rots.
-      - name: Build (CUDA + allgpu, unmaintained fallback)
-        run: |
-          go build -tags cuda ./cmd/studio
-          go build -tags cuda ./cmd/fh6paint
-          go build -tags allgpu ./cmd/studio
-          go build -tags allgpu ./cmd/fh6paint
+          go build ./cmd/studio
+          go build ./cmd/fh6paint
+          go build ./cmd/engined
       # The studio half of the release build (version resource + ldflags), no GPU toolchain needed.
       - name: Release smoke (version resource + studio exe)
         shell: pwsh
         run: |
           ./scripts/gen-winres.ps1 -Version 0.0.0-ci
-          go build -tags vulkan -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.0.0-ci" -o bin/fh6-paint-studio.exe ./cmd/studio
-          go build -tags vulkan -trimpath -ldflags "-s -w -H windowsgui" -o bin/engined.exe ./cmd/engined
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=0.0.0-ci" -o bin/fh6-paint-studio.exe ./cmd/studio
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o bin/engined.exe ./cmd/engined
           foreach ($exe in 'bin/fh6-paint-studio.exe', 'bin/engined.exe') {
             $vi = (Get-Item $exe).VersionInfo
             # An unsigned binary with no company, no description and no version is the shape

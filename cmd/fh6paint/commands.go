@@ -260,9 +260,10 @@ func logTimings(t engine.Timings) {
 		return
 	}
 	pct := func(d time.Duration) float64 { return 100 * d.Seconds() / total }
-	applog.Printf("profile (total %.2fs): setup %.2fs(%.0f%%) generate %.2fs(%.0f%%) evaluate %.2fs(%.0f%%) mutate %.2fs(%.0f%%) apply %.2fs(%.0f%%) errorgrid %.2fs(%.0f%%) sampler %.2fs(%.0f%%) postprocess %.2fs(%.0f%%)",
+	applog.Printf("profile (total %.2fs): setup %.2fs(%.0f%%) maps %.2fs(%.0f%%) generate %.2fs(%.0f%%) evaluate %.2fs(%.0f%%) mutate %.2fs(%.0f%%) apply %.2fs(%.0f%%) errorgrid %.2fs(%.0f%%) sampler %.2fs(%.0f%%) postprocess %.2fs(%.0f%%)",
 		total,
 		t.Setup.Seconds(), pct(t.Setup),
+		t.Maps.Seconds(), pct(t.Maps),
 		t.Generate.Seconds(), pct(t.Generate),
 		t.Evaluate.Seconds(), pct(t.Evaluate),
 		t.Mutate.Seconds(), pct(t.Mutate),
@@ -270,6 +271,36 @@ func logTimings(t engine.Timings) {
 		t.ErrorGrid.Seconds(), pct(t.ErrorGrid),
 		t.Sampler.Seconds(), pct(t.Sampler),
 		t.PostProcess.Seconds(), pct(t.PostProcess))
+	// Pass line: only what actually ran, so a preset with most passes off doesn't print a wall of zeros.
+	passes := ""
+	addPass := func(name string, d time.Duration) {
+		if d > 0 {
+			passes += fmt.Sprintf(" %s %.2fs(%.0f%%)", name, d.Seconds(), pct(d))
+		}
+	}
+	addPass("smoothbase", t.SmoothBase)
+	addPass("shadepre", t.ShadePre)
+	addPass("glyphpre", t.GlyphPre)
+	// EXCLUSIVE of the re-polish each round runs: timePass bills that to `polish`, so this number is a
+	// small fraction of the wall the "LOO refit" status covers. Labelled so the two stop looking
+	// contradictory — on img_26 it read 19.75s while the stage itself ran for minutes.
+	addPass("loorefit(excl.repolish)", t.LooRefit)
+	if t.LooRefit > 0 {
+		passes += fmt.Sprintf("[rounds=%d]", t.LooRounds)
+	}
+	addPass("mergerefit", t.MergeRefit)
+	addPass("globalcolor", t.GlobalColor)
+	addPass("artifactfix", t.ArtifactFix)
+	addPass("anneal", t.Anneal)
+	addPass("zswap", t.ZSwap)
+	addPass("softswap", t.SoftSwap)
+	addPass("standout", t.Standout)
+	addPass("skewrefine", t.SkewRefine)
+	if passes != "" {
+		applog.Printf("profile passes:%s", passes)
+	}
+	un := t.Total - t.Accounted()
+	applog.Printf("profile unaccounted: %.2fs(%.0f%%)", un.Seconds(), pct(un))
 	if t.BackFit > 0 {
 		if t.BackFitBase > 0 {
 			kept := math.Min(t.BackFitBase, t.BackFitTrial)

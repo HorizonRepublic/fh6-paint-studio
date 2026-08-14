@@ -197,6 +197,10 @@ func (s *Server) emit(id int32, ev runner.Event, start time.Time, output string)
 		})
 	case runner.Status:
 		s.event(id, "status", StatusEvent{Stage: e.Stage})
+	case runner.Phase:
+		s.event(id, "phase", PhaseEvent{
+			Phase: e.Name, PhaseFrac: e.PhaseFrac, Overall: e.Overall, EtaMs: e.ETA.Milliseconds(),
+		})
 	case runner.Log:
 		s.event(id, "log", LogEvent{Line: e.Line})
 	case runner.Frame:
