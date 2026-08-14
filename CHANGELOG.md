@@ -1,5 +1,36 @@
 # Changelog
 
+## [3.0.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.2.0...v3.0.0) (2026-08-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **engine:** Vulkan is the only engine; the CUDA backend and the pure-Go reference implementation are gone
+* **cli:** `-shapes N` places exactly N layers (it used to ship N+1 — over the in-game ceiling at 3000)
+
+### Features
+
+* **engine:** make Vulkan the only engine and drop the Go reference ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** monotone local geometry refine after the polish ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** run-wide progress estimate, streamed to the client ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **vulkan:** carry the shear slot through eval, apply and the polish ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** sheared gradient words for smoothBase behind a flag ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+
+### Bug Fixes
+
+* **cli:** place exactly the asked-for shape budget ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** floor the colour solve's weight on already-clean pixels ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** honest progress and stage walls through the LOO refit ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+
+### Performance Improvements
+
+* **vulkan:** slice the backward reduce — the polish is twice as fast, output byte-identical ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **vulkan:** merge the hot upload paths into single submits ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** walk the global colour stack in row bands ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** re-score 2048 coarse survivors instead of 8192 ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+* **engine:** drop dead per-pixel work from the geometry refine ([#68](https://github.com/HorizonRepublic/fh6-paint-studio/pull/68))
+
+
 ## [2.2.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.1.1...v2.2.0) (2026-08-11)
 
 
