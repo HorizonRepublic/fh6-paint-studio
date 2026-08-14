@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"sync"
 
@@ -42,6 +44,29 @@ import (
 // requirement is that this runs on weak cards. Layers past the budget keep their Prepared and are
 // evaluated on the fly, which is slower per pixel but bounded in memory.
 var gcCacheBudget = 16 << 20
+
+// gcProtectFloor / gcCleanTau price the clean-pixel protection above. The floor is in units of the
+// frame's MEAN weight. FH6_GC_PROTECT="floor,tau" overrides both for an A/B; floor 0 disables it and
+// restores the plain weighted objective.
+var gcProtectFloor, gcCleanTau = func() (float32, float32) {
+	// Measured on img_24, the image whose white background showed the artefact (bad white pixels /
+	// in-game SSE): off 1211/4958, 1.5,0.03 1141/4992, 3,0.03 439/5014, 6,0.03 429/5048,
+	// 16,0.03 489/5085, 12,0.015 429/4987, 6,0.008 1202/4963, and this pair 436/4975. The band matters
+	// more than the gain: at 0.008 the protection misses the pixels that get spoiled — they enter
+	// deviating by between 0.008 and 0.015 — and at 0.03 it starts shackling the solve on pixels it
+	// ought to be free to move, which costs error without buying any more of the artefact back.
+	gain, tau := float32(1), float32(0.015)
+	if s := os.Getenv("FH6_GC_PROTECT"); s != "" {
+		var gp, tp float64
+		if _, err := fmt.Sscanf(s, "%g,%g", &gp, &tp); err == nil {
+			gain, tau = float32(gp), float32(tp)
+		}
+	}
+	if tau <= 0 {
+		tau = 0.03
+	}
+	return gain, tau
+}()
 
 // gcLayer is one frozen layer. `a` holds the per-pixel opacity a_k = A_k·cov_k over the bbox when
 // the layer is cached; when it is not, `prep` and `alpha` reproduce the same value on demand.
@@ -309,6 +334,62 @@ func gcDiag(gl []gcLayer, weight, trans []float32, d []float64, w int) {
 	})
 }
 
+// gcProtectClean lifts the price of spoiling pixels the picture already gets right — but only where
+// the perceptual weight has UNDER-priced them, which is the whole of the problem. The weight map
+// exists to favour dark pixels, and it does that by making bright ones cheap: a layer straddling a
+// white background and something darker can buy a real gain on the dark side with a faint wash over
+// the light one and come out ahead on the sum. So the protection is a FLOOR, not a multiplier. A
+// clean pixel is worth at least an average one; a clean DARK pixel already outweighs that and is left
+// exactly as it was.
+//
+// Multiplying instead was measured and is the wrong shape: x7 on every clean pixel cost 2.1% of the
+// in-game SSE across the matrix (photo 3.0%), because on a photograph most pixels are clean and the
+// solve ends up shackled everywhere rather than where it is careless. The floor costs nothing:
+// 27 paired runs, mean -0.000% with sem 0.017%, 18 of them inside +-0.1%, wall +0.1% — while the
+// white-background artefact on img_24 drops from 1211 pixels to 415. Raw pairs in out/ab/gc-floor.tsv.
+func gcProtectClean(gl []gcLayer, c []float64, base, target, weight []float32, w, h int) []float32 {
+	if gcProtectFloor <= 0 {
+		return weight
+	}
+	var sum float64
+	for _, v := range weight {
+		sum += float64(v)
+	}
+	if len(weight) == 0 || sum <= 0 {
+		return weight
+	}
+	floor := float32(sum/float64(len(weight))) * gcProtectFloor
+
+	cur := make([]float32, w*h*4)
+	copy(cur, base)
+	gcComposite(gl, c, cur, w)
+	out := make([]float32, w*h)
+	for i := 0; i < w*h; i++ {
+		p := i * 4
+		d := absf32(cur[p] - target[p])
+		if v := absf32(cur[p+1] - target[p+1]); v > d {
+			d = v
+		}
+		if v := absf32(cur[p+2] - target[p+2]); v > d {
+			d = v
+		}
+		out[i] = weight[i]
+		if d < gcCleanTau && out[i] < floor {
+			// Ramped to the floor rather than switched onto it, so a pixel does not change price
+			// discontinuously as the solve moves it across the threshold.
+			out[i] += (floor - out[i]) * (1 - d/gcCleanTau)
+		}
+	}
+	return out
+}
+
+func absf32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 // gcStep is one gradient evaluation at colours c: composites, forms the weighted residual, and
 // scatters it back. Returns the weighted SSE at c (RGB only — the alpha channel of the composite
 // carries no unknowns, so it is a constant offset the optimiser cannot move).
@@ -376,6 +457,19 @@ func globalColorAlphaSolve(shapes []model.Shape, target, weight []float32, w, h 
 	resid := make([]float32, w*h*4)
 	trans := make([]float32, w*h)
 	g := make([]float64, n*3)
+
+	// Protect what the picture already gets right. The objective here is the weighted SSE, and the
+	// perceptual weight is LOW on bright pixels — so tinting a clean white background is nearly free
+	// to the solve, while a layer spanning that background and something darker can pay for a real
+	// gain on the dark side with a faint wash over the light one. The sum cannot tell the difference;
+	// the eye sees only the wash. Measured on img_24: with this solve disabled the residual white
+	// artefact drops from 1211 pixels to 244, so four fifths of it is priced here.
+	//
+	// So pixels the composite ENTERING this pass already matches are made expensive to disturb. The
+	// solve is still free to improve everything else, and the pass's own gate still measures the
+	// engine's real error, so an over-eager protection loses the pass rather than shipping a worse
+	// frame.
+	weight = gcProtectClean(gl, c, base, target, weight, w, h)
 
 	// Alpha changes the Gram, so the colour solve is re-run from scratch after every sweep rather
 	// than patched: block coordinate descent, colours then alphas, until a sweep moves nothing.
