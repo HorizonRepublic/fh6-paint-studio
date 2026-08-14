@@ -6,7 +6,7 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Xb { int bbx[]; };
 layout(std430, binding = 2) readonly  buffer Ob { int offs[]; };
 layout(std430, binding = 3) writeonly buffer Lb { int list[]; };
-layout(push_constant) uniform PC { int n, tilesX, nTiles, tile; } pc;
+layout(push_constant) uniform PC { int n, tilesX, nTiles, tile, cap; } pc;
 
 void main() {
     int t = int(gl_GlobalInvocationID.x);
@@ -16,6 +16,10 @@ void main() {
     int w = offs[t];
     for (int si = 0; si < pc.n; si++) {
         if (bbx[si * 4 + 2] < x0 || bbx[si * 4] > x1 || bbx[si * 4 + 3] < y0 || bbx[si * 4 + 1] > y1) continue;
-        list[w++] = si;
+        // Guarded so the fill can run in the SAME submit as the count and the scan, before the host
+        // has read back the total. When the list is big enough this writes exactly what it always
+        // wrote; when it is not, the host sees the total, grows the buffer and re-runs the fill.
+        if (w < pc.cap) list[w] = si;
+        w++;
     }
 }

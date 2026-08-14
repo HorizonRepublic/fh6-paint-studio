@@ -1,4 +1,4 @@
-# build-vulkan.ps1 -- compile the Vulkan shim into fh6vk.dll (+ optional fh6paint-vulkan.exe).
+# build-vulkan.ps1 -- compile the Vulkan shim into fh6vk.dll (+ the CLI, binh6paint.exe).
 # Portable toolchain: glslangValidator + headers + volk live in third_party\vulkan (no SDK install).
 # Needs: that toolchain + MSVC Build Tools (cl.exe) + Go. Run from the repo root.
 # Usage: powershell -ExecutionPolicy Bypass -File .\scripts\build-vulkan.ps1 [-Version <x.y.z>]
@@ -51,6 +51,7 @@ $shaders = [ordered]@{
     'polish_loss'     = 'p_loss_spv'
     'polish_dcwalk_tiled'    = 'pt_dcwalk_spv'
     'polish_backward_reduce' = 'pt_breduce_spv'
+    'polish_backward_combine' = 'pt_bcombine_spv'
     'fe_luma'         = 'fe_luma_spv'
     'fe_dir'          = 'fe_dir_spv'
     'fe_adj'          = 'fe_adj_spv'
@@ -134,14 +135,16 @@ foreach ($d in $testCopies) {
 }
 Write-Host "Copied fh6vk.dll into $($testCopies.Count) package dirs (for tests)" -ForegroundColor Green
 
-# --- optional: build the CLI with the vulkan backend ---
+# --- optional: build the CLI ---
+# ONE name: bin\fh6paint.exe — the same file vkregress/abbench run. The old fh6paint-vulkan.exe
+# split let a Go change be "validated" by a harness that never loaded it (bit twice in one night).
 $env:CGO_ENABLED = "0"
 Push-Location $root
-& $goExe build -tags vulkan -o bin\fh6paint-vulkan.exe .\cmd\fh6paint
+& $goExe build -o bin\fh6paint.exe .\cmd\fh6paint
 $ok = $LASTEXITCODE -eq 0
 Pop-Location
 if ($ok) {
-    Write-Host "Built bin\fh6paint-vulkan.exe" -ForegroundColor Green
+    Write-Host "Built bin\fh6paint.exe" -ForegroundColor Green
 } else {
-    Write-Host "(go build -tags vulkan skipped/failed -- backend wiring may be pending)" -ForegroundColor Yellow
+    Write-Host "(go build skipped/failed -- backend wiring may be pending)" -ForegroundColor Yellow
 }

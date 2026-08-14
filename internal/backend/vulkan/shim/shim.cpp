@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <chrono>
 #include <vector>
 
 #include "eval.spv.h"   // unsigned int eval_spv[]  (glslangValidator --vn)
@@ -35,7 +37,8 @@
 #include "tile_count.spv.h"           // tb_count_spv   (shape binning: count per tile)
 #include "tile_scan.spv.h"            // tb_scan_spv    (shape binning: prefix sum)
 #include "tile_fill.spv.h"            // tb_fill_spv    (shape binning: fill per-tile lists)
-#include "polish_backward_reduce.spv.h" // pt_breduce_spv (tiled backward Pass B: per-shape reduce)
+#include "polish_backward_reduce.spv.h" // pt_breduce_spv (tiled backward Pass B: sliced per-shape reduce)
+#include "polish_backward_combine.spv.h" // pt_bcombine_spv (tiled backward Pass C: slice-partial sum)
 #include "polish_dcinit.spv.h"   // p_dcinit_spv
 #include "polish_loss.spv.h"     // p_loss_spv
 #include "fe_luma.spv.h"         // fe_luma_spv
@@ -195,7 +198,7 @@ VkPipelineLayout      g_pPL  = VK_NULL_HANDLE;
 VkPipeline g_pDcinit = VK_NULL_HANDLE, g_pLoss = VK_NULL_HANDLE; // shared-DSL pipelines (forward/hard/backward are tiled, below)
 VkDescriptorPool g_pPool = VK_NULL_HANDLE;
 VkDescriptorSet  g_pSet  = VK_NULL_HANDLE;
-Buf g_pbase, g_prender, g_pbelow, g_pdC, g_pP, g_pcol, g_pkinds, g_ppgrad, g_ppartials;
+Buf g_pbase, g_prender, g_pbelow, g_pdC, g_pP, g_pcol, g_pkinds, g_ppgrad, g_ppartials, g_pbwPart;
 int g_pn = 0, g_pste = 0, g_poklab = 0;
 VkDeviceSize g_belowCap = 0;
 
@@ -252,13 +255,18 @@ const int SSWIN = 8;
 // ---- tiled polish forward/hard: ONE dispatch, no barriers (its own DSL/PL/pool/set so it
 // never touches the shared 10-binding per-shape polish set). 8 bindings:
 // 0=P 1=col 2=kinds 3=render 4=below 5=bbx 6=boff 7=base. bbx/boff live on-device. ----
-struct TiledPC { int32_t n, w, h, ste; float tau; int32_t tilesX, tile, binned; };
+// slices: dispatch height of the backward reduce — the per-shape slice cap (see
+// polish_backward_reduce.comp). The forward/hard/walk shaders declare only the prefix.
+struct TiledPC { int32_t n, w, h, ste; float tau; int32_t tilesX, tile, binned; int32_t slices; };
+// PBSLICES bounds one shape's reduce slices. 64 keeps the worst canvas-sized bbox near the
+// measured 4096 px/workgroup sweet spot without drowning small stacks in empty workgroups.
+constexpr int32_t PBSLICES = 64;
 // SHAPE BINNING (mirrors the CUDA shim). The polish passes are thread-per-pixel and would
 // otherwise walk the whole shape list at every pixel just to bbox-test it away. Binning once per
 // upload leaves each pixel with the handful that can reach its tile; the list is ascending, so the
 // composite order is untouched. Cap exceeded -> binned=0 and the shaders fall back to a full scan.
 #define PTILE 32
-struct TilePC { int32_t n, tilesX, nTiles, tile; };
+struct TilePC { int32_t n, tilesX, nTiles, tile, cap; };
 VkDescriptorSetLayout g_tbDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_tbPL  = VK_NULL_HANDLE;
 VkPipeline g_tbCount = VK_NULL_HANDLE, g_tbScan = VK_NULL_HANDLE, g_tbFill = VK_NULL_HANDLE;
@@ -279,7 +287,7 @@ Buf g_pbbxBuf, g_pboffBuf; // device-local n*4 int / n int (int32)
 // 0=P 1=col 2=kinds 3=dC 4=below 5=dcsnap 6=pgrad 7=bbx 8=boff. ZERO per-shape barriers. ----
 VkDescriptorSetLayout g_pbDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_pbPL  = VK_NULL_HANDLE;
-VkPipeline g_pbWalk = VK_NULL_HANDLE, g_pbReduce = VK_NULL_HANDLE;
+VkPipeline g_pbWalk = VK_NULL_HANDLE, g_pbReduce = VK_NULL_HANDLE, g_pbCombine = VK_NULL_HANDLE;
 VkDescriptorPool g_pbPool = VK_NULL_HANDLE;
 VkDescriptorSet  g_pbSet  = VK_NULL_HANDLE;
 Buf g_pdcsnap; // device-local, sized == g_pbelow (per pixel-shape dC snapshot)
@@ -342,6 +350,7 @@ void polishTeardown() {
     if (g_tbPL)    { vkDestroyPipelineLayout(g_device, g_tbPL, nullptr); g_tbPL = VK_NULL_HANDLE; }
     if (g_tbDSL)   { vkDestroyDescriptorSetLayout(g_device, g_tbDSL, nullptr); g_tbDSL = VK_NULL_HANDLE; }
     destroyBuf(g_pP); destroyBuf(g_pcol); destroyBuf(g_pkinds); destroyBuf(g_ppgrad); destroyBuf(g_ppartials);
+    destroyBuf(g_pbwPart);
     if (g_pDcinit) { vkDestroyPipeline(g_device, g_pDcinit, nullptr); g_pDcinit = VK_NULL_HANDLE; }
     if (g_pLoss)   { vkDestroyPipeline(g_device, g_pLoss, nullptr);   g_pLoss = VK_NULL_HANDLE; }
     if (g_pPool)   { vkDestroyDescriptorPool(g_device, g_pPool, nullptr); g_pPool = VK_NULL_HANDLE; g_pSet = VK_NULL_HANDLE; }
@@ -356,6 +365,7 @@ void polishTeardown() {
     destroyBuf(g_pdcsnap);
     if (g_pbWalk)   { vkDestroyPipeline(g_device, g_pbWalk, nullptr);   g_pbWalk = VK_NULL_HANDLE; }
     if (g_pbReduce) { vkDestroyPipeline(g_device, g_pbReduce, nullptr); g_pbReduce = VK_NULL_HANDLE; }
+    if (g_pbCombine){ vkDestroyPipeline(g_device, g_pbCombine, nullptr); g_pbCombine = VK_NULL_HANDLE; }
     if (g_pbPool)   { vkDestroyDescriptorPool(g_device, g_pbPool, nullptr); g_pbPool = VK_NULL_HANDLE; g_pbSet = VK_NULL_HANDLE; }
     if (g_pbPL)     { vkDestroyPipelineLayout(g_device, g_pbPL, nullptr); g_pbPL = VK_NULL_HANDLE; }
     if (g_pbDSL)    { vkDestroyDescriptorSetLayout(g_device, g_pbDSL, nullptr); g_pbDSL = VK_NULL_HANDLE; }
@@ -614,6 +624,42 @@ void copyBuf(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
     vkBeginCommandBuffer(g_cmd, &bi);
     VkBufferCopy bc{0, 0, size};
     vkCmdCopyBuffer(g_cmd, src, dst, 1, &bc);
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(g_cmd);
+    submitWait();
+}
+
+// copyBufBatch transfers several staging regions in ONE submit. A submit costs a fence wait, and the
+// upload paths here move five or six small, independent buffers in a row — the transfers themselves
+// are microseconds and the round trips are not. Callers pack the payloads into the shared staging
+// buffer at distinct offsets (stageAlign) and hand over the list. Same bytes, same destinations, so
+// device state afterwards is identical to the one-at-a-time form.
+struct StageCopy {
+    VkDeviceSize srcOff;
+    VkBuffer dst;
+    VkDeviceSize size;
+};
+
+// stageAlign rounds a staging offset up. Copy offsets only need 4-byte alignment for these buffers,
+// but keeping regions on 256-byte lines also stops two payloads sharing a cache line while the host
+// writes them.
+inline VkDeviceSize stageAlign(VkDeviceSize v) { return (v + 255) & ~(VkDeviceSize)255; }
+
+void copyBufBatch(const StageCopy* c, int n) {
+    if (n <= 0) return;
+    vkResetCommandBuffer(g_cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_cmd, &bi);
+    for (int i = 0; i < n; i++) {
+        if (c[i].size == 0) continue;
+        VkBufferCopy bc{c[i].srcOff, 0, c[i].size};
+        vkCmdCopyBuffer(g_cmd, g_staging.buf, c[i].dst, 1, &bc);
+    }
     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
@@ -1146,16 +1192,16 @@ void writeTiledForwardDescriptors() {
     vkUpdateDescriptorSets(g_device, 12, w, 0, nullptr);
 }
 
-// buildBackwardTiled: dedicated 9-binding DSL + pipeline layout (TiledPC push) + pool + set
-// for the two-pass barrier-free backward (Pass A dC walk + Pass B per-shape reduce).
+// buildBackwardTiled: dedicated DSL + pipeline layout (TiledPC push) + pool + set for the
+// three-pass barrier-free backward (Pass A dC walk + Pass B sliced reduce + Pass C combine).
 bool buildBackwardTiled() {
-    VkDescriptorSetLayoutBinding bs[13];
-    for (uint32_t i = 0; i < 13; i++) {
+    VkDescriptorSetLayoutBinding bs[14];
+    for (uint32_t i = 0; i < 14; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dci.bindingCount = 13; dci.pBindings = bs;
+    dci.bindingCount = 14; dci.pBindings = bs;
     if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_pbDSL) != VK_SUCCESS) return false;
     VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(TiledPC)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1174,7 +1220,8 @@ bool buildBackwardTiled() {
     };
     if (!mk(pt_dcwalk_spv, sizeof(pt_dcwalk_spv), g_pbWalk)) return false;
     if (!mk(pt_breduce_spv, sizeof(pt_breduce_spv), g_pbReduce)) return false;
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13};
+    if (!mk(pt_bcombine_spv, sizeof(pt_bcombine_spv), g_pbCombine)) return false;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_pbPool) != VK_SUCCESS) return false;
@@ -1183,24 +1230,27 @@ bool buildBackwardTiled() {
     return vkAllocateDescriptorSets(g_device, &a, &g_pbSet) == VK_SUCCESS;
 }
 
-// writeBackwardDescriptors binds the 11 backward buffers (9 plus the two binning lists).
-// Re-called when g_pbelow/g_pdcsnap/g_tileList are (re)allocated (their handles change).
+// writeBackwardDescriptors binds the backward buffers (the shared nine, the two binning lists,
+// the mask atlas pair, and the slice-partial buffer). Re-called when g_pbelow/g_pdcsnap/
+// g_tileList/g_pbwPart are (re)allocated (their handles change).
 void writeBackwardDescriptors() {
     if (g_pbSet == VK_NULL_HANDLE) return;
-    VkBuffer bufs[13] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_pdC.buf, g_pbelow.buf,
+    VkBuffer bufs[14] = { g_pP.buf, g_pcol.buf, g_pkinds.buf, g_pdC.buf, g_pbelow.buf,
                          g_pdcsnap.buf, g_ppgrad.buf, g_pbbxBuf.buf, g_pboffBuf.buf,
-                         g_tileOff.buf, g_tileList.buf, g_maskAtlas.buf, g_maskMeta.buf };
-    VkDeviceSize sizes[13] = { g_pP.size, g_pcol.size, g_pkinds.size, g_pdC.size, g_pbelow.size,
+                         g_tileOff.buf, g_tileList.buf, g_maskAtlas.buf, g_maskMeta.buf,
+                         g_pbwPart.buf };
+    VkDeviceSize sizes[14] = { g_pP.size, g_pcol.size, g_pkinds.size, g_pdC.size, g_pbelow.size,
                               g_pdcsnap.size, g_ppgrad.size, g_pbbxBuf.size, g_pboffBuf.size,
-                              g_tileOff.size, g_tileList.size, g_maskAtlas.size, g_maskMeta.size };
-    VkWriteDescriptorSet w[13]; VkDescriptorBufferInfo bi[13];
-    for (uint32_t i = 0; i < 13; i++) {
+                              g_tileOff.size, g_tileList.size, g_maskAtlas.size, g_maskMeta.size,
+                              g_pbwPart.size };
+    VkWriteDescriptorSet w[14]; VkDescriptorBufferInfo bi[14];
+    for (uint32_t i = 0; i < 14; i++) {
         bi[i] = {bufs[i], 0, sizes[i]};
         w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w[i].dstSet = g_pbSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
     }
-    vkUpdateDescriptorSets(g_device, 13, w, 0, nullptr);
+    vkUpdateDescriptorSets(g_device, 14, w, 0, nullptr);
 }
 
 // ensureStaging grows the shared staging buffer if a transfer needs more than its size.
@@ -1901,10 +1951,19 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
     if (!ensureSearch(n)) { out_best[0] = 3.4028235e38f; return; }
     // upload kinds / kindCDF / gridCDF
-    ensureStaging((size_t)gw * gh * sizeof(float));
-    memcpy(g_staging.map, kinds, (size_t)nKinds * sizeof(float));   copyBuf(g_staging.buf, g_kindsB.buf, (size_t)nKinds * sizeof(float));
-    memcpy(g_staging.map, kindCDF, (size_t)nKinds * sizeof(float)); copyBuf(g_staging.buf, g_kindcdf.buf, (size_t)nKinds * sizeof(float));
-    memcpy(g_staging.map, gridCDF, (size_t)gw * gh * sizeof(float)); copyBuf(g_staging.buf, g_gridcdf.buf, (size_t)gw * gh * sizeof(float));
+    // Three uploads, one submit. This runs once per PLACED SHAPE, and the kind table and its CDF are
+    // the same handful of floats every time — but the grid CDF is not, so the batch still has to go.
+    {
+        size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
+        VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
+        ensureStaging(o3 + szG);
+        char* base = (char*)g_staging.map;
+        memcpy(base + o1, kinds, szKi);
+        memcpy(base + o2, kindCDF, szKi);
+        memcpy(base + o3, gridCDF, szG);
+        const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
+        copyBufBatch(ups, 3);
+    }
 
     vkResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1934,7 +1993,11 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // 2. score (reuse eval pipeline on the search buffers)
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
-    EvalPC epc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}};
+    // g_gradOn belongs here too. Leaving it off aggregate-initialised it to 0, so fp_set_gradients
+    // reached the host Evaluate path and NOT the on-device search — the two halves of one run scored
+    // gradients differently, and every A/B ever run with the honest-gradient flag moved only half the
+    // system. The shipped default is 0, so this is inert until the flag is set.
+    EvalPC epc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
     vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1);
     cmdBarrierRW();
@@ -1970,10 +2033,19 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     if (!ensureSearch(n) || !ensureMoment(K)) { out_best[0] = 3.4028235e38f; return; }
     int perSeed = n / K; if (perSeed < 1) perSeed = 1;
     int nGen = perSeed * K;
-    ensureStaging((size_t)gw * gh * sizeof(float));
-    memcpy(g_staging.map, kinds, (size_t)nKinds * sizeof(float));   copyBuf(g_staging.buf, g_kindsB.buf, (size_t)nKinds * sizeof(float));
-    memcpy(g_staging.map, kindCDF, (size_t)nKinds * sizeof(float)); copyBuf(g_staging.buf, g_kindcdf.buf, (size_t)nKinds * sizeof(float));
-    memcpy(g_staging.map, gridCDF, (size_t)gw * gh * sizeof(float)); copyBuf(g_staging.buf, g_gridcdf.buf, (size_t)gw * gh * sizeof(float));
+    // Three uploads, one submit. This runs once per PLACED SHAPE, and the kind table and its CDF are
+    // the same handful of floats every time — but the grid CDF is not, so the batch still has to go.
+    {
+        size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
+        VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
+        ensureStaging(o3 + szG);
+        char* base = (char*)g_staging.map;
+        memcpy(base + o1, kinds, szKi);
+        memcpy(base + o2, kindCDF, szKi);
+        memcpy(base + o3, gridCDF, szG);
+        const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
+        copyBufBatch(ups, 3);
+    }
 
     vkResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1993,7 +2065,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     cmdBarrierRW();
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
-    EvalPC epc{nGen, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}};
+    EvalPC epc{nGen, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
     vkCmdDispatch(g_cmd, (uint32_t)nGen, 1, 1);
     cmdBarrierRW();
@@ -2055,6 +2127,7 @@ API void fp_polish_setup(const float* base, int n) {
            && createBufEx((size_t)n * 16, SD, dl, false, g_pbbxBuf)
            && createBufEx((size_t)n * 4, SD, dl, false, g_pboffBuf)
            && createHost((size_t)n * 10 * 8, g_ppgrad)
+           && createBufEx((size_t)n * PBSLICES * 10 * 8, S, dl, false, g_pbwPart)
            && createHost(PLOSS_GROUPS * 8, g_ppartials)
            && createBufEx(16, S, dl, false, g_pbelow)
            && createBufEx(16, S, dl, false, g_pdcsnap)
@@ -2204,25 +2277,44 @@ void buildTileBins() {
     g_binned = 0;
     if (!g_device || g_pn < 1 || g_nTiles < 1) return;
     if (const char* off = getenv("FH6_NO_TILEBIN")) { if (off[0] == '1') return; } // kill switch: full scan
-    TilePC pc{ g_pn, g_tilesX, g_nTiles, PTILE };
     uint32_t groups = (uint32_t)((g_nTiles + 255) / 256);
-    vkResetCommandBuffer(g_cmd, 0);
+    ensureStaging(((size_t)g_nTiles + 1) * 4);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbPL, 0, 1, &g_tbSet, 0, nullptr);
-    vkCmdPushConstants(g_cmd, g_tbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbCount);
-    vkCmdDispatch(g_cmd, groups, 1, 1);
-    cmdBarrierRW();
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbScan);
-    vkCmdDispatch(g_cmd, 1, 1, 1);
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
 
-    ensureStaging(((size_t)g_nTiles + 1) * 4);
-    copyBuf(g_tileOff.buf, g_staging.buf, ((size_t)g_nTiles + 1) * 4);
+    // Count, scan and fill in ONE submit, then read the total. The fill used to wait for that total
+    // so the host could size the list first, which cost two extra fence waits on EVERY polish
+    // iteration; the shader now bounds-checks its writes instead, so a fill against a list that turns
+    // out to be too small is harmless and simply repeated after the grow. The common case — a list
+    // already big enough, since the bboxes barely move between iterations — is one submit.
+    auto record = [&](bool withFill) {
+        TilePC pc{ g_pn, g_tilesX, g_nTiles, PTILE, (int32_t)(g_tileListCap / 4) };
+        vkResetCommandBuffer(g_cmd, 0);
+        vkBeginCommandBuffer(g_cmd, &bi);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbPL, 0, 1, &g_tbSet, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_tbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        if (withFill) {
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbCount);
+            vkCmdDispatch(g_cmd, groups, 1, 1);
+            cmdBarrierRW();
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbScan);
+            vkCmdDispatch(g_cmd, 1, 1, 1);
+            cmdBarrierRW();
+        }
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbFill);
+        vkCmdDispatch(g_cmd, groups, 1, 1);
+        flushBarrier();
+        VkBufferCopy bc{0, 0, ((VkDeviceSize)g_nTiles + 1) * 4};
+        vkCmdCopyBuffer(g_cmd, g_tileOff.buf, g_staging.buf, 1, &bc);
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        vkEndCommandBuffer(g_cmd);
+        submitWait();
+    };
+
+    record(true);
     int total = ((const int*)g_staging.map)[g_nTiles];
     const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
     if (total <= 0 || (long long)total > cap) return;
@@ -2234,16 +2326,8 @@ void buildTileBins() {
         writeTileBinnerDescriptors();
         writeTiledForwardDescriptors();
         writeBackwardDescriptors();
+        record(false); // offsets are already correct; only the truncated fill has to be redone
     }
-    vkResetCommandBuffer(g_cmd, 0);
-    vkBeginCommandBuffer(g_cmd, &bi);
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbFill);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbPL, 0, 1, &g_tbSet, 0, nullptr);
-    vkCmdPushConstants(g_cmd, g_tbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(g_cmd, groups, 1, 1);
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
     g_binned = 1;
 }
 
@@ -2267,21 +2351,32 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
     // and this loop is re-read per pixel per shape. Converting here is the same IEEE round-to-nearest
     // the shaders were applying, so the values they see are bit-for-bit what they saw before.
     size_t szP = (size_t)g_pn * 6 * 4, szC = (size_t)g_pn * 4 * 8, szK = (size_t)g_pn * 4;
-    ensureStaging(szC); // szC is now the largest: >= szP >= szK >= n*16 (bbx) >= n*4 (boff)
+    size_t szB = (size_t)g_pn * 16, szO = (size_t)g_pn * 4;
+    // One staging layout, one submit. This runs once per polish ITERATION, so five fence waits here
+    // were five per iteration for transfers measured in microseconds.
+    VkDeviceSize oP = 0;
+    VkDeviceSize oC = stageAlign(oP + szP);
+    VkDeviceSize oK = stageAlign(oC + szC);
+    VkDeviceSize oB = stageAlign(oK + szK);
+    VkDeviceSize oO = stageAlign(oB + szB);
+    ensureStaging(oO + szO);
+    char* base = (char*)g_staging.map;
     {
-        float* dst = (float*)g_staging.map;
+        float* dst = (float*)(base + oP);
         for (size_t i = 0; i < (size_t)g_pn * 6; i++) dst[i] = (float)P[i];
-        copyBuf(g_staging.buf, g_pP.buf, szP);
     }
-    memcpy(g_staging.map, col, szC);   copyBuf(g_staging.buf, g_pcol.buf, szC);
-    memcpy(g_staging.map, kinds, szK); copyBuf(g_staging.buf, g_pkinds.buf, szK);
-    // bbx + boff(int32) -> device for the tiled forward/hard passes
-    size_t szB = (size_t)g_pn * 16;
-    memcpy(g_staging.map, bbx, szB); copyBuf(g_staging.buf, g_pbbxBuf.buf, szB);
-    std::vector<int32_t> boff32((size_t)g_pn);
-    for (int i = 0; i < g_pn; i++) boff32[i] = (int32_t)boff[i];
-    size_t szO = (size_t)g_pn * 4;
-    memcpy(g_staging.map, boff32.data(), szO); copyBuf(g_staging.buf, g_pboffBuf.buf, szO);
+    memcpy(base + oC, col, szC);
+    memcpy(base + oK, kinds, szK);
+    memcpy(base + oB, bbx, szB); // bbx + boff(int32) feed the tiled forward/hard passes
+    {
+        int32_t* dst = (int32_t*)(base + oO);
+        for (int i = 0; i < g_pn; i++) dst[i] = (int32_t)boff[i];
+    }
+    const StageCopy ups[5] = {
+        {oP, g_pP.buf, szP}, {oC, g_pcol.buf, szC}, {oK, g_pkinds.buf, szK},
+        {oB, g_pbbxBuf.buf, szB}, {oO, g_pboffBuf.buf, szO},
+    };
+    copyBufBatch(ups, 5);
     buildTileBins();
 }
 
@@ -2337,35 +2432,78 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     if (!g_device || g_pn < 1) return;
     (void)bbxHost; // bbx lives on-device (g_pbbxBuf)
     double tau = *tauPtr;
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
-    // False-edge + SSIM adjoint planes first, feeding the dcinit dC seed below.
-    if (g_pfelambda > 0.0 || g_pldlambda > 0.0) cmdFEPasses(true);
-    if (g_psslambda > 0.0) cmdSSIMPasses(true);
-    if (g_peglambda > 0.0) cmdEaglePasses(true);
-    // dC = 2*weight*(render-target) — full image, shared polish DSL
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pDcinit);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
+    // FH6VK_BWPROBE=1: split the one-submit backward into three fenced submits and report where
+    // the time goes (terms+dcinit / walk / reduce). Diagnostic only — the extra fences cost real
+    // wall, so never leave it on for a measured run.
+    static int bwProbe = -1;
+    if (bwProbe < 0) { const char* e = getenv("FH6VK_BWPROBE"); bwProbe = (e && e[0] == '1') ? 1 : 0; }
     PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda, (float)g_pldlambda};
-    vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcd), &pcd);
-    vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
-    cmdBarrierRW();
-    // Pass A: per-pixel reverse dC walk -> dcsnap (one dispatch, no per-shape barriers)
-    TiledPC tpc{ g_pn, g_w, g_h, g_pste, (float)tau, g_tilesX, PTILE, g_binned };
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbWalk);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
-    vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
-    vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
-    cmdBarrierRW();
-    // Pass B: per-shape gradient reduce -> pgrad (N independent workgroups, one dispatch)
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbReduce);
-    vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
-    vkCmdDispatch(g_cmd, (uint32_t)g_pn, 1, 1);
-    flushBarrier(); // pgrad shader write -> host read
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
+    TiledPC tpc{ g_pn, g_w, g_h, g_pste, (float)tau, g_tilesX, PTILE, g_binned, PBSLICES };
+    auto begin = [&]() {
+        vkResetCommandBuffer(g_cmd, 0);
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(g_cmd, &bi);
+    };
+    auto recTerms = [&]() {
+        // False-edge + SSIM adjoint planes first, feeding the dcinit dC seed below.
+        if (g_pfelambda > 0.0 || g_pldlambda > 0.0) cmdFEPasses(true);
+        if (g_psslambda > 0.0) cmdSSIMPasses(true);
+        if (g_peglambda > 0.0) cmdEaglePasses(true);
+        // dC = 2*weight*(render-target) — full image, shared polish DSL
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pDcinit);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pPL, 0, 1, &g_pSet, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_pPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pcd), &pcd);
+        vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
+        cmdBarrierRW();
+    };
+    auto recWalk = [&]() {
+        // Pass A: per-pixel reverse dC walk -> dcsnap (one dispatch, no per-shape barriers)
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbWalk);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
+        vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
+        cmdBarrierRW();
+    };
+    auto recReduce = [&]() {
+        // Pass B: sliced per-shape gradient reduce -> slice partials. The (n, PBSLICES) dispatch
+        // spreads a canvas-sized bbox over up to PBSLICES workgroups instead of serialising it in
+        // one — the single-workgroup layout made the whole dispatch wait on its largest shape
+        // (measured 26× on img_26 @3000).
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbReduce);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
+        vkCmdDispatch(g_cmd, (uint32_t)g_pn, (uint32_t)PBSLICES, 1);
+        cmdBarrierRW();
+        // Pass C: sum each shape's slice partials in ascending slice order -> pgrad
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbCombine);
+        vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
+        vkCmdDispatch(g_cmd, (uint32_t)g_pn, 1, 1);
+        flushBarrier(); // pgrad shader write -> host read
+    };
+    if (!bwProbe) {
+        begin(); recTerms(); recWalk(); recReduce();
+        vkEndCommandBuffer(g_cmd);
+        submitWait();
+        return;
+    }
+    static double tTerms = 0, tWalk = 0, tReduce = 0;
+    static int bwCalls = 0;
+    using clk = std::chrono::steady_clock;
+    auto part = [&](double& acc, int which) {
+        auto t0 = clk::now();
+        begin();
+        if (which == 0) recTerms(); else if (which == 1) recWalk(); else recReduce();
+        vkEndCommandBuffer(g_cmd);
+        submitWait();
+        acc += std::chrono::duration<double>(clk::now() - t0).count();
+    };
+    part(tTerms, 0);
+    part(tWalk, 1);
+    part(tReduce, 2);
+    if (++bwCalls % 100 == 0)
+        fprintf(stderr, "bwprobe %d iters: terms+dcinit %.2fs walk %.2fs reduce %.2fs\n",
+                bwCalls, tTerms, tWalk, tReduce);
 }
 
 API void fp_polish_read_grad(double* dst) {

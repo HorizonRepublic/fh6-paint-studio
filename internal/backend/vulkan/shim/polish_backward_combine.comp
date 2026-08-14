@@ -1,0 +1,39 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : require
+// polish_backward_combine.comp — TILED backward Pass C: one small workgroup per shape sums the
+// slice partials Pass B wrote (polish_backward_reduce.comp) into the shape's pgrad slot, in
+// ascending slice order — fixed order, no atomics, deterministic. Recomputes the slice count from
+// the bbox the same way Pass B does, so it never reads a slot Pass B did not write this iteration.
+
+layout(local_size_x = 16) in;
+layout(std430, binding = 6) writeonly buffer Gb { double pgrad[]; };
+layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
+layout(std430, binding = 13) readonly buffer Wb { double partialb[]; };
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices; } pc;
+
+const int NG = 10;
+const int SLICE_PX = 4096; // MUST match polish_backward_reduce.comp
+
+int sliceCount(int total) {
+    int s = (total + SLICE_PX - 1) / SLICE_PX;
+    return s < 1 ? 1 : (s > pc.slices ? pc.slices : s);
+}
+
+void main() {
+    uint k = gl_LocalInvocationID.x;
+    if (k >= uint(NG)) return;
+    int si = int(gl_WorkGroupID.x);
+    if (si >= pc.n) si = pc.n - 1;
+
+    int xMin = bbx[si * 4], yMin = bbx[si * 4 + 1], xMax = bbx[si * 4 + 2], yMax = bbx[si * 4 + 3];
+    int bw = xMax - xMin + 1, bh = yMax - yMin + 1;
+    int total = (bw < 1 || bh < 1) ? 0 : bw * bh;
+
+    double sum = 0.0LF;
+    if (total > 0) {
+        int sc = sliceCount(total);
+        int base = si * pc.slices * NG + int(k);
+        for (int s = 0; s < sc; s++) sum += partialb[base + s * NG];
+    }
+    pgrad[si * NG + int(k)] = sum;
+}
