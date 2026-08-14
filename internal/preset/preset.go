@@ -270,6 +270,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		PolishOpts:        polishOpts(sp.iters, c.PolishTau0, sp.tau1, sp.ste, feLambda(c, sp.falseEdge), sp.ssim, eagleLambda(c, sp.eagle), sp.lostDetail),
 		ShadePrepass:      sp.shadePre,
 		SmoothBase:        sp.smoothBase,
+		GeomRefine:        sp.geomRefine,
 		RegionKinds:       sp.regionKinds,
 		SmoothGlowTau:     sp.glowTau,
 		SmoothGlowProb:    sp.glowProb,
@@ -380,6 +381,7 @@ type shapeParams struct {
 	lostDetail        float64
 	shadePre          bool
 	smoothBase        bool
+	geomRefine        bool
 	regionKinds       bool
 	glowTau           float64
 	glowProb          float64
@@ -417,6 +419,7 @@ func resolveShapeParams(md ModeDefaults, c Choices, flatMode, transparent bool) 
 		lostDetail:        md.LostDetail,
 		shadePre:          md.ShadePre,
 		smoothBase:        md.SmoothBase,
+		geomRefine:        md.GeomRefine,
 		regionKinds:       md.RegionKinds,
 		glowTau:           md.SmoothGlowTau,
 		glowProb:          md.SmoothGlowProb,
@@ -742,6 +745,7 @@ type ModeDefaults struct {
 	KneeFloor   float64 // knee absolute floor (frac of initialErr) so it trips on near-SOLVED flat content
 	ShadePre    bool    // shading pre-pass: claim coherent linear-ramp regions as base+gradient-word stacks
 	SmoothBase  bool    // smooth-region gradient base: claim LARGE smooth regions with jointly-solved base+gradient stacks
+	GeomRefine  bool    // post-polish monotone coordinate refine of every shape's geometry (engine skewrefine.go)
 	RegionKinds bool    // region-gated kind selection: rect/tri only where the target has hard structure
 	// SmoothGlowTau/-Prob gate the deep-smooth glow swap riding RegionKinds: hard<Tau cells swap
 	// their forced ellipse for a rimless glow with probability Prob. 0 = the engine default pair.
@@ -802,6 +806,10 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// (region-restricted exact ΔSSE) or it rolls back entirely. The weighted-term flag stays
 		// off here: photo runs all perceptual λ terms at 0 (measured ΔE cost), so it would be inert.
 		d.SmoothBase = true
+		// Monotone geometry refine — see the anime case for the mechanism and the numbers. Photo is
+		// 12 of 12 pairs better, mean -3.708%, and it only becomes a win once the pass runs BEFORE the
+		// colour solve: in the later position photo lost 7 of 12.
+		d.GeomRefine = true
 		// Region-gated kinds for photo too (2026-07-20): the smooth-glow swap rides the kind gate,
 		// and photo's soft backgrounds (bokeh/sky) are exactly where the translucent-facet
 		// patchwork lives. Measured on img_10 photo @native: ΔE 3.25→3.16, p95 −3%, SSIM +0.008
@@ -935,6 +943,20 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// other half of the anime combo above — claims replace the greedy's translucent facet
 		// patchwork in large smooth zones with 2-4 jointly-colour-solved gradient stacks.
 		d.SmoothBase = true
+		// Monotone geometry refine (2026-08-12). After the polish and before the global colour solve,
+		// every shape's parameters are pattern-searched against the frozen stack and a move is kept
+		// only where the exact occlusion-aware local error falls — in rounds, so that only DISJOINT
+		// moves commit together (they compose exactly; committing overlapping ones raised the frame
+		// error and rolled the whole pass back). Measured over 27 paired runs, 9 images x 3 seeds,
+		// judged on the in-game unweighted SSE: 26 of 27 clear the bar and NONE is worse (the 27th
+		// lands inside +-0.1%), mean -4.220% (anime -4.630%, photo -3.708%), wall +15.7%. Raw pairs in
+		// out/ab/geom-guard.tsv.
+		//
+		// Position is doing a lot of that work. Run AFTER the colour solve the same pass scored 20 of
+		// 27 and lost outright on photo, because a shape moved after the colours are solved keeps a
+		// colour fitted to where it used to be. FH6_REFINE_LATE=1 restores the old order,
+		// FH6_GEOMREFINE=0/1 pins the pass off or on.
+		d.GeomRefine = true
 		// LOO refit (2026-07-20, the owner's "shapes are wasted" complaint measured and fixed):
 		// after the polish, 17-25% of shapes are individually harmful-or-neutral in the FINAL
 		// stack (greedy scores at placement; later shapes overpaint). Two exact-LOO prune→regrow→

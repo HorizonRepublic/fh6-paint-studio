@@ -25,11 +25,13 @@ func postPasses() []pass {
 		softSwapPolishPass{},
 		polishPass{},
 		looRefitPass{},
+		skewRefinePass{early: true},
 		globalColorPass{},
 		artifactFixPass{},
 		annealPass{},
 		zswapPass{},
 		softSwapPass{},
+		skewRefinePass{},
 		standoutPass{},
 	}
 }
@@ -52,6 +54,8 @@ func (r *run) passTimer(p pass) *time.Duration {
 		return &r.tm.SoftSwap
 	case standoutPass:
 		return &r.tm.Standout
+	case skewRefinePass:
+		return &r.tm.SkewRefine
 	}
 	return nil
 }
