@@ -14,6 +14,11 @@ on:
         description: "Release tag whose attached archive to publish (e.g. v2.0.0)"
         required: true
         type: string
+      notes:
+        description: "Short human text for the Nexus version description (empty = link to the GitHub changelog)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -67,11 +72,10 @@ jobs:
           filename: ${{ env.ARCHIVE }}
           version: ${{ env.NEXUS_VERSION }}
           display_name: ${{ env.NEXUS_VERSION }}
-          # The changelog is NOT posted to the mod page. Release notes are generated from every
-          # commit since the last tag, and on the way to a real release that is a wall of text
-          # nobody reads on a Nexus page — the link to the GitHub release is the honest amount of
-          # detail for a mod listing.
-          description: "Changelog: https://github.com/${{ github.repository }}/releases/tag/${{ inputs.tag }}"
+          # A short hand-written line reads better on a mod page than generated release notes —
+          # pass it as the `notes` input. Left empty, the fallback is the link to the GitHub
+          # release: still honest, never a wall of auto-generated text.
+          description: "${{ inputs.notes != '' && inputs.notes || format('Changelog: https://github.com/{0}/releases/tag/{1}', github.repository, inputs.tag) }}"
           # Keep the mod page's version in step with the file that was just published, so the Nexus
           # header stops lagging a release behind.
           update_mod_version: true
