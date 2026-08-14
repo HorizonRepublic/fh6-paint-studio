@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -203,6 +204,9 @@ func TestRegionAndSurroundSurviveTheWire(t *testing.T) {
 			t.Errorf("base rect starts at x=%.1f, want a negative origin — the surround was not taken back off", x)
 		}
 	case err := <-failed:
+		if err != nil && strings.Contains(err.Error(), "vulkan init failed") {
+			t.Skipf("vulkan unavailable: %v", err) // CI box without a device/DLL — same convention as the engine suite
+		}
 		t.Fatalf("run failed: %v", err)
 	case <-time.After(4 * time.Minute):
 		t.Fatal("timed out")

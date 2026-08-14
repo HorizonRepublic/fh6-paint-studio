@@ -1,6 +1,7 @@
 package runner_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,7 @@ func TestRunAsyncEmitsOrderedEvents(t *testing.T) {
 	var mu sync.Mutex
 	var logs, progs, frames int
 	var done *runner.Done
+	var failed error
 	finished := make(chan struct{})
 
 	runner.RunAsync(prep, r, func(e runner.Event) {
@@ -61,7 +63,7 @@ func TestRunAsyncEmitsOrderedEvents(t *testing.T) {
 			done = &d
 			close(finished)
 		case runner.Failed:
-			t.Errorf("unexpected Failed: %v", ev.Err)
+			failed = ev.Err
 			close(finished)
 		}
 	})
@@ -74,6 +76,10 @@ func TestRunAsyncEmitsOrderedEvents(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+	if failed != nil {
+		skipIfNoVulkan(t, failed) // a CI box without a device/DLL skips, like every engine test
+		t.Fatalf("unexpected Failed: %v", failed)
+	}
 	if logs == 0 {
 		t.Error("expected log events")
 	}
@@ -101,6 +107,7 @@ func TestRunAsyncCancel(t *testing.T) {
 
 	prog := make(chan int, 8192)
 	resCh := make(chan engine.Result, 1)
+	failCh := make(chan error, 1)
 	cancel := runner.RunAsync(prep, r, func(e runner.Event) {
 		switch ev := e.(type) {
 		case runner.Progress:
@@ -111,8 +118,7 @@ func TestRunAsyncCancel(t *testing.T) {
 		case runner.Done:
 			resCh <- ev.Result
 		case runner.Failed:
-			t.Errorf("unexpected Failed: %v", ev.Err)
-			resCh <- engine.Result{}
+			failCh <- ev.Err
 		}
 	})
 
@@ -132,7 +138,19 @@ func TestRunAsyncCancel(t *testing.T) {
 		if got := len(res.Shapes); got > 80 {
 			t.Errorf("cancel did not stop early: placed %d shapes of a 400 budget", got)
 		}
+	case err := <-failCh:
+		skipIfNoVulkan(t, err)
+		t.Fatalf("unexpected Failed: %v", err)
 	case <-time.After(60 * time.Second):
 		t.Fatal("timeout waiting for cancelled run")
+	}
+}
+
+// skipIfNoVulkan turns the one non-test-bug failure — no device or no fh6vk.dll on the box —
+// into a skip, the same convention the vulkan and engine suites use.
+func skipIfNoVulkan(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && strings.Contains(err.Error(), "vulkan init failed") {
+		t.Skipf("vulkan unavailable: %v", err)
 	}
 }
