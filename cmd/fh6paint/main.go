@@ -77,6 +77,8 @@ func main() {
 	proposerEvery := flag.Int("proposer-every", 25, "with -proposer: shapes between refreshes of the proposal map. The canvas moves by one shape per step, so a sweep every N steps amortises to nothing next to the scoring it replaces.")
 	segHard := flag.Bool("seg-hardmap", false, "build the region gate from a SEGMENTATION instead of Sobel density (needs -region-kinds): a pixel scores as structure only near an actual colour-region boundary, weighted by the contrast across it. metric.HardEdgeMap saturates on one line crossing its 12px cell — measured 0.67 mean over region interiors vs 0.79 on real boundaries — which is what puts the kind gate, the glow swap and the region-weighted polish terms out of action in smooth zones. FH6_SEGHARD=\"k,minSize,contrast,falloff\" tunes.")
 	rimAim := flag.Bool("rim-aim", false, "aim -soft-swap by RIM DEBT and let it consider ELLIPSES: rank shapes by the edge their own OUTLINE draws where the TARGET is smooth, instead of by false-edge mass inside them. The visible-contour artefact is a boundary property and sits mostly on ellipses, which the original ordering never offered as candidates. Softening the same number of RANDOM shapes makes the artefact worse, so the aim is what does the work. Needs -soft-swap.")
+	skewRefine := flag.Bool("skew-refine", false, "post-polish SHEAR refine: line-search the shear of every rectangle and bank word and keep it only where the exact occlusion-aware local error falls, then gate the pass end to end. A sheared rectangle is a parallelogram and a sheared gradient word shades along one direction while facing another; ellipses gain nothing, since shearing one yields another rotated ellipse.")
+	geomRefine := flag.Bool("geom-refine", false, "post-polish COORDINATE refine: pattern-search every geometry parameter of every shape and keep only the moves that lower the exact occlusion-aware local error. Wider than -skew-refine and includes it.")
 	softSwap := flag.Float64("soft-swap", 0, "post-polish SOFT-SWAP standout repair (0=off): replace the worst standout rects/triangles (rim draws an edge the TARGET lacks) with a soft shape moment-fitted to the SAME footprint (ellipse/feathered-disk/glow, same colour+z), gated so the global error rises at most this fraction. Substitution keeps the coverage, so many repairs fit where -standout's remove/recolour menu starves at the gate. ~0.005-0.02. Judge by EYE.")
 	softSwapPre := flag.Bool("soft-swap-pre", false, "with -soft-swap: run the swap BEFORE the polish (on the greedy result) and let the joint polish co-adapt around the substitutions; gated end-to-end (polish(greedy) vs polish(swap(greedy)) — the swap branch ships only if SSE lands within tol AND the global false-edge ratio improves). The post-polish form starves at the gate (~4-7 swaps); this is the redistribution fix. Needs -polish.")
 	zswap := flag.Int("zswap", 0, "z-order local swap EXPERIMENT (0=off): after polish, try swapping up to N z-adjacent overlapping shape pairs (ranked by local error), keeping only swaps that lower the hard-rendered error. Each trial is a full re-render -- keep N modest (~200). Aimed at opaque/flat content where stack order owns contested pixels.")
@@ -315,9 +317,14 @@ func main() {
 			prep = hybrid.SuppressLines(prep, inkShapes) // drawn lines claim their pixels from the fill target
 		}
 	}
-	fillBudget := *shapes
+	// -shapes is the LAYER count the group will hold, so one of them belongs to the background rect,
+	// which is emitted as shapes[0] and injected as the bottom layer (inject/fh6.go). The studio has
+	// always reserved it through presetpkg.PlaceBudget; the CLI used the raw number and therefore
+	// shipped one layer MORE than asked — measured 1001 for -shapes 1000 on every recorded flat case,
+	// which at -shapes 3000 is 3001 in a group whose in-game ceiling is exactly 3000.
+	fillBudget := presetpkg.PlaceBudget(*shapes)
 	if *hybridInk < 0 { // auto: ink + fill share the -shapes total (no overflow, no waste)
-		fillBudget = *shapes - len(inkShapes)
+		fillBudget = presetpkg.PlaceBudget(*shapes) - len(inkShapes)
 		if fillBudget < 1 {
 			fillBudget = 1
 		}
@@ -347,6 +354,17 @@ func main() {
 	// Smooth-region gradient base default (md.SmoothBase: anime + photo — gate-safe claims).
 	if !userSet["smooth-base"] {
 		*smoothBase = md.SmoothBase
+	}
+	// Monotone geometry refine default (md.GeomRefine: anime only — 15 of 15 paired runs better,
+	// mean -1.257%; photo split 5 of 12 and is left off). -geom-refine overrides either way.
+	if !userSet["geom-refine"] {
+		*geomRefine = md.GeomRefine
+	}
+	// The env pin wins over both, and it can force the pass OFF as well as on: a control arm needs a
+	// way to disable a preset default without a flag, and "set means pin" is how the other pins here
+	// already behave.
+	if v := os.Getenv("FH6_GEOMREFINE"); v != "" {
+		*geomRefine = v == "1"
 	}
 	// Size-conditioned glow-swap defaults (md.BigGlowTau/-Prob). Pulled here for the same reason
 	// every other preset field is: the studio reads ModeDefaults directly, the CLI does not.
@@ -678,6 +696,8 @@ func main() {
 		ArtifactFix:         *artifactFix,
 		SoftSwapTol:         *softSwap,
 		RimAim:              *rimAim,
+		SkewRefine:          *skewRefine || os.Getenv("FH6_SKEWREFINE") == "1",
+		GeomRefine:          *geomRefine,
 		SoftSwapPre:         *softSwapPre,
 		ZSwapTrials:         *zswap,
 		PersistGain:         *persistErr,

@@ -756,6 +756,30 @@ func (r *run) refine() {
 	// MONO mode: snap every shape to the exact lock colour LAST, after polish/back-fit/standout have
 	// finished moving colours — guaranteeing one pure brand colour in the output.
 	r.lockColors()
+	r.clampToBudget()
+}
+
+// clampToBudget enforces the user's shape count on the FINAL list.
+//
+// postProcess prunes to the budget at the end of the GREEDY, but every pass after it moves the count:
+// the LOO refit prunes and regrows, the back-fit regrows, merge-refit collapses pairs. Nothing put the
+// result back inside the budget, and flat measured 1001 layers for a budget of 1000 on all five
+// recorded cases — systematically one over. That is not cosmetic: shapes[0] is the background and IS
+// injected as the bottom layer (inject/fh6.go), so a budget of 3000 was shipping 3001 layers into a
+// group whose in-game ceiling is exactly 3000.
+//
+// Only the OVER case is corrected here. Coming in under budget is also real — anime measured 987 of
+// 1000 — but topping that back up means placing shapes the passes decided were not worth having, which
+// is a quality change and has to be measured, not slipped in behind a bug fix.
+func (r *run) clampToBudget() {
+	if r.opt.StopAt < 1 || len(r.shapes) <= r.opt.StopAt+1 {
+		return
+	}
+	over := len(r.shapes) - (r.opt.StopAt + 1)
+	r.shapes = pruneToBudget(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt,
+		r.opt.Background, r.opt.TransparentBG)
+	r.finalErr = rerender(r.be, r.initCanvas, r.shapes)
+	applog.Printf("clamp: %d layers over the budget, pruned to %d", over, len(r.shapes))
 }
 
 // setStatus reports the current post-greedy phase to the optional Options.Status callback (a UI
