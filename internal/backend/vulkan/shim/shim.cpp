@@ -330,6 +330,7 @@ VkDescriptorSet       g_piSet = VK_NULL_HANDLE, g_phSet = VK_NULL_HANDLE,
 // measured on that.
 std::vector<VkDescriptorSet> g_pcSets;
 VkDescriptorPool g_propDPool = VK_NULL_HANDLE; // was a local: nothing ever destroyed it
+int g_propSetsOK = 0;            // every set in g_pcSets is a real handle (see ensureProposerSets)
 std::vector<PropLayer> g_propLayers;
 Buf g_propIn, g_propA, g_propB, g_propMap, g_propKinds;
 Buf g_pMixW, g_pMixB, g_pGeoW, g_pGeoB, g_pAlpW, g_pAlpB, g_pCnfW, g_pCnfB;
@@ -2213,10 +2214,19 @@ API void fp_error_grid(float* out) {
     submitWait();
     // The dirty rect is consumed only AFTER a successful submit: clearing it up front meant a
     // failed dispatch (device loss) silently froze those cells stale forever.
-    if (g_fatal) return; // the dispatch died: g_gridBuf holds the PREVIOUS grid, and handing that
-                         // back reads to the caller as a fresh measurement of a canvas it never saw
-    g_dirtyFull = false;
-    g_dirtyX0 = g_dirtyY0 = 0; g_dirtyX1 = g_dirtyY1 = -1;
+    // The dirty rect is consumed only AFTER a successful submit: clearing it up front meant a
+    // failed dispatch (device loss) silently froze those cells stale forever.
+    if (!g_fatal) {
+        g_dirtyFull = false;
+        g_dirtyX0 = g_dirtyY0 = 0; g_dirtyX1 = g_dirtyY1 = -1;
+    }
+    // The copy happens EVEN after a device loss, and that is deliberate. Handing back a
+    // one-shape-stale grid is not honest, but returning nothing is worse: the caller's buffer is
+    // freshly allocated, so it stays all-zero, and zero error is the BEST POSSIBLE score. The
+    // back-fit gate scores its branch with sumGrid of exactly this grid and ignores the error
+    // (backfit.go), so a zeroed one makes a dead GPU look like a perfect reconstruction and the
+    // garbage branch wins. Stale data is plausible data; the run aborts on the next DeviceLost
+    // poll either way. g_lastError is already armed by submitWait, so the fault is still reported.
     memcpy(out, g_gridBuf.map, (size_t)gw * gh * sizeof(float));
 }
 
@@ -2311,7 +2321,12 @@ static bool buildProposerPipelines() {
 // from fp_set_proposer, where the layer count is finally known; the pool is rebuilt whenever that
 // count changes and is destroyed with the device.
 static bool ensureProposerSets(size_t layers) {
-    if (g_propDPool != VK_NULL_HANDLE && g_pcSets.size() == layers) return true;
+    // g_propSetsOK, not just the sizes: a failed allocation left the pool created and g_pcSets
+    // resized to `layers` full of VK_NULL_HANDLE, and the size check alone then reported SUCCESS on
+    // the next install — after which fp_run_proposer binds null descriptor sets. Two runs in one
+    // process is exactly what the studio and engined do.
+    if (g_propSetsOK && g_propDPool != VK_NULL_HANDLE && g_pcSets.size() == layers) return true;
+    g_propSetsOK = false;
     if (g_propDPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(g_device, g_propDPool, nullptr); // frees every set allocated from it
         g_propDPool = VK_NULL_HANDLE;
@@ -2336,6 +2351,7 @@ static bool ensureProposerSets(size_t layers) {
         ai.descriptorPool = g_propDPool; ai.descriptorSetCount = 1; ai.pSetLayouts = &ls[i];
         if (vkAllocateDescriptorSets(g_device, &ai, ds[i]) != VK_SUCCESS) return false;
     }
+    g_propSetsOK = 1; // only here: every handle above is real
     return true;
 }
 
@@ -2344,9 +2360,9 @@ static bool ensureProposerSets(size_t layers) {
 // layouts and DSLs outlived vkDestroyDevice, so a second run in one process (the studio, engined)
 // bound handles from a dead device.
 void proposerTeardown() {
-    if (!g_device) { g_pcSets.clear(); g_propDPool = VK_NULL_HANDLE; return; }
+    if (!g_device) { g_pcSets.clear(); g_propDPool = VK_NULL_HANDLE; g_propSetsOK = 0; return; }
     if (g_propDPool) { vkDestroyDescriptorPool(g_device, g_propDPool, nullptr); g_propDPool = VK_NULL_HANDLE; }
-    g_pcSets.clear();
+    g_pcSets.clear(); g_propSetsOK = 0;
     g_piSet = g_phSet = g_poSet = VK_NULL_HANDLE;
     if (g_pcPipe) { vkDestroyPipeline(g_device, g_pcPipe, nullptr); g_pcPipe = VK_NULL_HANDLE; }
     if (g_piPipe) { vkDestroyPipeline(g_device, g_piPipe, nullptr); g_piPipe = VK_NULL_HANDLE; }
@@ -2681,7 +2697,10 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // the same handful of floats every time — but the grid CDF is not, so the batch still has to go.
     size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
     VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
-    ensureStaging(o3 + szG);
+    // CHECKED, like its sibling fp_search_moment: ensureStaging returns void, so a failed grow left
+    // g_staging.map null and the memcpys below wrote through it. That is a host null-pointer write
+    // on exactly the low-memory machines the robustness work is for.
+    if (!stagingReady(o3 + szG)) { out_best[0] = 3.4028235e38f; return; }
     {
         char* base = (char*)g_staging.map;
         memcpy(base + o1, kinds, szKi);
@@ -2831,7 +2850,13 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
 API void fp_search_mutate(unsigned long long seed, const int* ip, const float* fp, float* io_best) {
     g_profScope = PROF_MUTATE;
     int m = ip[0], rounds = ip[1], compact = ip[2], shapeCount = ip[3], allowAlpha = ip[4];
-    if (!g_device || g_fatal || m < 1 || rounds < 1) return;
+    // Arm the error before bailing on a dead device. The Go wrapper DRAINS a stale one-shot code
+    // before calling (so an unrelated earlier fault cannot be misread as "old DLL"), then checks
+    // fp_last_error afterwards — so a silent return here read as 0, io_best came back untouched and
+    // therefore passed the <= sanity check, and the engine was told the hill climb SUCCEEDED
+    // against a GPU that no longer exists.
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; return; }
+    if (!g_device || m < 1 || rounds < 1) return;
     if (m > 65535) m = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
     if (!ensureSearch(m)) return;
     memcpy(g_best.map, io_best, 12 * sizeof(float));

@@ -55,6 +55,10 @@ class Studio extends ChangeNotifier {
   List<int>? region;
 
   /// How much of the result the compare wipe reveals: 0 source, 1 result.
+  ///
+  /// Read it through [compareN], never through this field. It is kept in step only so a reader
+  /// that predates the notifier still sees the right VALUE — but a widget that reads it inside a
+  /// studio ListenableBuilder will never rebuild, because setCompare deliberately does not notify.
   double compare = 1;
 
   int shapes = 0;
@@ -898,7 +902,10 @@ class Studio extends ChangeNotifier {
   Future<bool> saveToLibrary(String name, {bool quiet = false}) async {
     final e = _engine;
     final g = geometry;
-    final img = preview;
+    // clone(), like adoptEdited does. toByteData below is awaited, and width/height are read after
+    // it: a drop or an openRun in that window disposes `preview`, the read throws, and the save is
+    // caught as "save failed" — losing the very fit the automatic save exists to keep.
+    final img = preview?.clone();
     if (e == null || g == null || img == null) return false;
     // The library names a run by its source basename with no extension — "car",
     // not "car.png" — so a from-scratch design named after its reference reads
@@ -933,7 +940,10 @@ class Studio extends ChangeNotifier {
     final shapesSnapshot = (g['shapes'] as List?) ?? const [];
     try {
       final bytes = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-      if (bytes == null) return false;
+      if (bytes == null) {
+        img.dispose();
+        return false;
+      }
       final res = await e.librarySave(
         shapes: shapesSnapshot,
         entry: entry,
@@ -948,12 +958,14 @@ class Studio extends ChangeNotifier {
       if (id != null && !quiet) selectedRunId = id;
       if (!quiet) _note('done', 'saved "$safe" to runs');
       await refreshLibrary();
-      notifyListeners();
+      if (!_disposed) notifyListeners();
       return true;
     } catch (err) {
       _note('error', 'save failed: $err');
-      notifyListeners();
+      if (!_disposed) notifyListeners();
       return false;
+    } finally {
+      img.dispose(); // the clone taken above; the studio's own preview is untouched
     }
   }
 
@@ -1344,6 +1356,7 @@ class Studio extends ChangeNotifier {
     _engine?.close();
     preview?.dispose();
     sourceImage?.dispose();
+    compareN.dispose();
     super.dispose();
   }
 

@@ -806,6 +806,12 @@ func (r *run) searchOne(progress float32, sampGrid []float32, penalty func(model
 				}
 				return best, bestScore
 			}
+			if r.deviceLost() {
+				// ok=false because the GPU died, not because the export is missing. Falling into
+				// the host rounds below would grind thousands of Evaluate calls against a dead
+				// device before the loop's own check aborts the run.
+				return best, bestScore
+			}
 			r.devMutate = nil // older DLL without the export — host rounds for the rest of the run
 		}
 		for i := 0; i < r.rounds && bestScore < 0; i++ {

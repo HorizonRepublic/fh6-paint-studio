@@ -623,7 +623,7 @@ func main() {
 	// already-built target/weight (same content-mode weight map as a full run).
 	if *polishJSON != "" {
 		polishGeometryJSON(be, *polishJSON, prep, engine.Options{
-			Width: prep.W, Height: prep.H, Background: prep.Background, TransparentBG: prep.HasTransparency,
+			Width: prep.W, Height: prep.H, Background: prep.Background, TransparentBG: prep.HasTransparency, PaddedOpaque: prep.PaddedOpaque,
 			RecolorVarSkip: *recolorVar,
 			Polish:         true,
 			PolishOpts:     polishOpts(*polishIters, *polishTau0, *polishTau1, *polishSTE, *polishEarly, *polishOKLab, *polishFalseEdge, *polishSSIM, *polishEagle, *polishLostDetail),
@@ -642,7 +642,7 @@ func main() {
 		}
 		res := engine.GenerateGaussian(be, engine.Options{
 			Width: prep.W, Height: prep.H, Background: prep.Background,
-			StopAt: *shapes, Seed: *seed, TransparentBG: prep.HasTransparency,
+			StopAt: *shapes, Seed: *seed, TransparentBG: prep.HasTransparency, PaddedOpaque: prep.PaddedOpaque,
 			Gaussian:   true,
 			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0, 0, 0, 0),
 		})
@@ -674,6 +674,7 @@ func main() {
 		Kinds:               presetpkg.ParseKinds(*kindsCSV),
 		KindWeights:         kindWeights,
 		TransparentBG:       prep.HasTransparency,
+		PaddedOpaque:        prep.PaddedOpaque,
 		Overdraw:            float32(*overdraw),
 		AllowAlpha:          allowAlpha,
 		AlphaMin:            alphaMin,

@@ -1086,11 +1086,29 @@ class Editor extends ChangeNotifier {
   void removeLayer(int id) {
     if (layers.length <= 1) return;
     mark();
-    // The NEIGHBOUR, not layers.first: shapes from a layer deleted anywhere in
-    // the stack all landed in the bottom one, which on a multi-layer document
-    // is nowhere near where the user was working.
+    // The nearest USABLE neighbour, not layers.first: shapes from a layer deleted anywhere in the
+    // stack all landed in the bottom one, which on a multi-layer document is nowhere near where
+    // the user was working — and if that layer happened to be hidden or locked they vanished into
+    // it while still selected, which is the exact invariant setLayerLocked/setLayerHidden enforce.
     final at = layers.indexWhere((l) => l.id == id);
-    final home = layers[at > 0 ? at - 1 : (at + 1 < layers.length ? at + 1 : 0)].id;
+    var home = -1;
+    for (var d = 1; d < layers.length && home < 0; d++) {
+      for (final j in [at - d, at + d]) {
+        if (j < 0 || j >= layers.length || layers[j].id == id) continue;
+        if (!layers[j].locked && !layers[j].hidden) {
+          home = layers[j].id;
+          break;
+        }
+      }
+    }
+    if (home < 0) {
+      // Every survivor is locked or hidden: unlock and reveal the nearest one rather than drop
+      // the shapes somewhere they cannot be reached.
+      final l = layers.firstWhere((l) => l.id != id);
+      l.locked = false;
+      l.hidden = false;
+      home = l.id;
+    }
     for (final s in shapes) {
       if (s.layer == id) s.layer = home;
     }
@@ -1101,6 +1119,11 @@ class Editor extends ChangeNotifier {
   }
 
   void renameLayer(int id, String name) {
+    // mark() before every layer edit. Layers are part of the undo frame now, so an edit left
+    // outside it is silently REVERTED by the next Ctrl+Z — lock a layer to protect finished work,
+    // undo one stray move, and the lock is gone. Skipping mark() also meant these never cleared
+    // the redo stack, so undo -> lock -> redo threw the lock away a second time.
+    mark();
     layerOf(id)?.name = name;
     notifyListeners();
   }
@@ -1108,6 +1131,7 @@ class Editor extends ChangeNotifier {
   void setLayerLocked(int id, bool v) {
     final l = layerOf(id);
     if (l == null) return;
+    mark(); // see renameLayer
     l.locked = v;
     // Nothing in a locked layer may stay selected, or the inspector would go on
     // editing what the lock was meant to protect. That covered `selected` but
@@ -1124,6 +1148,7 @@ class Editor extends ChangeNotifier {
   void setLayerHidden(int id, bool v) {
     final l = layerOf(id);
     if (l == null) return;
+    mark(); // see renameLayer
     l.hidden = v;
     if (v) {
       if (current != null && current!.layer == id) selected = -1;

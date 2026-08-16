@@ -73,8 +73,12 @@ type Geometry struct {
 
 // F2B converts a 0..1 channel value to a clamped 0..255 byte.
 func F2B(v float32) int {
-	if v < 0 {
-		v = 0
+	// !(v > 0) rather than v < 0: NaN fails EVERY comparison, so both clamps used to pass it
+	// through and int(math.Round(NaN)) is -9223372036854775808. That went into Shape.Color, into
+	// the .forza.json, and on to the injector — a silent wrong value where the preview path only
+	// panicked. A NaN channel is already lost; encode it as 0.
+	if !(v > 0) {
+		return 0
 	}
 	if v > 1 {
 		v = 1

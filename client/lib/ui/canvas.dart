@@ -344,12 +344,13 @@ class _Seam extends StatelessWidget {
         ),
       ),
       // Only the label moves with the drag; the gesture layer above is fixed.
-      // Positioned.fill, not a bare child: _label returns a Stack whose only
-      // child is Positioned, and a Stack with no non-positioned child takes the
-      // SMALLEST size its constraints allow — as a loose child of this Stack
-      // that is zero, and the label would be laid out against nothing. The fill
-      // gives it the tight box the Positioned inside is measured against.
-      // IgnorePointer so the drag layer beneath still gets every pointer.
+      // Positioned.fill so the label's box is pinned to this Stack rather than
+      // resolved from loose constraints. (An earlier comment here claimed a
+      // Stack with no non-positioned child collapses to zero — it does not,
+      // RenderStack gives it constraints.biggest. The fill is still the right
+      // shape: it says what the box IS instead of leaving it to whatever the
+      // parent happens to pass.) IgnorePointer keeps every pointer going to the
+      // drag layer beneath, which is where the gesture has always lived.
       Positioned.fill(
         child: IgnorePointer(
           child: ValueListenableBuilder<double>(

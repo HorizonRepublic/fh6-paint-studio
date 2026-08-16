@@ -409,9 +409,15 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	// this one did not, so on the two shipped organic presets — which both set AllowAlpha — every
 	// polish was followed by a mis-tinting recolor. Worse, the two are gated as ONE unit below, so
 	// a polish that improved the image was thrown away whenever the recolor after it lost.
-	// FH6_PRECOLOR=0 pins the old behaviour (its own pin, not the rankfix family: the two land on
-	// the same runs and had to be measurable apart).
-	if !polishRecolorGate || !(opt.AllowAlpha && !opt.TransparentBG) {
+	// The condition is the polish's OWN alpha floor, not the generator's allowAlpha. Those two
+	// disagree on the client's default path: keep-inside pads, so TransparentBG is set and the
+	// generator (run.go) treats the run as a cutout, while line 332 above deliberately excepts
+	// PaddedOpaque and hands the polish a 0.30 floor. So the descent CAN make those shapes
+	// translucent on a run whose generation was opaque — which is exactly when recolorVisible is
+	// wrong, and a gate keyed on allowAlpha would have missed every one of them.
+	// Reading what line 332 set means the two cannot drift apart again.
+	pa := opt.PolishOpts.AlphaMin
+	if !polishRecolorGate || !(pa > 0 && pa < 1) {
 		recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
 	}
 	_ = be.Reset(initCanvas)
