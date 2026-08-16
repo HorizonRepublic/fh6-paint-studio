@@ -202,7 +202,7 @@ func (r *Run) finish(e runner.Done, onEvent func(runner.Event)) runner.Done {
 	if canvas != nil && canvas.Bounds().Dx() == r.Prep.W && canvas.Bounds().Dy() == r.Prep.H {
 		src := imageio.EncodeForDisplay(r.Prep.Pixels)
 		got := nrgbaToFloat(canvas)
-		de, _ := metric.DeltaE76(src, got, r.Prep.W, r.Prep.H)
+		de := metric.DeltaE76Mean(src, got, r.Prep.W, r.Prep.H) // bit-identical mean, minus the discarded-p95 sort
 		q = &runner.Quality{DeltaE: de, SSIM: metric.SSIM(src, got, r.Prep.W, r.Prep.H)}
 		onEvent(runner.Log{Line: fmt.Sprintf("quality: ΔE76 %.2f · SSIM %.3f", q.DeltaE, q.SSIM)})
 	}

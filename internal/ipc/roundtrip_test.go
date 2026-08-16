@@ -250,6 +250,48 @@ func TestConnectionLossFailsPendingRuns(t *testing.T) {
 	<-listenDone
 }
 
+// TestKnobDefaultsOverTheWire checks the expert panel's contract: without an image the values are
+// the mode's generic concrete defaults, and with one the image-dependent branches (flat's palette
+// split) are taken from the actual file. Pure CPU — no device needed.
+func TestKnobDefaultsOverTheWire(t *testing.T) {
+	cli, srv := net.Pipe()
+	server := NewServer(srv, srv)
+	go func() { _ = server.Serve() }()
+	c := NewClient(cli, cli)
+	go func() { _ = c.Listen() }()
+	defer cli.Close()
+
+	anime, err := c.KnobDefaults("anime", "")
+	if err != nil {
+		t.Fatalf("knobDefaults(anime): %v", err)
+	}
+	// AlphaMin crosses a float32 on its way here, so compare with slack.
+	if anime.PolishIters != 200 || anime.AlphaMin < 0.29 || anime.AlphaMin > 0.31 || anime.Random <= 0 {
+		t.Fatalf("anime defaults look wrong: iters=%d alphaMin=%v random=%d",
+			anime.PolishIters, anime.AlphaMin, anime.Random)
+	}
+	if anime.Alpha == nil || !*anime.Alpha {
+		t.Fatal("anime without a cutout should allow alpha")
+	}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.png")
+	writeTestImage(t, src, 64, 48) // three flat colours: the vector-flat palette branch
+	flat, err := c.KnobDefaults("flat", src)
+	if err != nil {
+		t.Fatalf("knobDefaults(flat): %v", err)
+	}
+	if flat.PolishIters != 600 {
+		t.Fatalf("flat on a 3-colour image should take the vector branch (600 iters), got %d", flat.PolishIters)
+	}
+
+	// A missing file must degrade to the generic answer, not an error: the panel may hold a path
+	// the user has since deleted.
+	if _, err := c.KnobDefaults("photo", filepath.Join(dir, "gone.png")); err != nil {
+		t.Fatalf("knobDefaults with a dead path: %v", err)
+	}
+}
+
 func writeTestImage(t *testing.T, path string, w, h int) {
 	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))

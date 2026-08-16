@@ -225,6 +225,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		Kinds:         ParseKinds(sp.kindsCSV),
 		KindWeights:   sp.kindWeights,
 		TransparentBG: prep.HasTransparency,
+		PaddedOpaque:  prep.PaddedOpaque,
 		Overdraw:      float32(overdraw),
 		AllowAlpha:    sp.allowAlpha,
 		AlphaMin:      sp.alphaMin,

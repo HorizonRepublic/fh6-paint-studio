@@ -110,7 +110,7 @@ func LoadAutoCropped(path string, maxRes int) (*Prepared, image.Rectangle, error
 		return nil, image.Rectangle{}, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := decodeOriented(f) // EXIF-aware: phone JPEGs land upright, matching every viewer
 	if err != nil {
 		return nil, image.Rectangle{}, err
 	}
@@ -121,7 +121,7 @@ func LoadAutoCropped(path string, maxRes int) (*Prepared, image.Rectangle, error
 	if rect.Eq(img.Bounds()) {
 		return PrepareFromImage(img, maxRes), rect, nil // nothing to trim
 	}
-	crop := image.NewRGBA(image.Rect(0, 0, rect.Dx(), rect.Dy()))
+	crop := image.NewNRGBA(image.Rect(0, 0, rect.Dx(), rect.Dy())) // NRGBA: see LoadRegion — a straight-alpha crop must stay straight
 	draw.Draw(crop, crop.Bounds(), img, rect.Min, draw.Src)
 	return PrepareFromImage(crop, maxRes), rect, nil
 }
@@ -137,7 +137,7 @@ func LoadAbsRegion(path string, maxRes int, abs image.Rectangle) (*Prepared, err
 		return nil, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := decodeOriented(f) // EXIF-aware: phone JPEGs land upright, matching every viewer
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func LoadAbsRegion(path string, maxRes int, abs image.Rectangle) (*Prepared, err
 	if abs.Dx() < 1 || abs.Dy() < 1 {
 		abs = img.Bounds()
 	}
-	crop := image.NewRGBA(image.Rect(0, 0, abs.Dx(), abs.Dy()))
+	crop := image.NewNRGBA(image.Rect(0, 0, abs.Dx(), abs.Dy())) // NRGBA: see LoadRegion — a straight-alpha crop must stay straight
 	draw.Draw(crop, crop.Bounds(), img, abs.Min, draw.Src)
 	return PrepareFromImage(crop, maxRes), nil
 }

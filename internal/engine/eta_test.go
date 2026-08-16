@@ -70,6 +70,34 @@ func TestETAReachesTheEnd(t *testing.T) {
 	}
 }
 
+// TestETACountsDownWhileStalled pins the deadline behaviour the countdown was rebuilt for: when a
+// phase stops reporting progress, the displayed remaining time must keep FALLING between readings
+// (the old duration-EMA froze — raw = elapsed·(1−done)/done grows exactly as fast as the clock at
+// constant done, so the number never moved).
+func TestETACountsDownWhileStalled(t *testing.T) {
+	opt := Options{StopAt: 100, Polish: true, PolishOpts: PolishOptions{Iters: 250}}
+	var last PhaseProgress
+	tr := newETA(opt, time.Now().Add(-20*time.Second), func(p PhaseProgress) { last = p })
+	defer tr.stop()
+	tr.enter("Placing shapes…")
+	tr.frac = 0.9
+	tr.publish(true)
+	first := last.ETA
+	if first <= 0 {
+		t.Fatalf("no estimate after 20s elapsed at 90%% of the greedy")
+	}
+	// The phase stalls: no frac movement, only the clock. Each reading must come back lower.
+	prev := first
+	for i := 0; i < 3; i++ {
+		time.Sleep(300 * time.Millisecond)
+		tr.publish(true)
+		if last.ETA >= prev {
+			t.Fatalf("reading %d: ETA froze or rose while stalled: %v -> %v", i, prev, last.ETA)
+		}
+		prev = last.ETA
+	}
+}
+
 // TestETAWithoutCallbackIsInert guards the default path: no callback means no tracker, no heartbeat
 // goroutine, and every method still safe to call on the nil it returns.
 func TestETAWithoutCallbackIsInert(t *testing.T) {

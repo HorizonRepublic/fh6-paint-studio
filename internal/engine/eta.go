@@ -41,11 +41,13 @@ const etaEmitEvery = 250 * time.Millisecond
 const etaPhaseTimeCap = 0.95
 
 // Smoothing is ASYMMETRIC, because the two directions mean different things. A rising raw estimate
-// usually means progress has stalled inside a phase while the clock keeps running, and following it
-// makes the countdown climb — so it is resisted. A falling one means work genuinely finished, and a
-// countdown that lingers above the truth is the more annoying error — so it is followed quickly.
+// usually means progress has stalled inside a phase while the clock keeps running — the deadline is
+// allowed to slip, but never as fast as the clock runs, so the countdown keeps visibly ticking (at
+// worst at half speed) instead of freezing on one number. A falling one means work genuinely
+// finished, and a countdown that lingers above the truth is the more annoying error — so it is
+// followed quickly.
 const (
-	etaSmoothUp   = 0.12
+	etaSlipFrac   = 0.5 // max deadline slip per publish, as a fraction of wall time since the last
 	etaSmoothDown = 0.50
 )
 
@@ -76,7 +78,11 @@ type etaTracker struct {
 	phaseStart  time.Time
 	phaseExpect time.Duration
 
-	etaEMA float64 // smoothed estimate; the raw one steps whenever a phase boundary lands
+	// The countdown is a DEADLINE, not a smoothed duration. Re-deriving a duration every tick
+	// froze the number whenever a phase stalled: raw = elapsed·(1−done)/done grows exactly as fast
+	// as the clock at constant done, so the display neither fell nor rose — "the timer does not
+	// tick". A deadline ticks down by itself between updates; new readings only MOVE it.
+	etaDeadline time.Time
 
 	// emitMu serialises delivery. The snapshot is taken under mu and handed off OUTSIDE it, so the
 	// callback (a UI pump, an IPC write) can never stall the engine's hot loop behind the heartbeat.
@@ -92,8 +98,13 @@ const greedyWeight = 60
 // passWeight is the prior cost of one post-greedy pass RELATIVE to the greedy loop, as a wall-clock
 // segment — a pass that re-polishes internally is credited with that re-polish here, because the
 // progress bar cares about elapsed time, not about which bucket the time is billed to.
+// The constants below were re-measured 2026-08-16 AFTER the perf campaign, which sped the phases
+// up UNEVENLY (evaluate −80%, polish −55%, skewrefine −45%…) and left the old prior parking the
+// bar in the low eighties and then jumping to 100. Bench: img_10 anime @2000/1000 — greedy 3.9s,
+// main polish 1.4s, LOO refit incl. its warm re-polishes 6.5s (a re-polish now costs ≈ the main
+// polish, ~2 re-polishes per configured round), globalcolor 1.9s, skewrefine 1.8s, smoothbase 1.0s.
 func passWeight(p pass, opt Options) float64 {
-	polish := 18.0
+	polish := 27.0
 	if opt.PolishOpts.Iters > 0 {
 		polish *= float64(opt.PolishOpts.Iters) / 250
 	}
@@ -107,20 +118,18 @@ func passWeight(p pass, opt Options) float64 {
 	case polishPass:
 		return polish
 	case looRefitPass:
-		// Each round prunes, regrows and re-polishes. The re-polish is a warm one, measured at
-		// 0.35-0.4 of the main polish per round (img_26 @3000: 8.8-11.1s vs a 28s main polish), and
-		// the regrow adds a couple of seconds; the old polish/4+1 understated the pass ~2×, which
-		// parked the bar in the low eighties for the back half of the pass.
-		return float64(opt.LooRefit) * (0.4*polish + 1)
+		// Each configured round prunes, regrows and re-polishes ~twice; a warm re-polish costs
+		// about one main polish since the backward slicing (it used to be 0.4×). This pass is the
+		// single largest post-greedy segment now — underweighting it stalls the bar mid-run.
+		return float64(opt.LooRefit) * (2.3*polish + 1)
 	case globalColorPass:
-		return 22 * float64(opt.GlobalColorIters) / 100
+		return 30 * float64(opt.GlobalColorIters) / 100
 	case annealPass:
 		return float64(opt.AnnealIters) * polish / 10
 	case skewRefinePass:
-		// A pattern search over every geometry parameter of every shape, repeated in rounds until the
-		// returns dry up. Measured at 8-10% of a run once the rounds became adaptive; the old weight of
-		// 4 left the bar parked in the eighties while the pass was still going.
-		return 8
+		// A pattern search over every geometry parameter of every shape, repeated in rounds until
+		// the returns dry up. Re-measured 2026-08-16: ~11% of the smoke run ≈ half the greedy.
+		return 28
 	case artifactFixPass, zswapPass, softSwapPass, standoutPass:
 		return 2
 	}
@@ -135,10 +144,10 @@ func newETA(opt Options, start time.Time, emit func(PhaseProgress)) *etaTracker 
 	}
 	t := &etaTracker{start: start, emit: emit}
 	if opt.SmoothBase {
-		t.phases = append(t.phases, etaPhase{"Claiming smooth regions…", 3})
+		t.phases = append(t.phases, etaPhase{"Claiming smooth regions…", 15})
 	}
 	if opt.ShadePrepass {
-		t.phases = append(t.phases, etaPhase{"Claiming shading…", 1})
+		t.phases = append(t.phases, etaPhase{"Claiming shading…", 4})
 	}
 	if opt.GlyphPrepass {
 		t.phases = append(t.phases, etaPhase{"Claiming words…", 1})
@@ -257,6 +266,10 @@ func (t *etaTracker) publish(force bool) {
 		t.mu.Unlock()
 		return
 	}
+	dt := now.Sub(t.last) // wall time since the previous reading, for the slip limit below
+	if dt < 0 || dt > time.Second {
+		dt = time.Second
+	}
 	t.last = now
 	w := t.doneW
 	name := ""
@@ -281,22 +294,39 @@ func (t *etaTracker) publish(force bool) {
 	elapsed := now.Sub(t.start)
 	var eta time.Duration
 	if done > 0.01 && elapsed >= etaMinElapsed {
-		raw := float64(elapsed) * (1 - done) / done
-		// Smoothed: a phase boundary steps the estimate, and the run's own pace varies. Following the
-		// raw value makes the number jitter; an average that still converges within a few updates
-		// reads as a countdown rather than a guess being retaken.
+		raw := time.Duration(float64(elapsed) * (1 - done) / done)
+		rawEnd := now.Add(raw)
+		remaining := t.etaDeadline.Sub(now)
 		switch {
-		case t.etaEMA <= 0, raw < t.etaEMA*0.5:
-			// Either the first reading, or the smoothed one is stale by more than half — which is what
-			// the end of a phase looks like. Smoothing a number that is now plainly wrong just keeps
-			// showing the wrong number.
-			t.etaEMA = raw
-		case raw < t.etaEMA:
-			t.etaEMA += etaSmoothDown * (raw - t.etaEMA)
+		case remaining <= 0 && raw > 2*time.Second:
+			// Escape hatch: a deadline that fell into the past can never recover through the
+			// branches below (the snap compares against a negative half, and the slip cap moves
+			// slower than the clock) — the countdown would show 0:00 for the rest of the run.
+			// A substantially non-zero raw estimate means the run is clearly not about to end,
+			// so re-anchor on it.
+			t.etaDeadline = rawEnd
+		case t.etaDeadline.IsZero(), raw < remaining/2:
+			// Either the first reading, or the held deadline is stale by more than half — which is
+			// what the end of a phase looks like. Smoothing a number that is now plainly wrong just
+			// keeps showing the wrong number.
+			t.etaDeadline = rawEnd
+		case rawEnd.Before(t.etaDeadline):
+			// Work finished faster than expected: follow quickly. A countdown that lingers above
+			// the truth is the more annoying error.
+			t.etaDeadline = t.etaDeadline.Add(time.Duration(etaSmoothDown * float64(rawEnd.Sub(t.etaDeadline))))
 		default:
-			t.etaEMA += etaSmoothUp * (raw - t.etaEMA)
+			// The estimate is slipping later — progress stalled while the clock runs. Let the
+			// deadline slip by at most a fraction of the wall time since the last reading, so the
+			// countdown keeps ticking down (at worst at 1−etaSlipFrac speed) instead of freezing.
+			slip := rawEnd.Sub(t.etaDeadline)
+			if lim := time.Duration(etaSlipFrac * float64(dt)); slip > lim {
+				slip = lim
+			}
+			t.etaDeadline = t.etaDeadline.Add(slip)
 		}
-		eta = time.Duration(t.etaEMA)
+		if eta = t.etaDeadline.Sub(now); eta < 0 {
+			eta = 0
+		}
 	}
 	t.seq++
 	seq := t.seq

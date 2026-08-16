@@ -20,6 +20,14 @@ import (
 // ignore it. Set by the studio's engine picker.
 var BackendPreference string
 
+// gpuMu serialises backend lifetimes. The Vulkan shim is ONE global device context with no
+// internal locking: fp_init begins with teardown(), so a second run starting while the first is
+// mid-submit destroys the live device under it (and the first run's Close then destroys the
+// second's). Cancel+Generate lands exactly there — the UI re-arms the moment cancel returns,
+// while the engine may still be inside an uninterruptible pass. Serialising here makes the second
+// run WAIT for the first to release the device instead of corrupting it.
+var gpuMu sync.Mutex
+
 // RunAsync builds the backend from the resolved run config and runs engine.Run in a worker
 // goroutine. onEvent is called FROM THAT GOROUTINE for every event (Log/Progress/Frame and a
 // terminal Done/Failed) — the UI is responsible for marshalling these onto its own loop
@@ -63,6 +71,10 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			return
 		}
 
+		// One backend at a time, from init to Close (see gpuMu). A run queued behind a finishing
+		// one waits here briefly instead of tearing the shared device out from under it.
+		gpuMu.Lock()
+		defer gpuMu.Unlock()
 		be, name, err := newBackend(target, r.Weight, w, h, r.Grid)
 		if err != nil {
 			onEvent(Failed{Err: err})
@@ -77,6 +89,19 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		release := func() { closeOnce.Do(func() { _ = be.Close() }) }
 		defer release()
 		onEvent(Log{Line: "backend: " + name})
+		// Live VRAM numbers up front: complaints like "the run just dies" are usually the card
+		// running out of memory mid-run, and this line is the evidence users can actually paste.
+		if mi, ok := be.(interface {
+			MemInfo() (budget, usage, heap int64, ok bool)
+		}); ok {
+			if budget, usage, heap, ok2 := mi.MemInfo(); ok2 && heap > 0 {
+				if budget > 0 {
+					onEvent(Log{Line: fmt.Sprintf("GPU memory: %d MB free of %d MB", (budget-usage)>>20, heap>>20)})
+				} else {
+					onEvent(Log{Line: fmt.Sprintf("GPU memory: %d MB total (driver reports no live budget)", heap>>20)})
+				}
+			}
+		}
 		for _, s := range r.Summary {
 			onEvent(Log{Line: s})
 		}
@@ -108,6 +133,10 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		start := time.Now()
 		var lastFrame time.Time
 		var frameCost time.Duration
+		// Preview scratch, reused across frames: the emit path writes the frame to the wire before
+		// returning, so a fresh 67MB float buffer + 16MB image per frame was pure GC churn.
+		var previewF32 []float32
+		var previewImg *image.NRGBA
 		refineHinted := false
 		postBuild := opt.Polish || opt.BackFit // phases that run after the greedy build with no live frames
 		opt.Progress = func(n int, e float64) {
@@ -125,7 +154,7 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 			}
 			if time.Since(lastFrame) >= interval {
 				t := time.Now()
-				img := readCanvas(be, w, h)
+				img := readCanvasInto(be, w, h, &previewF32, &previewImg)
 				frameCost = time.Since(t)
 				if img != nil {
 					onEvent(Frame{Img: img})
@@ -161,6 +190,12 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 				progStep = 1
 			}
 			opt.Progress = func(iter int, e float64) {
+				// The polish's fine-exploit phase counts past its base budget (and its completion
+				// signal reports the extended denominator), so clamp: the bar must neither exceed
+				// 100% nor drop the final tick because the raw counter overshot gTotal.
+				if iter > gTotal {
+					iter = gTotal
+				}
 				if iter != gTotal && iter%progStep != 0 {
 					return
 				}
@@ -178,6 +213,14 @@ func RunAsync(prep imageio.Prepared, r preset.Resolved, onEvent func(Event)) (ca
 		// canvas composites in the working space (sRGB-byte when not linear) at float precision, so it
 		// does NOT match the injected 8-bit shapes composited in LINEAR by the game. That mismatch was
 		// the "preview perfect, injected result mushy" gap. RenderFH6 closes it: preview == inject == game.
+		if res.DevErr != nil {
+			// The GPU context died mid-run (TDR/driver reset/VRAM). The shapes placed before the
+			// fault are real, but every score after it is garbage — surface the failure instead of
+			// presenting a half-dead run as done.
+			release()
+			onEvent(Failed{Err: res.DevErr})
+			return
+		}
 		canvas := renderInGame(res.Shapes, opt.TransparentBG, w, h)
 		release()
 		onEvent(Done{Result: res, Canvas: canvas, Backend: name})
@@ -203,6 +246,24 @@ func readCanvas(be backend.Backend, w, h int) *image.NRGBA {
 		return nil
 	}
 	return floatToNRGBA(buf, w, h)
+}
+
+// readCanvasInto is readCanvas with caller-owned scratch: the live-preview loop calls this every
+// frame, and the frame is fully written to the wire inside the event callback before the next
+// call, so both buffers are safe to reuse. nil on a failed read.
+func readCanvasInto(be backend.Backend, w, h int, f32 *[]float32, img **image.NRGBA) *image.NRGBA {
+	if cap(*f32) < w*h*4 {
+		*f32 = make([]float32, w*h*4)
+	}
+	buf := (*f32)[:w*h*4]
+	if err := be.ReadCanvas(buf); err != nil {
+		return nil
+	}
+	if *img == nil || (*img).Bounds().Dx() != w || (*img).Bounds().Dy() != h {
+		*img = image.NewNRGBA(image.Rect(0, 0, w, h))
+	}
+	imageio.EncodeDisplayBytes(buf, (*img).Pix)
+	return *img
 }
 
 // floatToNRGBA converts a straight-alpha RGBA float buffer (len w*h*4) to an NRGBA image.

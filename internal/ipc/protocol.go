@@ -222,6 +222,11 @@ func writeFrame(w io.Writer, kind byte, payload []byte) error {
 	return err
 }
 
+// ProtocolVersion is the wire-contract revision, answered by the `hello` method. Bump it when a
+// message's meaning changes (new REQUIRED fields, changed semantics) — additive optional fields
+// don't need a bump. The client warns on mismatch instead of guessing.
+const ProtocolVersion = 1
+
 // ErrTooLarge is returned when a declared length exceeds MaxMessage. It is separated out because a
 // client should close the connection on it rather than try to resynchronise: a length that large
 // means the stream is no longer framed correctly.
@@ -235,6 +240,12 @@ func Read(r io.Reader) (kind byte, payload []byte, err error) {
 	}
 	n := int(binary.BigEndian.Uint32(head[0:]))
 	if n < 1 || n > MaxMessage {
+		return 0, nil, ErrTooLarge
+	}
+	// Only frames legitimately reach MaxMessage; a JSON message that big is a desynced stream
+	// reading pixel bytes as a length. Bounding it per kind turns a 96MB allocate-and-hang into
+	// an immediate, closable error.
+	if head[4] == KindJSON && n > 16<<20 {
 		return 0, nil, ErrTooLarge
 	}
 	payload = make([]byte, n-1)

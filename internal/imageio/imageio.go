@@ -36,7 +36,7 @@ func Load(path string, maxRes int) (*Prepared, error) {
 		return nil, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := decodeOriented(f) // EXIF-aware: phone JPEGs land upright, matching every viewer
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func LoadRegion(path string, maxRes int, fx, fy, fw, fh float64) (*Prepared, ima
 		return nil, image.Rectangle{}, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := decodeOriented(f) // EXIF-aware: phone JPEGs land upright, matching every viewer
 	if err != nil {
 		return nil, image.Rectangle{}, err
 	}
@@ -90,7 +90,7 @@ func LoadRegion(path string, maxRes int, fx, fy, fw, fh float64) (*Prepared, ima
 	if ch < 1 {
 		ch = 1
 	}
-	crop := image.NewRGBA(image.Rect(0, 0, cw, ch))
+	crop := image.NewNRGBA(image.Rect(0, 0, cw, ch)) // NRGBA: an RGBA crop premultiplies, quantising AA alpha edges and zeroing RGB under a=0
 	draw.Draw(crop, crop.Bounds(), img, image.Pt(cx, cy), draw.Src)
 	return PrepareFromImage(crop, maxRes), image.Rect(cx, cy, cx+cw, cy+ch), nil
 }
@@ -144,7 +144,7 @@ func TranslateShapes(shapes []model.Shape, dx, dy float64) []model.Shape {
 				d[2] += dx
 				d[3] += dy
 			}
-		default: // ellipse/rect/background: [cx,cy,...]
+		default: // background rect [x,y,w,h] and centre-based kinds [cx,cy,...]: shift the origin only
 			if len(d) >= 2 {
 				d[0] += dx
 				d[1] += dy
@@ -194,8 +194,11 @@ func PrepareFromImage(img image.Image, maxRes int) *Prepared {
 		a := float32(nrgba.Pix[i*4+3]) / 255
 		// Linear-light mode: the engine composites in the space FH6 renders in, so decode the
 		// sRGB target to linear here (alpha stays straight). All downstream maths is unchanged.
+		// Byte-table decode: same values, ~200x cheaper than the per-pixel pow at native res.
 		if model.LinearLight {
-			r, g, blu = model.SRGBToLinear(r), model.SRGBToLinear(g), model.SRGBToLinear(blu)
+			r = model.SRGBToLinearByte(nrgba.Pix[i*4+0])
+			g = model.SRGBToLinearByte(nrgba.Pix[i*4+1])
+			blu = model.SRGBToLinearByte(nrgba.Pix[i*4+2])
 		}
 		px[i*4+0], px[i*4+1], px[i*4+2], px[i*4+3] = r, g, blu, a
 		if a < 0.5 {

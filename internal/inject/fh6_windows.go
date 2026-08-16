@@ -83,15 +83,22 @@ func (f *FH6) run(shapes []model.Shape, cm CanvasMap) error {
 		cleared := 0
 		for idx := written; idx < f.Layers; idx++ {
 			ptr, ok := p.readU64(table + uintptr(idx)*8)
-			if !ok || !isUserPointer(ptr) {
+			// isPrivateWritable, not the weaker range-only isUserPointer: the write loop above
+			// re-asserts it per slot for exactly this reason — a slot the editor freed since
+			// locate could be a recycled writable heap block we must not scribble on.
+			if !ok || !p.isPrivateWritable(ptr) {
 				continue
 			}
+			slotOK := true
 			for _, fw := range ClearWrites(f.Profile) {
 				if err := p.write(ptr+uintptr(fw.Offset), fw.Data); err != nil {
+					slotOK = false
 					break // leave partially-cleared leftover; not fatal
 				}
 			}
-			cleared++
+			if slotOK {
+				cleared++ // only count slots fully cleared, so the log doesn't over-report
+			}
 		}
 		f.logf("cleared %d unused template layers", cleared)
 	}

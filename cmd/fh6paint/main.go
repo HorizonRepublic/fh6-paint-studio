@@ -6,7 +6,9 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
+	"runtime/trace"
 	"strings"
 	"time"
 
@@ -101,10 +103,10 @@ func main() {
 	// experiments / new-preset tuning even though the studio no longer exposes it standalone: the studio's
 	// "Fast generation" toggle now maps to the HYBRID (moment base + random detail, -moment-detail-start
 	// 0.55), which superseded pure-fast for everyday use. Pure fast stays reachable here for A/B.
-	momentSeed := flag.Bool("moment-seed", false, "moment-seeding (PURE fast, no hybrid): replace the blind random candidate batch with a closed-form covariance-ellipse seed fitted from the residual grid + a small localised refine pool (-moment-refine). Far fewer candidates per shape -> large eval speedup. Add -moment-detail-start 0.55 for the HYBRID (the studio's Fast generation). Kept for experiments/preset tuning.")
+	momentSeed := flag.Bool("moment-seed", true, "moment-seeding hybrid — the PRODUCT default (preset.Resolve bakes MomentSeed+MomentDetailStart 0.55). The CLI used to default this OFF, so bare runs (and the vkregress baseline) measured a blind-random generator the product never ships. -moment-seed=false restores pure random for A/B; -moment-detail-start 0 for pure moment.")
 	momentRefine := flag.Int("moment-refine", 2048, "with -moment-seed: candidate-pool size per shape (the seeds + localised kind-weighted refinements, scored via the normal eval path + hill-climb mutate). 2048 is the quality-neutral knee (~-33% eval vs the 50k search); ~512 is faster (~-40%) for a small quality cost.")
 	momentCenters := flag.Int("moment-centers", 16, "with -moment-seed: number of error-sampled SEED CENTRES per shape (the -moment-refine budget is split across them). 1 = single fit (anchors to one centre, loses to random); ~16 spreads the budget to restore multi-location exploration at the same candidate cost.")
-	momentDetailStart := flag.Float64("moment-detail-start", 0, "with -moment-seed: HYBRID schedule — past this progress (0..1) hand the per-shape search off from the moment pool to the blind random brute force, which finds the sharp SMALL detail shapes the 2nd-moment blob fit never proposes (the late shapes are cheap, so it buys crispness for little time). 0 = off (moment all the way). ~0.6-0.7 = fast smooth base + sharp random detail.")
+	momentDetailStart := flag.Float64("moment-detail-start", 0.55, "with -moment-seed: HYBRID schedule — past this progress (0..1) hand the per-shape search off from the moment pool to the blind random brute force, which finds the sharp SMALL detail shapes the 2nd-moment blob fit never proposes (the late shapes are cheap, so it buys crispness for little time). 0 = off (moment all the way). ~0.6-0.7 = fast smooth base + sharp random detail.")
 	coarseSearch := flag.Bool("coarse-search", true, "CUDA build only: coarse-to-fine search — score the candidate batch at a CHEAP pixel cap (-coarse-budget) to filter, then re-score only the -coarse-k survivors at the full -sample-budget and pick from those. The winner is full-budget scored (quality-neutral — unlike a uniform -sample-budget cut, which mis-picks on low-res noise), while the bulk pays only the coarse cost. The dominant eval-speed lever at the quality preset (roughly halves eval wall-time). Auto-disabled below ~33k candidates (n>4*-coarse-k). -coarse-search=false for the exhaustive single-pass.")
 	coarseBudget := flag.Int("coarse-budget", 3000, "with -coarse-search: pixel cap for the cheap coarse filter pass (lower = faster bulk; must stay high enough that the true winner is its partition's coarse-min). 3000 is the floor: it selects the same survivors as a larger filter, while going below it starts missing winners.")
 	coarseK := flag.Int("coarse-k", 2048, "with -coarse-search: number of coarse survivors re-scored at the FULL budget (higher = the true winner is more reliably included -> closer to baseline quality, at a small extra re-eval cost; the bulk stays cheap). Measured at 2048: the output is byte-identical to 8192 on flat, anime and photo, so the larger pool was re-scoring candidates that never won.")
@@ -164,6 +166,24 @@ func main() {
 			pprof.StartCPUProfile(f)
 			defer pprof.StopCPUProfile()
 		}
+	}
+	// FH6_TRACE: a runtime/trace of the whole run — the goroutine/GC/syscall timeline that shows
+	// host serialism and GPU-wait gaps that a CPU profile aggregates away (`go tool trace <file>`).
+	if p := os.Getenv("FH6_TRACE"); p != "" {
+		if f, err := os.Create(p); err == nil {
+			_ = trace.Start(f)
+			defer trace.Stop()
+		}
+	}
+	// FH6_MEMPROFILE: heap profile written at exit (`go tool pprof -top <exe> <file>`).
+	if p := os.Getenv("FH6_MEMPROFILE"); p != "" {
+		defer func() {
+			if f, err := os.Create(p); err == nil {
+				runtime.GC()
+				_ = pprof.WriteHeapProfile(f)
+				f.Close()
+			}
+		}()
 	}
 
 	model.LinearLight = *linear
@@ -626,6 +646,10 @@ func main() {
 			Gaussian:   true,
 			PolishOpts: polishOpts(gIters, *polishTau0, *polishTau1, false, *polishEarly, false, 0, 0, 0, 0),
 		})
+		if res.DevErr != nil {
+			fmt.Fprintf(os.Stderr, "run aborted: %v\n", res.DevErr)
+			os.Exit(1)
+		}
 		applog.Printf("gaussian: %d glows, error %.1f -> %.1f in %.1fs",
 			len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
 		gOutW, gOutH := prep.W, prep.H
@@ -745,6 +769,11 @@ func main() {
 		},
 	}
 	res := engine.RunBest(be, o, *bestOf)
+	if res.DevErr != nil {
+		fmt.Println()
+		fmt.Fprintf(os.Stderr, "run aborted: %v\n", res.DevErr)
+		os.Exit(1)
+	}
 	applog.Printf("done: %d shapes, error %.1f -> %.1f in %.1fs",
 		len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
 	logTimings(res.Timings)

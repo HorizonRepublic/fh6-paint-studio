@@ -261,10 +261,20 @@ func RenderFH6(shapes []model.Shape, transparentBG bool, w, h, ss int) []float32
 	out := make([]float32, w*h*4)
 	parallelRows(h, func(y0, y1 int) {
 		for i := y0 * w; i < y1*w; i++ {
-			out[i*4+0] = model.LinearToSRGB(lin[i*4+0])
-			out[i*4+1] = model.LinearToSRGB(lin[i*4+1])
-			out[i*4+2] = model.LinearToSRGB(lin[i*4+2])
-			out[i*4+3] = lin[i*4+3] // alpha straight
+			r, g, b, a := lin[i*4+0], lin[i*4+1], lin[i*4+2], lin[i*4+3]
+			// The composite buffer is PREMULTIPLIED over a transparent background; the ss>1
+			// branch un-premultiplied during the downsample, but the ss==1 path used to hand the
+			// premultiplied values straight to the encoder — every cutout / keep-inside preview
+			// (and the ΔE/SSIM scored on it) came out darkened wherever alpha < 1. NRGBA is a
+			// straight-alpha format; divide out the coverage. Opaque runs have a==1 everywhere,
+			// so their output is untouched.
+			if ss == 1 && a > 0 && a < 1 {
+				r, g, b = r/a, g/a, b/a
+			}
+			out[i*4+0] = model.LinearToSRGB(r)
+			out[i*4+1] = model.LinearToSRGB(g)
+			out[i*4+2] = model.LinearToSRGB(b)
+			out[i*4+3] = a // alpha straight
 		}
 	})
 	return out
@@ -332,9 +342,9 @@ func CompositeShapeOnto(img *image.NRGBA, s model.Shape, w, h int) {
 				continue
 			}
 			q := img.PixOffset(x, y)
-			br := model.SRGBToLinear(float32(img.Pix[q+0]) / 255)
-			bg := model.SRGBToLinear(float32(img.Pix[q+1]) / 255)
-			bb := model.SRGBToLinear(float32(img.Pix[q+2]) / 255)
+			br := model.SRGBToLinearByte(img.Pix[q+0])
+			bg := model.SRGBToLinearByte(img.Pix[q+1])
+			bb := model.SRGBToLinearByte(img.Pix[q+2])
 			ba := float32(img.Pix[q+3]) / 255
 			ia := 1 - aEff
 			img.Pix[q+0] = u8(model.LinearToSRGB(br*ia + cr*aEff))
