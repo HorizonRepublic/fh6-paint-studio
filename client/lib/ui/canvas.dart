@@ -344,9 +344,19 @@ class _Seam extends StatelessWidget {
         ),
       ),
       // Only the label moves with the drag; the gesture layer above is fixed.
-      ValueListenableBuilder<double>(
-        valueListenable: studio.compareN,
-        builder: (context, cmp, _) => _label(context, cmp),
+      // Positioned.fill, not a bare child: _label returns a Stack whose only
+      // child is Positioned, and a Stack with no non-positioned child takes the
+      // SMALLEST size its constraints allow — as a loose child of this Stack
+      // that is zero, and the label would be laid out against nothing. The fill
+      // gives it the tight box the Positioned inside is measured against.
+      // IgnorePointer so the drag layer beneath still gets every pointer.
+      Positioned.fill(
+        child: IgnorePointer(
+          child: ValueListenableBuilder<double>(
+            valueListenable: studio.compareN,
+            builder: (context, cmp, _) => _label(context, cmp),
+          ),
+        ),
       ),
     ],
   );
