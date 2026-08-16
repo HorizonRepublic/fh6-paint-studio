@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"time"
@@ -852,18 +853,44 @@ func adamStep(ps []pshape, opt PolishOptions, step int, w, h int, lrScale float6
 				}
 			}
 		}
+		// Reparameterisation (FH6_REPARAM=1). The descent is badly conditioned in the raw
+		// parameters: LRRad is a fixed 0.5 PIXELS per step, which is 12% of a 4px shape and
+		// 0.1% of a 400px one, so one budget cannot suit both — and alpha walks at a constant
+		// rate straight into its clamps. Optimising ln(r) makes the size step MULTIPLICATIVE and
+		// logit(alpha) makes it slow as it nears either end. The device gradient is untouched;
+		// the chain rule is applied here, so nothing about the backward pass changes.
+		radLog := reparamOn && s.optGeo && s.kind != model.KindTriangle
 		for k := 0; k < 10; k++ {
 			if k < 6 && !s.optGeo {
 				continue // fixed geometry for non-optimizable kinds
 			}
-			s.m[k] = b1*s.m[k] + (1-b1)*g[k]
-			s.v[k] = b2*s.v[k] + (1-b2)*g[k]*g[k]
+			gk, lrk := g[k], lr[k]
+			mode := 0 // 0 = raw, 1 = log-radius, 2 = logit-alpha
+			var logitA float64
+			if radLog && (k == 2 || k == 3) && s.P[k] > 0 {
+				gk *= s.P[k] // dL/d(ln r) = r * dL/dr
+				lrk = reparamLRRad
+				mode = 1
+			} else if reparamOn && k == 9 {
+				a := clampF64(s.col[3], 1e-4, 1-1e-4)
+				gk *= a * (1 - a) // dL/dz, with a = sigmoid(z)
+				lrk = reparamLRAlpha
+				logitA = math.Log(a / (1 - a))
+				mode = 2
+			}
+			s.m[k] = b1*s.m[k] + (1-b1)*gk
+			s.v[k] = b2*s.v[k] + (1-b2)*gk*gk
 			mh := s.m[k] / bc1
 			vh := s.v[k] / bc2
-			upd := warmup * lrScale * lr[k] * mh / (math.Sqrt(vh) + eps)
-			if k < 6 {
+			upd := warmup * lrScale * lrk * mh / (math.Sqrt(vh) + eps)
+			switch {
+			case mode == 1:
+				s.P[k] *= math.Exp(-upd)
+			case mode == 2:
+				s.col[3] = 1 / (1 + math.Exp(-(logitA - upd)))
+			case k < 6:
 				s.P[k] -= upd
-			} else {
+			default:
 				s.col[k-6] -= upd
 			}
 		}
@@ -919,6 +946,27 @@ func clampGeoParams(s *pshape, w, h int) {
 // analytic skew gradient on for A/B. Skew is redundant for the ellipse and the radial gradients (a
 // sheared ellipse is just another rotated ellipse), so ONLY the rectangle gets the new shape.
 var polishRectSkew = os.Getenv("FH6_SKEWDOF") == "1"
+
+// Polish reparameterisation, off by default (FH6_REPARAM=1). The two learning rates are in the
+// NEW units and cannot be the shipped ones: reparamLRRad is a FRACTION of the radius per step
+// (0.02 = 2%, which is what 0.5px means for the ~25px shapes a 1000-shape fit is made of), and
+// reparamLRAlpha is in logit units, where the 0.25 slope at alpha=0.5 turns 0.04 back into the
+// shipped 0.01. FH6_REPARAM_R / FH6_REPARAM_A override them for the sweep.
+var (
+	reparamOn      = os.Getenv("FH6_REPARAM") == "1"
+	reparamLRRad   = envFloat("FH6_REPARAM_R", 0.02)
+	reparamLRAlpha = envFloat("FH6_REPARAM_A", 0.04)
+)
+
+func envFloat(key string, def float64) float64 {
+	if s := os.Getenv(key); s != "" {
+		var v float64
+		if n, err := fmt.Sscanf(s, "%f", &v); n == 1 && err == nil && v > 0 {
+			return v
+		}
+	}
+	return def
+}
 
 const rectSkewMax = 2.0
 

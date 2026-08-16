@@ -129,6 +129,31 @@ type skewRefinePass struct{ early bool }
 // gets one fitted to where it now is. FH6_REFINE_LATE=1 puts it back for an A/B.
 var refineEarly = os.Getenv("FH6_REFINE_LATE") != "1"
 
+// refineFloor / refineSweepsN: the two knobs that decide how much of this pass actually runs.
+// The floor stops a round whose accepted gain falls under a fraction of the first round's, and
+// the sweep count is how many times the parameter list is walked before a shape is committed.
+// Both were fixed at values chosen to bound wall time — but this pass is the single largest CPU
+// block of a run (measured: localRefine is 50% of the CPU samples, 16% of the wall), which means
+// it is also where more spending has the most room to buy quality. FH6_REFINE_FLOOR and
+// FH6_REFINE_SWEEPS make that measurable without a rebuild.
+var refineFloor = func() float64 {
+	if v := os.Getenv("FH6_REFINE_FLOOR"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f < 1 {
+			return f
+		}
+	}
+	return refineRoundFloor
+}()
+
+var refineSweepsN = func() int {
+	if v := os.Getenv("FH6_REFINE_SWEEPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 8 {
+			return n
+		}
+	}
+	return refineSweeps
+}()
+
 // refineRoundsOverride lets an A/B move the round count without a rebuild.
 var refineRoundsOverride = func() int {
 	if v := os.Getenv("FH6_REFINE_ROUNDS"); v != "" {
@@ -542,7 +567,7 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 						continue
 					}
 					best := base
-					for sweep := 0; sweep < refineSweeps; sweep++ {
+					for sweep := 0; sweep < refineSweepsN; sweep++ {
 						improvedAny := false
 						for _, ax := range axes {
 							v, e2, ok := searchAxis(score, cur, ax, best)
@@ -630,9 +655,9 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 		}
 		if round == 0 {
 			firstGain = roundGain
-		} else if roundGain < refineRoundFloor*firstGain {
+		} else if roundGain < refineFloor*firstGain {
 			srdbg("round %d earned %.1f, under %.0f%% of the first round's %.1f — stopping",
-				round, roundGain, refineRoundFloor*100, firstGain)
+				round, roundGain, refineFloor*100, firstGain)
 			pending = blocked
 			break
 		}
