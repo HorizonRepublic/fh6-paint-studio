@@ -58,6 +58,8 @@ type Vulkan struct {
 	searchKF  []float32
 	searchOut []float32
 
+	survScratch []float32 // batch placement: the survivor pool read back per search
+
 	masksOn       bool // word atlas uploaded — bank words score/composite/polish on device
 	dll           *syscall.DLL
 	procEval      *syscall.Proc
@@ -73,6 +75,8 @@ type Vulkan struct {
 	procSearchMom  *syscall.Proc
 	procSearchMut  *syscall.Proc
 	procSetCoarse  *syscall.Proc
+	procSetBatch   *syscall.Proc
+	procSurvivors  *syscall.Proc
 	procSetOrient  *syscall.Proc
 	procSetCoh     *syscall.Proc
 	procSetBound   *syscall.Proc
@@ -93,6 +97,13 @@ var _ backend.Backend = (*Vulkan)(nil)
 func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	if gridSize < 1 {
 		gridSize = 1
+	}
+	if gridSize > 255 {
+		// grid.comp runs one workgroup per CELL, and 256 a side is 65536 — one past the
+		// guaranteed 1-D dispatch ceiling Intel enforces exactly. The shipped resolutions are
+		// 48-160; -grid is an expert knob, and the DLL clamps to the same value, so the two must
+		// agree or ErrorGrid reads a tail the device never wrote.
+		gridSize = 255
 	}
 	if weight == nil {
 		weight = make([]float32, w*h)
@@ -142,6 +153,8 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	}
 	g.procSearchMut, _ = dll.FindProc("fp_search_mutate")     // optional: on-device hill climb (host rounds when absent)
 	g.procSetCoarse, _ = dll.FindProc("fp_set_coarse")        // optional: coarse-to-fine search filter
+	g.procSetBatch, _ = dll.FindProc("fp_set_batch")          // optional: batch placement survivor export
+	g.procSurvivors, _ = dll.FindProc("fp_search_survivors")  // optional: ditto
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
 	g.procPolLD, _ = dll.FindProc("fp_set_polish_lostdetail") // optional: lost-detail additive polish term
@@ -175,7 +188,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		g.Close()
 		return nil, fmt.Errorf("resolve fp_init: %w", perr)
 	}
-	ret, _, _ := procInit.Call(fptr(g.target), fptr(g.weight), uintptr(w), uintptr(h), uintptr(maxCands), uintptr(gridSize))
+	ret, _, _ := procInit.Call(uintptr(unsafe.Pointer(&g.target[0])), uintptr(unsafe.Pointer(&g.weight[0])), uintptr(w), uintptr(h), uintptr(maxCands), uintptr(gridSize))
 	runtime.KeepAlive(g.target)
 	runtime.KeepAlive(g.weight)
 	if ret != 0 {
@@ -266,13 +279,6 @@ func (g *Vulkan) ProposerMap() ([]float32, [4]int32, bool) {
 	return out, dims, int(r) == n
 }
 
-func fptr(s []float32) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
-
 func (g *Vulkan) Evaluate(cands []model.Candidate) ([]backend.EvalResult, error) {
 	n := len(cands)
 	out := make([]backend.EvalResult, n)
@@ -307,7 +313,7 @@ func (g *Vulkan) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 		g.outBuf = make([]float32, n*resStride)
 	}
 	g.outBuf = g.outBuf[:n*resStride]
-	g.procEval.Call(fptr(g.candBuf), uintptr(n), fptr(g.outBuf))
+	g.procEval.Call(uintptr(unsafe.Pointer(&g.candBuf[0])), uintptr(n), uintptr(unsafe.Pointer(&g.outBuf[0])))
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
@@ -331,7 +337,7 @@ func (g *Vulkan) Apply(c model.Candidate) error {
 	}
 	buf := g.candBuf[:candStride]
 	packCand(c, buf)
-	g.procApply.Call(fptr(buf))
+	g.procApply.Call(uintptr(unsafe.Pointer(&buf[0])))
 	runtime.KeepAlive(buf)
 	return nil
 }
@@ -350,7 +356,7 @@ func (g *Vulkan) ApplyBatch(cands []model.Candidate) bool {
 	for i, c := range cands {
 		packCand(c, buf[i*candStride:(i+1)*candStride])
 	}
-	g.procApplyBatch.Call(fptr(buf), uintptr(len(cands)))
+	g.procApplyBatch.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(cands)))
 	runtime.KeepAlive(buf)
 	return true
 }
@@ -359,7 +365,7 @@ func (g *Vulkan) ApplyBatch(cands []model.Candidate) bool {
 // (grid.comp), reading back only the gw*gh cell values. Mirrors cpu.ErrorGrid.
 func (g *Vulkan) ErrorGrid() ([]float32, int, int, error) {
 	grid := make([]float32, g.gridSize*g.gridSize)
-	g.procGrid.Call(fptr(grid))
+	g.procGrid.Call(uintptr(unsafe.Pointer(&grid[0])))
 	runtime.KeepAlive(grid)
 	return grid, g.gridSize, g.gridSize, nil
 }
@@ -368,7 +374,7 @@ func (g *Vulkan) ReadCanvas(dst []float32) error {
 	if need := g.w * g.h * 4; len(dst) < need {
 		return fmt.Errorf("vulkan ReadCanvas: dst len %d < %d", len(dst), need)
 	}
-	g.procReadCanv.Call(fptr(dst))
+	g.procReadCanv.Call(uintptr(unsafe.Pointer(&dst[0])))
 	runtime.KeepAlive(dst)
 	return nil
 }
@@ -377,7 +383,7 @@ func (g *Vulkan) Reset(canvas []float32) error {
 	if need := g.w * g.h * 4; len(canvas) < need {
 		return fmt.Errorf("vulkan Reset: canvas len %d < %d", len(canvas), need)
 	}
-	g.procReset.Call(fptr(canvas))
+	g.procReset.Call(uintptr(unsafe.Pointer(&canvas[0])))
 	runtime.KeepAlive(canvas)
 	return nil
 }
@@ -446,7 +452,7 @@ func (g *Vulkan) PolishSetup(base []float32, n int) error {
 			applog.Printf("vulkan: draining stale device error %d before polish setup", e)
 		}
 	}
-	g.procPolSetup.Call(fptr(base), uintptr(n))
+	g.procPolSetup.Call(uintptr(unsafe.Pointer(&base[0])), uintptr(n))
 	runtime.KeepAlive(base)
 	// The shim tears its polish state down on ANY allocation failure and every later fp_polish_*
 	// call becomes a no-op — without this check the engine would run the whole Adam loop against
@@ -582,7 +588,7 @@ func (g *Vulkan) SetKindGate(hard []float32) bool {
 	if len(hard) != g.w*g.h {
 		return false
 	}
-	g.procKindGate.Call(fptr(hard))
+	g.procKindGate.Call(uintptr(unsafe.Pointer(&hard[0])))
 	runtime.KeepAlive(hard)
 	return true
 }
@@ -609,7 +615,7 @@ func (g *Vulkan) uploadMasks() {
 		atlas = append(atlas, e.Cov...)
 	}
 	ret, _, _ := g.procSetMasks.Call(
-		fptr(atlas), uintptr(len(atlas)),
+		uintptr(unsafe.Pointer(&atlas[0])), uintptr(len(atlas)),
 		uintptr(unsafe.Pointer(&meta[0])), uintptr(len(bank)),
 	)
 	runtime.KeepAlive(atlas)
@@ -641,7 +647,7 @@ func (g *Vulkan) SetGlowSwap(tau, prob float32) bool {
 		return false
 	}
 	tp := [2]float32{tau, prob}
-	g.procGlowSwap.Call(fptr(tp[:]))
+	g.procGlowSwap.Call(uintptr(unsafe.Pointer(&tp[0])))
 	runtime.KeepAlive(tp[:])
 	return true
 }
@@ -662,7 +668,7 @@ func (g *Vulkan) SetRampGlow(ramp []float32, thresh, tau, prob float32) bool {
 		return false
 	}
 	p := [3]float32{thresh, tau, prob}
-	g.procRampGlow.Call(fptr(ramp), fptr(p[:]))
+	g.procRampGlow.Call(uintptr(unsafe.Pointer(&ramp[0])), uintptr(unsafe.Pointer(&p[0])))
 	runtime.KeepAlive(ramp)
 	runtime.KeepAlive(p[:])
 	return true
@@ -679,7 +685,7 @@ func (g *Vulkan) SetBigGlow(tau, prob float32, allKinds bool, kind int32) bool {
 	if allKinds {
 		p[2] = 1
 	}
-	g.procBigGlow.Call(fptr(p[:]))
+	g.procBigGlow.Call(uintptr(unsafe.Pointer(&p[0])))
 	runtime.KeepAlive(p[:])
 	return true
 }
@@ -695,7 +701,7 @@ func (g *Vulkan) SetAlphaGrid(vals []float32) error {
 		g.procAlphaGrid.Call(0, 0)
 		return nil
 	}
-	g.procAlphaGrid.Call(fptr(vals), uintptr(len(vals)))
+	g.procAlphaGrid.Call(uintptr(unsafe.Pointer(&vals[0])), uintptr(len(vals)))
 	runtime.KeepAlive(vals)
 	return nil
 }
@@ -707,7 +713,12 @@ func (g *Vulkan) PolishSync() {
 }
 
 func (g *Vulkan) PolishUpload(P, col []float64, kinds, bbx []int32, boff []int64, belowTotal int64) {
-	g.procPolUpload.Call(f64ptr(P), f64ptr(col), i32ptr(kinds), i32ptr(bbx), i64ptr(boff), uintptr(belowTotal))
+	if len(P) == 0 || len(col) == 0 || len(kinds) == 0 || len(bbx) == 0 || len(boff) == 0 {
+		return // a zero-shape upload has nothing to point at; the shim would read a null anyway
+	}
+	g.procPolUpload.Call(uintptr(unsafe.Pointer(&P[0])), uintptr(unsafe.Pointer(&col[0])),
+		uintptr(unsafe.Pointer(&kinds[0])), uintptr(unsafe.Pointer(&bbx[0])),
+		uintptr(unsafe.Pointer(&boff[0])), uintptr(belowTotal))
 	runtime.KeepAlive(P)
 	runtime.KeepAlive(col)
 	runtime.KeepAlive(kinds)
@@ -715,16 +726,27 @@ func (g *Vulkan) PolishUpload(P, col []float64, kinds, bbx []int32, boff []int64
 	runtime.KeepAlive(boff)
 }
 
+// The DLL is handed the ADDRESS of these buffers and writes into several of them, so every
+// conversion below is written inline. Proc.Call is //go:uintptrescapes, and the compiler only
+// honours that for a uintptr(unsafe.Pointer(x)) written SYNTACTICALLY in the argument list: a
+// helper returning uintptr hides it, and the buffer then stays on the stack, where the runtime is
+// free to move it out from under the call. Verified with -gcflags=-m — the inline form reports
+// "moved to heap: t", the helper form reports nothing. bbxHost is ignored by the shim (the bbx
+// lives on-device) but still travels as a pointer, so it gets the same treatment.
 func (g *Vulkan) PolishForward(tau float64, bbxHost []int32) {
 	t := [1]float64{tau}
-	g.procPolFwd.Call(i32ptr(bbxHost), f64ptr(t[:]))
+	if len(bbxHost) == 0 {
+		g.procPolFwd.Call(0, uintptr(unsafe.Pointer(&t[0])))
+	} else {
+		g.procPolFwd.Call(uintptr(unsafe.Pointer(&bbxHost[0])), uintptr(unsafe.Pointer(&t[0])))
+	}
 	runtime.KeepAlive(bbxHost)
 	runtime.KeepAlive(t[:])
 }
 
 func (g *Vulkan) PolishLoss() float64 {
 	out := [1]float64{}
-	g.procPolLoss.Call(f64ptr(out[:]))
+	g.procPolLoss.Call(uintptr(unsafe.Pointer(&out[0])))
 	runtime.KeepAlive(out[:])
 	return out[0]
 }
@@ -734,7 +756,11 @@ func (g *Vulkan) PolishHardLoss(bbxHost []int32) (float64, bool) {
 		return 0, false
 	}
 	out := [1]float64{}
-	g.procPolHard.Call(i32ptr(bbxHost), f64ptr(out[:]))
+	if len(bbxHost) == 0 {
+		g.procPolHard.Call(0, uintptr(unsafe.Pointer(&out[0])))
+	} else {
+		g.procPolHard.Call(uintptr(unsafe.Pointer(&bbxHost[0])), uintptr(unsafe.Pointer(&out[0])))
+	}
 	runtime.KeepAlive(bbxHost)
 	runtime.KeepAlive(out[:])
 	return out[0], true
@@ -742,19 +768,29 @@ func (g *Vulkan) PolishHardLoss(bbxHost []int32) (float64, bool) {
 
 func (g *Vulkan) PolishBackward(tau float64, bbxHost []int32) {
 	t := [1]float64{tau}
-	g.procPolBwd.Call(i32ptr(bbxHost), f64ptr(t[:]))
+	if len(bbxHost) == 0 {
+		g.procPolBwd.Call(0, uintptr(unsafe.Pointer(&t[0])))
+	} else {
+		g.procPolBwd.Call(uintptr(unsafe.Pointer(&bbxHost[0])), uintptr(unsafe.Pointer(&t[0])))
+	}
 	runtime.KeepAlive(bbxHost)
 	runtime.KeepAlive(t[:])
 }
 
 func (g *Vulkan) PolishReadGrad(dst []float64) {
-	g.procPolRdGrad.Call(f64ptr(dst))
+	if len(dst) == 0 {
+		return
+	}
+	g.procPolRdGrad.Call(uintptr(unsafe.Pointer(&dst[0])))
 	runtime.KeepAlive(dst)
 }
 
 func (g *Vulkan) PolishReadRender(dst []float32) {
+	if len(dst) == 0 {
+		return
+	}
 	if g.procPolRdRender != nil {
-		g.procPolRdRender.Call(fptr(dst))
+		g.procPolRdRender.Call(uintptr(unsafe.Pointer(&dst[0])))
 		runtime.KeepAlive(dst)
 	}
 }
@@ -765,24 +801,10 @@ func (g *Vulkan) PolishFree() {
 	}
 }
 
-func f64ptr(s []float64) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
-func i32ptr(s []int32) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
-func i64ptr(s []int64) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
+// The fptr/f64ptr/i32ptr/i64ptr helpers that used to live here are GONE on purpose. Every
+// uintptr(unsafe.Pointer(x)) handed to Proc.Call must be written in the argument list itself:
+// that is the only form the //go:uintptrescapes pragma recognises, and the helper silently
+// dropped every buffer back onto the stack. Do not reintroduce them.
 func b2i32(b bool) int32 {
 	if b {
 		return 1
@@ -804,7 +826,7 @@ func (g *Vulkan) SetCoherence(coh []float32, aspectCap float32) bool {
 		g.procSetCoh.Call(0, 0)
 		return true
 	}
-	g.procSetCoh.Call(fptr(coh), fptr(p[:]))
+	g.procSetCoh.Call(uintptr(unsafe.Pointer(&coh[0])), uintptr(unsafe.Pointer(&p[0])))
 	runtime.KeepAlive(coh)
 	runtime.KeepAlive(p[:])
 	return true
@@ -814,7 +836,7 @@ func (g *Vulkan) SetCoherence(coh []float32, aspectCap float32) bool {
 // search's orientation-seeded angles. No-op if the length mismatches.
 func (g *Vulkan) SetOrient(orient []float32) {
 	if g.procSetOrient != nil && len(orient) == g.w*g.h {
-		g.procSetOrient.Call(fptr(orient))
+		g.procSetOrient.Call(uintptr(unsafe.Pointer(&orient[0])))
 		runtime.KeepAlive(orient)
 	}
 }
@@ -830,7 +852,7 @@ func (g *Vulkan) SetBoundaryDist(dist []float32) {
 		return
 	}
 	if len(dist) == g.w*g.h {
-		g.procSetBound.Call(fptr(dist))
+		g.procSetBound.Call(uintptr(unsafe.Pointer(&dist[0])))
 		runtime.KeepAlive(dist)
 	}
 }
@@ -871,14 +893,20 @@ func (g *Vulkan) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCD
 		g.searchOut = make([]float32, 12)
 	}
 	out := g.searchOut[:12]
+	if len(kindCDF) == 0 || len(cdf) == 0 {
+		return model.Candidate{}, 0, false // nothing to sample from; the shim would read a null
+	}
+	// Every one of these is written inline: see the comment above PolishForward. ip/fp/kf are
+	// composite literals, so the helper form left them on the stack while the DLL held their
+	// addresses, and `out` is a buffer the DLL WRITES.
 	g.procSearchRand.Call(
 		uintptr(uint64(seed)),
 		uintptr(unsafe.Pointer(&ip[0])),
-		fptr(fp),
-		fptr(kf),
-		fptr(kindCDF),
-		fptr(cdf),
-		fptr(out),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&kf[0])),
+		uintptr(unsafe.Pointer(&kindCDF[0])),
+		uintptr(unsafe.Pointer(&cdf[0])),
+		uintptr(unsafe.Pointer(&out[0])),
 	)
 	runtime.KeepAlive(ip)
 	runtime.KeepAlive(fp)
@@ -920,14 +948,17 @@ func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKin
 	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers)}
 	fp := []float32{maxR, alphaMin, 0, boundPad, boundMix, canvasPad}
 	out := make([]float32, 12)
+	if len(kindCDF) == 0 || len(cdf) == 0 {
+		return model.Candidate{}, 0, false
+	}
 	g.procSearchMom.Call(
 		uintptr(uint64(seed)),
 		uintptr(unsafe.Pointer(&ip[0])),
-		fptr(fp),
-		fptr(kf),
-		fptr(kindCDF),
-		fptr(cdf),
-		fptr(out),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&kf[0])),
+		uintptr(unsafe.Pointer(&kindCDF[0])),
+		uintptr(unsafe.Pointer(&cdf[0])),
+		uintptr(unsafe.Pointer(&out[0])),
 	)
 	runtime.KeepAlive(ip)
 	runtime.KeepAlive(fp)
@@ -974,8 +1005,8 @@ func (g *Vulkan) SearchMutate(seed int64, incumbent model.Candidate, score float
 	g.procSearchMut.Call(
 		uintptr(uint64(seed)),
 		uintptr(unsafe.Pointer(&ip[0])),
-		fptr(fp),
-		fptr(io),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&io[0])),
 	)
 	runtime.KeepAlive(ip)
 	runtime.KeepAlive(fp)
@@ -1011,6 +1042,63 @@ func (g *Vulkan) SetCoarse(enable bool, budget, kpart int) {
 // SetCoarseFP16 is accepted for interface parity and does nothing: the FP32 coarse filter is the
 // win (the CUDA fp16 half needed a separate eval shader and bought a fraction of it).
 func (g *Vulkan) SetCoarseFP16(bool) {}
+
+// SetBatch arms the survivor export so SearchSurvivors has something to return. Off by default:
+// it appends three buffer copies to every search submit. A DLL without the export leaves the
+// engine's batch placement disabled (SearchSurvivors then returns 0).
+func (g *Vulkan) SetBatch(on bool) {
+	if g.procSetBatch == nil {
+		return
+	}
+	g.procSetBatch.Call(uintptr(b2i32(on)))
+}
+
+// SearchSurvivors returns the pool the last on-device search re-scored at the FULL sample budget:
+// the coarse filter's kpart survivors, with the device's selection-adjusted score in adj and the
+// raw ΔSSE in raw. Batch placement ranks by adj (matching the argmin's own choice) and gates on
+// raw. Returns 0 when the pool does not exist — an old DLL, the coarse filter off, or a candidate
+// batch too small to trigger it — and the caller then places one shape as before.
+func (g *Vulkan) SearchSurvivors(cands []model.Candidate, raw, adj []float32) int {
+	if g.procSurvivors == nil {
+		return 0
+	}
+	k := len(cands)
+	if k > len(raw) {
+		k = len(raw)
+	}
+	if k > len(adj) {
+		k = len(adj)
+	}
+	if k < 1 {
+		return 0
+	}
+	need := k * 17
+	if cap(g.survScratch) < need {
+		g.survScratch = make([]float32, need)
+	}
+	buf := g.survScratch[:need]
+	n, _, _ := g.procSurvivors.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(int32(need)))
+	runtime.KeepAlive(buf)
+	got := int(int32(n))
+	if got < 1 || got > k {
+		return 0
+	}
+	// Device block layout: [got adj][got*11 candidate][got*5 eval].
+	cb := buf[got:]
+	eb := buf[got*12:]
+	for i := 0; i < got; i++ {
+		adj[i] = buf[i]
+		c := cb[i*11:]
+		e := eb[i*5:]
+		raw[i] = e[0]
+		cands[i] = model.Candidate{
+			Kind:  model.ShapeKind(int(c[0] + 0.5)),
+			P:     [6]float32{c[1], c[2], c[3], c[4], c[5], c[6]},
+			Color: model.RGBA{R: e[1], G: e[2], B: e[3], A: e[4]},
+		}
+	}
+	return got
+}
 
 // packCand writes a candidate into the 11-float wire format at dst[0:11].
 func packCand(c model.Candidate, dst []float32) {

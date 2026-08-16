@@ -82,7 +82,11 @@ void main() {
         float s = (sx + sy) / 2.0;
         scx = float((mcx + REAL(0.5)) * REAL(sx)); scy = float((mcy + REAL(0.5)) * REAL(sy));
         srx = float(max(major, REAL(0.5)) * REAL(s)); sry = float(max(minor, REAL(0.5)) * REAL(s));
-        sth = 0.5 * atan(float(REAL(2.0) * u11), float(u20 - u02)) * 57.295779513082323;
+        // atan(0,0) is undefined in GLSL and a single hot cell makes both arguments exactly zero
+        // (u11 = 0 and u20 == u02), so the orientation of an isolated seed was whatever the driver
+        // returned — NaN on some, 0 on others, and the candidate pool differed by vendor.
+        float ay = float(REAL(2.0) * u11), ax = float(u20 - u02);
+        sth = (ay == 0.0 && ax == 0.0) ? 0.0 : 0.5 * atan(ay, ax) * 57.295779513082323;
     }
     if (valid == 0) { scx = cx; scy = cy; srx = max(4.0, capR * 0.3); sry = srx; sth = uf(uint(k), ctr) * 360.0; }
     int base = k * 6;

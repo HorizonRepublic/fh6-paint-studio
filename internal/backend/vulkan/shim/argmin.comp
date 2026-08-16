@@ -36,7 +36,12 @@ void bboxSpan(int kind, float P[6], int W, int H, out int dw, out int dh) {
     } else {
         float cx = P[0], cy = P[1], ex, ey;
         float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
-        if (kind == 1) {
+        if (kind >= 64) {
+            // MASKBASE — see prepadj.comp: a word carries FULL extents, not radii.
+            float hw = max(0.5, P[2] * 0.5), hh = max(0.5, P[3] * 0.5);
+            float shx = hw + abs(P[5]) * hh;
+            ex = abs(shx * c) + abs(hh * s); ey = abs(shx * s) + abs(hh * c);
+        } else if (kind == 1) {
             float hw = max(0.5, P[2]), hh = max(0.5, P[3]);
             float shx = hw + abs(P[5]) * hh;
             ex = abs(shx * c) + abs(hh * s); ey = abs(shx * s) + abs(hh * c);

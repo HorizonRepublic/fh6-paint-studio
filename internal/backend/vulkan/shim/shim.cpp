@@ -278,6 +278,10 @@ VkPipeline            g_cminPipe = VK_NULL_HANDLE, g_cgatPipe = VK_NULL_HANDLE;
 VkDescriptorSet       g_cminSet = VK_NULL_HANDLE, g_cgatSet = VK_NULL_HANDLE;
 VkDescriptorSet       g_seval2Set = VK_NULL_HANDLE, g_prep2Set = VK_NULL_HANDLE, g_arg2Set = VK_NULL_HANDLE;
 Buf g_scand2, g_sout2, g_adj2, g_sel;
+// Batch placement (fp_set_batch / fp_search_survivors): the refined survivor pool copied out to
+// the host so it can place several disjoint winners per round. See cmdExportSurvivors.
+Buf g_survBuf;
+int g_survCap = 0, g_survN = 0, g_batchOn = 0;
 int g_coarseOn = 0, g_coarseBudget = 4000, g_kpart = 2048, g_coarseCap = 0;
 int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0, g_hasGate = 0, g_hasRampGlow = 0, g_hasCoh = 0;
 float g_aspectCap = 0.f;
@@ -585,6 +589,7 @@ void teardown() {
     if (g_argPipe)  { vkDestroyPipeline(g_device, g_argPipe, nullptr);  g_argPipe = VK_NULL_HANDLE; }
     if (g_mutPipe)  { vkDestroyPipeline(g_device, g_mutPipe, nullptr);  g_mutPipe = VK_NULL_HANDLE; }
     destroyBuf(g_scand2); destroyBuf(g_sout2); destroyBuf(g_adj2); destroyBuf(g_sel);
+    destroyBuf(g_survBuf); g_survCap = 0; g_survN = 0;
     if (g_cminPipe) { vkDestroyPipeline(g_device, g_cminPipe, nullptr); g_cminPipe = VK_NULL_HANDLE; }
     if (g_cgatPipe) { vkDestroyPipeline(g_device, g_cgatPipe, nullptr); g_cgatPipe = VK_NULL_HANDLE; }
     if (g_cminPL)   { vkDestroyPipelineLayout(g_device, g_cminPL, nullptr); g_cminPL = VK_NULL_HANDLE; }
@@ -1430,7 +1435,10 @@ API void fp_set_polish_eagle(const double* lambdaPtr) {
     if (g_w < 8 || g_h < 8) { g_peglambda = 0.0; return; }
     size_t npix = (size_t)g_w * g_h;
     if (g_egDSL == VK_NULL_HANDLE && !buildEagle()) { g_lastError = 2010; g_peglambda = 0.0; return; }
-    if (!ensureTermW()) { g_lastError = 2012; return; }
+    // The lambda must die with the allocation, exactly as the two branches around it do: a live
+    // lambda over a NULL g_termW dispatches against descriptor sets nothing ever wrote, which on a
+    // low-VRAM card turns a survivable OOM into a device fault.
+    if (!ensureTermW()) { g_lastError = 2012; g_peglambda = 0.0; return; }
     if (g_egTL.buf == VK_NULL_HANDLE) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1794,7 +1802,8 @@ bool ensureCoarse(int k) {
     if (k <= g_coarseCap) return true;
     destroyBuf(g_scand2); destroyBuf(g_sout2); destroyBuf(g_adj2); destroyBuf(g_sel);
     const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    // TRANSFER_SRC so fp_search_survivors can copy the refined pool out (batch placement).
+    const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     if (!createBufEx((size_t)k * 11 * sizeof(float), S, dl, false, g_scand2) ||
         !createBufEx((size_t)k * 5 * sizeof(float), S, dl, false, g_sout2) ||
         !createBufEx((size_t)k * sizeof(float), S, dl, false, g_adj2) ||
@@ -1808,6 +1817,41 @@ bool ensureCoarse(int k) {
     }
     g_coarseCap = k; g_searchSetsDirty = true;
     return true;
+}
+
+// ---- batch placement: export the refined survivor pool ----
+// Under alpha-over in linear light two candidates with disjoint bboxes have EXACTLY additive SSE
+// deltas — each touches only its own pixels and each colour solves from the canvas under its own
+// bbox. So the host can take a maximal independent set over the pool the coarse filter already
+// re-scored at the FULL budget and place all of them in one round, with no approximation. The
+// export is the last thing recorded into the search submit, so it costs no extra round trip.
+bool ensureSurv(int k) {
+    if (k <= g_survCap) return true;
+    destroyBuf(g_survBuf);
+    if (!createBufEx((size_t)k * 17 * sizeof(float), VK_BUFFER_USAGE_TRANSFER_DST_BIT, HOSTVIS, true, g_survBuf)) {
+        g_survCap = 0;
+        return false;
+    }
+    g_survCap = k;
+    return true;
+}
+
+// cmdExportSurvivors records the survivor copy-out at the tail of the search submit. Caller has
+// just recorded the final argmin, so a shader-write -> transfer-read barrier comes first.
+void cmdExportSurvivors(int k) {
+    flushBarrier(); // shader writes -> transfer reads
+    VkBufferCopy c[3];
+    c[0] = {0, 0, (VkDeviceSize)k * sizeof(float)};
+    c[1] = {0, (VkDeviceSize)k * sizeof(float), (VkDeviceSize)k * 11 * sizeof(float)};
+    c[2] = {0, (VkDeviceSize)k * 12 * sizeof(float), (VkDeviceSize)k * 5 * sizeof(float)};
+    vkCmdCopyBuffer(g_cmd, g_adj2.buf, g_survBuf.buf, 1, &c[0]);
+    vkCmdCopyBuffer(g_cmd, g_scand2.buf, g_survBuf.buf, 1, &c[1]);
+    vkCmdCopyBuffer(g_cmd, g_sout2.buf, g_survBuf.buf, 1, &c[2]);
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    g_survN = k;
 }
 
 // searchTail records everything after the candidate pool has been scored: the selection-adjusted
@@ -1867,6 +1911,7 @@ void searchTail(int n, int compact, int shapeCount, bool useCoarse, bool split) 
     ArgPC a2{g_kpart, 0, 0, 0, 0, 0, 0};
     vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(a2), &a2);
     vkCmdDispatch(g_cmd, 1, 1, 1);
+    if (g_batchOn && ensureSurv(g_kpart)) cmdExportSurvivors(g_kpart);
 }
 
 void writeMomentDescriptors() {
@@ -1926,7 +1971,13 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
     // The chunking EMA is per-workload: a run that jumps from 1100px to native 4096px would size
     // its first submit off the SMALL canvas's round cost and can blow the TDR window it guards.
     g_mutRoundCost = 0.0;
+    for (int i = 0; i < PCH_N; i++) g_polishCost[i] = 0.0;
+    g_evalCandCost = 0.0;
     g_w = w; g_h = h; g_maxCands = maxCands; g_grid = gridSize;
+    // fp_error_grid dispatches one workgroup per CELL, so the grid resolution has its own dispatch
+    // ceiling: 256 cells a side is already 65536 workgroups, one past the guaranteed limit. The
+    // shipped resolutions are 48-160; -grid is an expert knob and this keeps it honest.
+    if (g_grid > 255) g_grid = 255;
     if (!buildContext()) { teardown(); return g_lastError ? g_lastError : 1; }
     // Several per-pixel shaders are thread-per-pixel with 256-wide groups; a canvas whose group
     // count exceeds the device's 1-D dispatch ceiling (guaranteed floor 65535, i.e. >16.7Mpx on
@@ -2142,10 +2193,10 @@ API void fp_error_grid(float* out) {
     submitWait();
     // The dirty rect is consumed only AFTER a successful submit: clearing it up front meant a
     // failed dispatch (device loss) silently froze those cells stale forever.
-    if (!g_fatal) {
-        g_dirtyFull = false;
-        g_dirtyX0 = g_dirtyY0 = 0; g_dirtyX1 = g_dirtyY1 = -1;
-    }
+    if (g_fatal) return; // the dispatch died: g_gridBuf holds the PREVIOUS grid, and handing that
+                         // back reads to the caller as a fresh measurement of a canvas it never saw
+    g_dirtyFull = false;
+    g_dirtyX0 = g_dirtyY0 = 0; g_dirtyX1 = g_dirtyY1 = -1;
     memcpy(out, g_gridBuf.map, (size_t)gw * gh * sizeof(float));
 }
 
@@ -2546,6 +2597,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // would hand the greedy a plausible stale winner it then places over and over. FLT_MAX = fail.
     if (!g_device || g_fatal || n < 1 || nKinds < 1) { out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
+    g_survN = 0; // a failed or non-coarse search must not leave the previous pool readable
     if (!ensureSearch(n)) { out_best[0] = 3.4028235e38f; return; }
     // upload kinds / kindCDF / gridCDF — recorded at the head of the SEARCH submit rather than
     // fenced on their own. This runs once per PLACED SHAPE, and the kind table and its CDF are
@@ -2642,6 +2694,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     int perSeed = n / K; if (perSeed < 1) perSeed = 1;
     while (perSeed > 1 && (long long)perSeed * K > 65535) perSeed--;
     int nGen = perSeed * K; // perSeed==1 leaves nGen == K <= 65535
+    g_survN = 0; // a failed or non-coarse search must not leave the previous pool readable
     if (!ensureSearch(nGen > n ? nGen : n) || !ensureMoment(K)) { out_best[0] = 3.4028235e38f; return; }
     // Same one-submit upload as fp_search_random: recorded at the head of the search submit.
     size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
@@ -2800,6 +2853,20 @@ API void fp_reset(const float* canvas) {
 }
 
 API void fp_set_sample_budget(int n) { g_sampleBudget = (n < 1) ? 4000 : n; }
+
+// fp_set_batch arms the survivor export (batch placement). Off = the search submit is unchanged.
+API void fp_set_batch(int on) { g_batchOn = on ? 1 : 0; }
+
+// fp_search_survivors hands the last search's refined pool to the host in the device's own block
+// layout: [k adjusted scores][k*11 candidate rows][k*5 eval rows (raw score + solved rgba)].
+// Returns the row count, or 0 when the last search had no refined pool (coarse filter off / too
+// small a candidate batch / a dead device).
+API int fp_search_survivors(float* out, int cap) {
+    if (g_fatal || !g_survBuf.map || g_survN < 1 || !out) return 0;
+    if (cap < g_survN * 17) return 0;
+    memcpy(out, g_survBuf.map, (size_t)g_survN * 17 * sizeof(float));
+    return g_survN;
+}
 
 // fp_set_coarse configures the coarse-to-fine filter for both on-device searches. kpart is the
 // survivor count (one per partition); the searches gate themselves on n > 4*kpart, so small pools
@@ -2974,7 +3041,7 @@ static void ensureFEPlanes() {
     if (!g_device || g_pn < 1) return;
     size_t npix = (size_t)g_w * g_h;
     if (g_feDSL == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; g_pfelambda = 0.0; g_pldlambda = 0.0; return; } // lambda MUST die with the failed build: a live lambda with NULL pipelines is a device fault
-    if (!ensureTermW()) { g_lastError = 2012; return; }
+    if (!ensureTermW()) { g_lastError = 2012; g_pfelambda = 0.0; g_pldlambda = 0.0; return; } // same rule for the weight buffer
     if (g_feTL.buf == VK_NULL_HANDLE) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;

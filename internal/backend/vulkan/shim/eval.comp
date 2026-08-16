@@ -46,6 +46,15 @@ const int   NACC     = 19;
 const float DEG2RAD  = 0.017453292519943295;
 const float REJECTED = 3.4028235e38; // FLT_MAX, matches shim.cu REJECTED
 
+// A rejected candidate used to write only its score and leave the four colour slots holding
+// whatever the PREVIOUS search left in that row. Nothing reads them today (a REJECTED score can
+// never win the argmin, and every consumer filters on the score first), but a half-written row is
+// a trap for the next reader — and reading a stale colour would be silent, not a crash.
+void rejectRow(uint ob) {
+    outb[ob] = REJECTED;
+    outb[ob + 1u] = 0.0; outb[ob + 2u] = 0.0; outb[ob + 3u] = 0.0; outb[ob + 4u] = 0.0;
+}
+
 // Half the workgroup's worth of accumulator slots, not all of it: the first reduction level pairs
 // lane i with lane i+64, so lanes 64..127 park their registers and lanes 0..63 fold them in before
 // the shared-memory tree starts. Same pairing, same order, same floats — but 4.9KB of shared
@@ -290,8 +299,8 @@ void main() {
         // Gradient epilogue: the per-pixel alpha makes the optimal colour a weighted ratio and the
         // dSSE a quadratic in it. Mirrors the CUDA gradient branch term for term.
         REAL saa = W_;
-        if (nn < REAL(1.0) || saa <= REAL(0.0)) { outb[ob] = REJECTED; return; }
-        if (nt > REAL(0.0) && nt > REAL(1.5) * nn) { outb[ob] = REJECTED; return; }
+        if (nn < REAL(1.0) || saa <= REAL(0.0)) { rejectRow(ob); return; }
+        if (nt > REAL(0.0) && nt > REAL(1.5) * nn) { rejectRow(ob); return; }
         REAL sarR = REAL(sh[3]), sarG = REAL(sh[4]), sarB = REAL(sh[5]);
         REAL saasR = REAL(sh[6]), saasG = REAL(sh[7]), saasB = REAL(sh[8]);
         REAL sarsR = REAL(sh[9]), sarsG = REAL(sh[10]), sarsB = REAL(sh[11]);
@@ -313,8 +322,8 @@ void main() {
         outb[ob + 4u] = Ain;
         return;
     }
-    if (kind > 5 || nn < REAL(1.0) || W_ <= REAL(0.0)) { if (lid == 0u) outb[ob] = REJECTED; return; }
-    if (nt > REAL(0.0) && nt > REAL(1.5) * nn) { if (lid == 0u) outb[ob] = REJECTED; return; }
+    if (kind > 5 || nn < REAL(1.0) || W_ <= REAL(0.0)) { if (lid == 0u) rejectRow(ob); return; }
+    if (nt > REAL(0.0) && nt > REAL(1.5) * nn) { if (lid == 0u) rejectRow(ob); return; }
     REAL sTR = REAL(sh[3]), sTG = REAL(sh[4]), sTB = REAL(sh[5]), sTA = REAL(sh[6]);
     REAL sCR = REAL(sh[7]), sCG = REAL(sh[8]), sCB = REAL(sh[9]), sCA = REAL(sh[10]);
     REAL sCR2 = REAL(sh[11]), sCG2 = REAL(sh[12]), sCB2 = REAL(sh[13]), sCA2 = REAL(sh[14]);
