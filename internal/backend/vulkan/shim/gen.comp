@@ -165,7 +165,9 @@ void main() {
             // bar back towards the baseline the engine actually offers.
             if (propAt(hd, 7, cx, cy) <= cfg_propConfTau) pf = 0.0;
         }
-        if (cfg_hasProp != 0 && uf(uint(i), ctr) < pf) {
+        // cfg_propHeads > 0 like its two siblings above: proposeCandidate does `i % cfg_propHeads`
+        // straight away, and integer division by zero is undefined in SPIR-V.
+        if (cfg_hasProp != 0 && cfg_propHeads > 0 && uf(uint(i), ctr) < pf) {
             proposeCandidate(i, ctr, base, cx, cy);
             continue;
         }

@@ -99,6 +99,11 @@
 #define API extern "C"
 #endif
 
+// The proposer's lifetime helpers are defined below the anonymous namespace; teardown(), which
+// lives inside it, has to see them.
+void freeProposer();
+void proposerTeardown();
+
 namespace {
 
 struct Buf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; void* map = nullptr; VkDeviceSize size = 0; };
@@ -316,9 +321,15 @@ VkPipelineLayout      g_pcPL = VK_NULL_HANDLE, g_piPL = VK_NULL_HANDLE, g_phPL =
                       g_poPL = VK_NULL_HANDLE;
 VkPipeline            g_pcPipe = VK_NULL_HANDLE, g_piPipe = VK_NULL_HANDLE, g_phPipe = VK_NULL_HANDLE,
                       g_poPipe = VK_NULL_HANDLE;
-VkDescriptorSet       g_pcSetA = VK_NULL_HANDLE, g_pcSetB = VK_NULL_HANDLE,
-                      g_piSet = VK_NULL_HANDLE, g_phSet = VK_NULL_HANDLE,
+VkDescriptorSet       g_piSet = VK_NULL_HANDLE, g_phSet = VK_NULL_HANDLE,
                       g_poSet = VK_NULL_HANDLE;
+// ONE conv set per trunk layer. There used to be two, ping-ponged — but a descriptor set may not be
+// rewritten while a command buffer that binds it is still pending, and every write happened INSIDE
+// the recording. Six layers over two sets meant every dispatch read the LAST write, so layer 0 ran
+// with layer 4's weights over an uninitialised buffer. The whole recorded AI-proposer verdict was
+// measured on that.
+std::vector<VkDescriptorSet> g_pcSets;
+VkDescriptorPool g_propDPool = VK_NULL_HANDLE; // was a local: nothing ever destroyed it
 std::vector<PropLayer> g_propLayers;
 Buf g_propIn, g_propA, g_propB, g_propMap, g_propKinds;
 Buf g_pMixW, g_pMixB, g_pGeoW, g_pGeoB, g_pAlpW, g_pAlpB, g_pCnfW, g_pCnfB;
@@ -422,6 +433,10 @@ struct TiledPC { int32_t n, w, h, ste; float tau; int32_t tilesX, tile, binned; 
 // PBSLICES bounds one shape's reduce slices. 64 keeps the worst canvas-sized bbox near the
 // measured 4096 px/workgroup sweet spot without drowning small stacks in empty workgroups.
 constexpr int32_t PBSLICES = 64;
+// MUST match polish_backward_reduce.comp's SLICE_PX (and combine's copy of it).
+constexpr int32_t PBSLICE_PX = 4096;
+// Widest sliceCount over the current boxes, recomputed on every fp_polish_upload. See there.
+int g_pMaxSlices = PBSLICES;
 // SHAPE BINNING (mirrors the CUDA shim). The polish passes are thread-per-pixel and would
 // otherwise walk the whole shape list at every pixel just to bbox-test it away. Binning once per
 // upload leaves each pixel with the handful that can reach its tile; the list is ascending, so the
@@ -570,12 +585,17 @@ void polishTeardown() {
     if (g_egPL)   { vkDestroyPipelineLayout(g_device, g_egPL, nullptr); g_egPL = VK_NULL_HANDLE; }
     if (g_egDSL)  { vkDestroyDescriptorSetLayout(g_device, g_egDSL, nullptr); g_egDSL = VK_NULL_HANDLE; }
     g_peglambda = 0.0;
-    g_pn = 0; g_belowCap = 0;
+    g_pn = 0; g_belowCap = 0; g_pMaxSlices = PBSLICES;
 }
 
 void teardown() {
     if (g_device) vkDeviceWaitIdle(g_device);
     polishTeardown();
+    // The proposer owned four pipelines, four layouts, four DSLs and a descriptor pool, and NONE of
+    // them were destroyed — they outlived vkDestroyDevice below, so the second run in a process
+    // bound handles from a dead device.
+    freeProposer();
+    proposerTeardown();
     destroyBuf(g_target); destroyBuf(g_weight); destroyBuf(g_canvas); destroyBuf(g_cands); destroyBuf(g_out); destroyBuf(g_staging); destroyBuf(g_gridBuf);
     if (g_evalPipe)  { vkDestroyPipeline(g_device, g_evalPipe, nullptr);  g_evalPipe = VK_NULL_HANDLE; }
     if (g_applyPipe) { vkDestroyPipeline(g_device, g_applyPipe, nullptr); g_applyPipe = VK_NULL_HANDLE; }
@@ -2284,24 +2304,65 @@ static bool buildProposerPipelines() {
         !pipe(g_poPL, prop_orient_spv, sizeof(prop_orient_spv), g_poPipe) ||
         !pipe(g_phPL, prop_head_spv, sizeof(prop_head_spv), g_phPipe)) return false;
 
-    // Two conv sets so the layers can ping-pong between the two feature buffers without rewriting
-    // descriptors mid-command-buffer.
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32};
+    return true;
+}
+
+// ensureProposerSets allocates ONE descriptor set per trunk layer plus the three fixed ones. Called
+// from fp_set_proposer, where the layer count is finally known; the pool is rebuilt whenever that
+// count changes and is destroyed with the device.
+static bool ensureProposerSets(size_t layers) {
+    if (g_propDPool != VK_NULL_HANDLE && g_pcSets.size() == layers) return true;
+    if (g_propDPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(g_device, g_propDPool, nullptr); // frees every set allocated from it
+        g_propDPool = VK_NULL_HANDLE;
+    }
+    g_pcSets.clear();
+    g_piSet = g_phSet = g_poSet = VK_NULL_HANDLE;
+    uint32_t nSets = (uint32_t)layers + 3;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)(layers * 4 + 3 + 10 + 1)};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = 5; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
-    VkDescriptorPool pool = VK_NULL_HANDLE;
-    if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &pool) != VK_SUCCESS) return false;
-    VkDescriptorSetLayout ls[5] = { g_pcDSL, g_pcDSL, g_piDSL, g_phDSL, g_poDSL };
-    VkDescriptorSet* ds[5] = { &g_pcSetA, &g_pcSetB, &g_piSet, &g_phSet, &g_poSet };
-    for (int i = 0; i < 5; i++) {
+    dpci.maxSets = nSets; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_propDPool) != VK_SUCCESS) { g_propDPool = VK_NULL_HANDLE; return false; }
+    g_pcSets.resize(layers, VK_NULL_HANDLE);
+    for (size_t i = 0; i < layers; i++) {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &ls[i];
+        ai.descriptorPool = g_propDPool; ai.descriptorSetCount = 1; ai.pSetLayouts = &g_pcDSL;
+        if (vkAllocateDescriptorSets(g_device, &ai, &g_pcSets[i]) != VK_SUCCESS) return false;
+    }
+    VkDescriptorSetLayout ls[3] = { g_piDSL, g_phDSL, g_poDSL };
+    VkDescriptorSet* ds[3] = { &g_piSet, &g_phSet, &g_poSet };
+    for (int i = 0; i < 3; i++) {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = g_propDPool; ai.descriptorSetCount = 1; ai.pSetLayouts = &ls[i];
         if (vkAllocateDescriptorSets(g_device, &ai, ds[i]) != VK_SUCCESS) return false;
     }
     return true;
 }
 
-static void freeProposer() {
+// proposerTeardown destroys everything buildProposerPipelines and ensureProposerSets created.
+// It used to destroy NOTHING — the descriptor pool was a never-stored local and the pipelines,
+// layouts and DSLs outlived vkDestroyDevice, so a second run in one process (the studio, engined)
+// bound handles from a dead device.
+void proposerTeardown() {
+    if (!g_device) { g_pcSets.clear(); g_propDPool = VK_NULL_HANDLE; return; }
+    if (g_propDPool) { vkDestroyDescriptorPool(g_device, g_propDPool, nullptr); g_propDPool = VK_NULL_HANDLE; }
+    g_pcSets.clear();
+    g_piSet = g_phSet = g_poSet = VK_NULL_HANDLE;
+    if (g_pcPipe) { vkDestroyPipeline(g_device, g_pcPipe, nullptr); g_pcPipe = VK_NULL_HANDLE; }
+    if (g_piPipe) { vkDestroyPipeline(g_device, g_piPipe, nullptr); g_piPipe = VK_NULL_HANDLE; }
+    if (g_phPipe) { vkDestroyPipeline(g_device, g_phPipe, nullptr); g_phPipe = VK_NULL_HANDLE; }
+    if (g_poPipe) { vkDestroyPipeline(g_device, g_poPipe, nullptr); g_poPipe = VK_NULL_HANDLE; }
+    if (g_pcPL) { vkDestroyPipelineLayout(g_device, g_pcPL, nullptr); g_pcPL = VK_NULL_HANDLE; }
+    if (g_piPL) { vkDestroyPipelineLayout(g_device, g_piPL, nullptr); g_piPL = VK_NULL_HANDLE; }
+    if (g_phPL) { vkDestroyPipelineLayout(g_device, g_phPL, nullptr); g_phPL = VK_NULL_HANDLE; }
+    if (g_poPL) { vkDestroyPipelineLayout(g_device, g_poPL, nullptr); g_poPL = VK_NULL_HANDLE; }
+    if (g_pcDSL) { vkDestroyDescriptorSetLayout(g_device, g_pcDSL, nullptr); g_pcDSL = VK_NULL_HANDLE; }
+    if (g_piDSL) { vkDestroyDescriptorSetLayout(g_device, g_piDSL, nullptr); g_piDSL = VK_NULL_HANDLE; }
+    if (g_phDSL) { vkDestroyDescriptorSetLayout(g_device, g_phDSL, nullptr); g_phDSL = VK_NULL_HANDLE; }
+    if (g_poDSL) { vkDestroyDescriptorSetLayout(g_device, g_poDSL, nullptr); g_poDSL = VK_NULL_HANDLE; }
+}
+
+void freeProposer() {
     for (auto& l : g_propLayers) { destroyBuf(l.w); destroyBuf(l.b); }
     g_propLayers.clear();
     destroyBuf(g_propIn); destroyBuf(g_propA); destroyBuf(g_propB);
@@ -2356,6 +2417,11 @@ API int fp_set_proposer(const void* blob, int bytes) {
         g_propLayers.push_back(pl);
         g_propChan = pl.outC;
     }
+    // prop_head.comp holds the pooled and mixed vectors in fixed float[192] arrays and silently
+    // min()s the channel count against 192 — a wider trunk would have been truncated there while
+    // the head's weight strides still assumed the full width, so every value after the first row
+    // would be read from the wrong offset. Refuse the blob instead.
+    if (g_propChan > 192) { freeProposer(); return 0; }
     // Four linear heads since the confidence head was added; a blob that predates it (three) is
     // rejected by the trailing-bytes check below rather than read as garbage.
     struct { Buf* w; Buf* b; } lin[4] = { {&g_pMixW, &g_pMixB}, {&g_pGeoW, &g_pGeoB},
@@ -2402,6 +2468,8 @@ API int fp_set_proposer(const void* blob, int bytes) {
     g_propW = std::max(1, fw - g_propPool + 1);
     g_propH = std::max(1, fh - g_propPool + 1);
     if (!createHost((size_t)g_propW * g_propH * g_propHeads * 8 * sizeof(float), g_propMap)) return 0;
+    // One descriptor set per trunk layer — only knowable here, where the blob has been parsed.
+    if (!ensureProposerSets(g_propLayers.size())) { freeProposer(); return 0; }
     g_hasProposer = 1;
     g_searchSetsDirty = true;   // the generator's proposal bindings now point at real buffers
     return 1;
@@ -2430,12 +2498,26 @@ static void writeSet(VkDescriptorSet set, std::initializer_list<Buf*> bufs) {
 API int fp_run_proposer(float progress) {
     if (!g_device || !g_hasProposer) return 0;
     g_propProgress = progress;
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
-
+    if (g_pcSets.size() != g_propLayers.size()) return 0; // sets and layers must be 1:1
+    // EVERY descriptor write happens BEFORE recording starts. Updating a set that a recorded (let
+    // alone submitted) command buffer binds is undefined, and doing it mid-recording is what made
+    // the trunk run six layers off two alternating sets.
     writeSet(g_piSet, {&g_target, &g_canvas, &g_propIn});
+    if (g_propInC > 6) writeSet(g_poSet, {&g_propIn});
+    {
+        Buf* s = &g_propIn;
+        Buf* d = &g_propA;
+        for (size_t l = 0; l < g_propLayers.size(); l++) {
+            writeSet(g_pcSets[l], {s, d, &g_propLayers[l].w, &g_propLayers[l].b});
+            s = d;
+            d = (d == &g_propA) ? &g_propB : &g_propA;
+        }
+        writeSet(g_phSet, {s, &g_pMixW, &g_pMixB, &g_pGeoW, &g_pGeoB, &g_pAlpW, &g_pAlpB, &g_propMap,
+                           &g_pCnfW, &g_pCnfB});
+    }
+
+    beginCmd();
+
     PropInPC ipc{ g_w, g_h, g_propNW, g_propNH, g_propScale };
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_piPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_piPL, 0, 1, &g_piSet, 0, nullptr);
@@ -2447,7 +2529,6 @@ API int fp_run_proposer(float progress) {
     // reads the target planes and writes past the six prop_input filled, so there is no aliasing
     // beyond the barrier already placed above.
     if (g_propInC > 6) {
-        writeSet(g_poSet, {&g_propIn});
         PropOrPC opc{ g_propNW, g_propNH };
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_poPipe);
         vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_poPL, 0, 1, &g_poSet, 0, nullptr);
@@ -2463,11 +2544,9 @@ API int fp_run_proposer(float progress) {
         PropLayer& pl = g_propLayers[l];
         int outW = (inW + pl.stride - 1) / pl.stride;
         int outH = (inH + pl.stride - 1) / pl.stride;
-        VkDescriptorSet set = (l % 2 == 0) ? g_pcSetA : g_pcSetB;
-        writeSet(set, {src, dst, &pl.w, &pl.b});
         ConvPC cpc{ pl.inC, pl.outC, inW, inH, outW, outH, pl.stride, 1 };
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pcPipe);
-        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pcPL, 0, 1, &set, 0, nullptr);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pcPL, 0, 1, &g_pcSets[l], 0, nullptr);
         vkCmdPushConstants(g_cmd, g_pcPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cpc), &cpc);
         vkCmdDispatch(g_cmd, (uint32_t)((outW + 15) / 16), (uint32_t)((outH + 15) / 16), (uint32_t)pl.outC);
         cmdBarrierRW();
@@ -2476,8 +2555,6 @@ API int fp_run_proposer(float progress) {
         dst = (dst == &g_propA) ? &g_propB : &g_propA;
     }
 
-    writeSet(g_phSet, {src, &g_pMixW, &g_pMixB, &g_pGeoW, &g_pGeoB, &g_pAlpW, &g_pAlpB, &g_propMap,
-                       &g_pCnfW, &g_pCnfB});
     PropHeadPC hpc{ g_propChan, inW, inH, g_propW, g_propH, g_propHeads, g_propPool, g_propProgress };
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_phPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_phPL, 0, 1, &g_phSet, 0, nullptr);
@@ -3257,6 +3334,25 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
         for (size_t i = 0; i < (size_t)g_pn * 4; i++) dst[i] = (float)col[i];
     }
     memcpy(base + oB, bbx, szB); // bbx + boff(int32) feed the tiled forward/hard passes
+    // Widest slice count over the CURRENT boxes. Pass B is dispatched (n, PBSLICES) but each
+    // workgroup returns at once when its slice index is past its own shape's sliceCount — at 3000
+    // shapes that is 192k workgroups of which only a few thousand ever read a pixel. The host
+    // already has the boxes right here, and sliceCount is a pure function of the box, so capping
+    // the dispatch height at the widest one drops only workgroups that were guaranteed to return.
+    // Bit-identical by construction. pc.slices stays PBSLICES so sliceCount itself is unchanged
+    // (polish_backward_combine computes the same value from the same cap).
+    {
+        int mx = 1;
+        for (int i = 0; i < g_pn; i++) {
+            int bw = bbx[i * 4 + 2] - bbx[i * 4 + 0] + 1, bh = bbx[i * 4 + 3] - bbx[i * 4 + 1] + 1;
+            long long total = (bw < 1 || bh < 1) ? 0 : (long long)bw * bh;
+            int s = (int)((total + PBSLICE_PX - 1) / PBSLICE_PX);
+            if (s < 1) s = 1;
+            if (s > PBSLICES) s = PBSLICES;
+            if (s > mx) mx = s;
+        }
+        g_pMaxSlices = mx;
+    }
     {
         int32_t* dst = (int32_t*)(base + oO);
         for (int i = 0; i < g_pn; i++) dst[i] = (int32_t)boff[i];
@@ -3371,7 +3467,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbReduce);
         vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
         vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
-        vkCmdDispatch(g_cmd, (uint32_t)g_pn, (uint32_t)PBSLICES, 1);
+        vkCmdDispatch(g_cmd, (uint32_t)g_pn, (uint32_t)g_pMaxSlices, 1);
         cmdBarrierRW();
         // Pass C: sum each shape's slice partials in ascending slice order -> pgrad
         vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbCombine);
@@ -3414,7 +3510,7 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
             vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbReduce);
             vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
             vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
-            vkCmdDispatch(g_cmd, (uint32_t)cnt, (uint32_t)PBSLICES, 1);
+            vkCmdDispatch(g_cmd, (uint32_t)cnt, (uint32_t)g_pMaxSlices, 1);
             endSubmit();
         }
         polishCost(PCH_REDUCE, std::chrono::duration<double>(std::chrono::steady_clock::now() - tr).count(), g_pn);

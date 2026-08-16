@@ -6,14 +6,18 @@
 // would instead mis-pick on low-resolution noise. One workgroup per partition.
 // Mirrors shim.cu coarsePartitionMin.
 
-layout(local_size_x = 128) in;
+// 32 threads, not 128. A partition holds n/parts candidates — at the shipped 50k pool and
+// kpart=2048 that is ~24, so 104 of every 128 lanes did nothing but two more tree levels. The
+// selection is a min over the TOTAL order (value, then index), so it does not depend on how the
+// lanes are assigned or on the shape of the reduction: same survivor, byte for byte.
+layout(local_size_x = 32) in;
 layout(std430, binding = 0) readonly  buffer Ad { float adj[]; };
 layout(std430, binding = 1) writeonly buffer Se { int   selIdx[]; };
 layout(push_constant) uniform PC { int n; int parts; } pc;
 
 const float REJECTED = 3.4028235e38;
-shared float sv[128];
-shared int si[128];
+shared float sv[32];
+shared int si[32];
 
 void main() {
     int b = int(gl_WorkGroupID.x);
@@ -23,13 +27,13 @@ void main() {
     int hi = ((b + 1) * pc.n) / pc.parts;
     uint t = gl_LocalInvocationID.x;
     float bv = REJECTED; int bi = -1;
-    for (int i = lo + int(t); i < hi; i += 128) {
+    for (int i = lo + int(t); i < hi; i += 32) {
         float v = adj[i];
         if (v < bv || (v == bv && bi >= 0 && i < bi)) { bv = v; bi = i; }
     }
     sv[t] = bv; si[t] = bi;
     barrier();
-    for (uint s = 64u; s > 0u; s >>= 1) {
+    for (uint s = 16u; s > 0u; s >>= 1) {
         if (t < s) {
             float ov = sv[t + s]; int oi = si[t + s];
             if (ov < sv[t] || (ov == sv[t] && oi >= 0 && (si[t] < 0 || oi < si[t]))) { sv[t] = ov; si[t] = oi; }

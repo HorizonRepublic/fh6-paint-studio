@@ -352,7 +352,12 @@ func (g *Vulkan) ApplyBatch(cands []model.Candidate) bool {
 	if len(cands) == 0 {
 		return true
 	}
-	buf := make([]float32, len(cands)*candStride)
+	// Same reused staging as Apply/Evaluate — this runs per batch, not per run.
+	need := len(cands) * candStride
+	if cap(g.candBuf) < need {
+		g.candBuf = make([]float32, need)
+	}
+	buf := g.candBuf[:need]
 	for i, c := range cands {
 		packCand(c, buf[i*candStride:(i+1)*candStride])
 	}
@@ -932,7 +937,14 @@ func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKin
 	if g.procSearchMom == nil || len(kinds) == 0 || n < 1 || centers < 1 {
 		return model.Candidate{}, 0, false
 	}
-	cdf := make([]float32, len(grid))
+	// Reuse the same scratch SearchRandom does. The moment search is the PRODUCT default (the
+	// nextgen hybrid runs it below MomentDetailStart), so it was allocating a fresh w*h CDF, a
+	// kinds slice and the out buffer on every placed shape — thousands of large allocations a run
+	// on the hot path, while its sibling had reused buffers for exactly this reason.
+	if cap(g.searchCDF) < len(grid) {
+		g.searchCDF = make([]float32, len(grid))
+	}
+	cdf := g.searchCDF[:len(grid)]
 	var tot float32
 	for i, v := range grid {
 		if v < 0 {
@@ -941,13 +953,19 @@ func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKin
 		tot += v
 		cdf[i] = tot
 	}
-	kf := make([]float32, len(kinds))
+	if cap(g.searchKF) < len(kinds) {
+		g.searchKF = make([]float32, len(kinds))
+	}
+	kf := g.searchKF[:len(kinds)]
 	for i, k := range kinds {
 		kf[i] = float32(k)
 	}
 	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers)}
 	fp := []float32{maxR, alphaMin, 0, boundPad, boundMix, canvasPad}
-	out := make([]float32, 12)
+	if cap(g.searchOut) < 12 {
+		g.searchOut = make([]float32, 12)
+	}
+	out := g.searchOut[:12]
 	if len(kindCDF) == 0 || len(cdf) == 0 {
 		return model.Candidate{}, 0, false
 	}
