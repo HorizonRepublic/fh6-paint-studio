@@ -3,7 +3,10 @@ package imageio
 import (
 	"encoding/binary"
 	"image"
+	"image/draw"
 	"io"
+	"runtime"
+	"sync"
 )
 
 // EXIF orientation. Phone JPEGs store the sensor's raw pixels plus a rotation tag; every viewer
@@ -115,30 +118,73 @@ func applyOrientation(img image.Image, o int) image.Image {
 	if o >= 5 { // the four transposed orientations swap the axes
 		ow, oh = h, w
 	}
-	dst := image.NewNRGBA(image.Rect(0, 0, ow, oh))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			var dx, dy int
-			switch o {
-			case 2: // mirror horizontal
-				dx, dy = w-1-x, y
-			case 3: // rotate 180
-				dx, dy = w-1-x, h-1-y
-			case 4: // mirror vertical
-				dx, dy = x, h-1-y
-			case 5: // transpose
-				dx, dy = y, x
-			case 6: // rotate 90 CW
-				dx, dy = h-1-y, x
-			case 7: // transverse
-				dx, dy = h-1-y, w-1-x
-			case 8: // rotate 270 CW
-				dx, dy = y, w-1-x
-			default:
-				dx, dy = x, y
-			}
-			dst.Set(dx, dy, img.At(b.Min.X+x, b.Min.Y+y))
-		}
+	// Convert ONCE through draw.Draw (which has the stdlib's type-specific fast paths, including
+	// the YCbCr one every phone JPEG needs) and then move bytes. The per-pixel img.At() this
+	// replaced boxed a color.Color for every pixel and dst.Set() re-did the colour conversion for
+	// every pixel — 12M interface allocations on a 12MP photo, before the fit had even started.
+	src, ok := img.(*image.NRGBA)
+	if !ok {
+		src = image.NewNRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(src, src.Bounds(), img, b.Min, draw.Src)
 	}
+	dst := image.NewNRGBA(image.Rect(0, 0, ow, oh))
+	// Source rows map to disjoint destination pixels under every one of the eight transforms, so
+	// the row split writes the same bytes to the same places.
+	rows(h, func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			si := src.PixOffset(src.Rect.Min.X, src.Rect.Min.Y+y)
+			for x := 0; x < w; x++ {
+				var dx, dy int
+				switch o {
+				case 2: // mirror horizontal
+					dx, dy = w-1-x, y
+				case 3: // rotate 180
+					dx, dy = w-1-x, h-1-y
+				case 4: // mirror vertical
+					dx, dy = x, h-1-y
+				case 5: // transpose
+					dx, dy = y, x
+				case 6: // rotate 90 CW
+					dx, dy = h-1-y, x
+				case 7: // transverse
+					dx, dy = h-1-y, w-1-x
+				case 8: // rotate 270 CW
+					dx, dy = y, w-1-x
+				default:
+					dx, dy = x, y
+				}
+				di := dst.PixOffset(dx, dy)
+				copy(dst.Pix[di:di+4], src.Pix[si+x*4:si+x*4+4])
+			}
+		}
+	})
 	return dst
+}
+
+// rows runs fn over row bands [y0,y1) of h, one band per CPU. The bands write disjoint output, so
+// this is a pure scheduling change.
+func rows(h int, fn func(y0, y1 int)) {
+	nb := runtime.GOMAXPROCS(0)
+	if nb > h {
+		nb = h
+	}
+	if nb <= 1 {
+		fn(0, h)
+		return
+	}
+	per := (h + nb - 1) / nb
+	var wg sync.WaitGroup
+	for b := 0; b < nb; b++ {
+		y0 := b * per
+		if y0 >= h {
+			break
+		}
+		y1 := y0 + per
+		if y1 > h {
+			y1 = h
+		}
+		wg.Add(1)
+		go func(a, b int) { defer wg.Done(); fn(a, b) }(y0, y1)
+	}
+	wg.Wait()
 }

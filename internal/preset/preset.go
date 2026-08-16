@@ -175,6 +175,11 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		prep.Pixels = binar // local copy only — md/sp/weight below now fit the clean mono mask
 		prep.HasTransparency = true
 		monoLock, transparent, resolved, flatMode = &lc, true, "flat", true
+		// cs was measured on the ORIGINAL pixels, and cs.Colors is what picks the flat sub-preset
+		// (vector vs textured). After binarization the target is two colours — a clean vector mask —
+		// so leaving the old palette count in place tuned the mono run for artwork that no longer
+		// exists. Re-measure what the engine will actually fit.
+		cs = metric.ContentClass(prep.Pixels, w, h)
 	}
 
 	// All benchmark-hardwired per-mode constants come from ModeDefaultsFor (the single source of truth

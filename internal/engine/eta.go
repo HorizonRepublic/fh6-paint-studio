@@ -138,7 +138,11 @@ func passWeight(p pass, opt Options) float64 {
 
 // newETA plans the run: the greedy loop, then every pass that is actually enabled. A pass that will
 // not run must not hold weight, or the bar stalls at the end waiting for work that never comes.
-func newETA(opt Options, start time.Time, emit func(PhaseProgress)) *etaTracker {
+// masks = the run's own masksReady verdict. The shade and word pre-passes announce themselves only
+// when the backend can score mask words, so listing them on the option alone left the plan one
+// phase longer than the run — and a plan the run never finishes entering is a bar that never
+// reaches 100%.
+func newETA(opt Options, masks bool, start time.Time, emit func(PhaseProgress)) *etaTracker {
 	if emit == nil {
 		return nil
 	}
@@ -146,10 +150,10 @@ func newETA(opt Options, start time.Time, emit func(PhaseProgress)) *etaTracker 
 	if opt.SmoothBase {
 		t.phases = append(t.phases, etaPhase{"Claiming smooth regions…", 15})
 	}
-	if opt.ShadePrepass {
+	if opt.ShadePrepass && masks {
 		t.phases = append(t.phases, etaPhase{"Claiming shading…", 4})
 	}
-	if opt.GlyphPrepass {
+	if opt.GlyphPrepass && masks {
 		t.phases = append(t.phases, etaPhase{"Claiming words…", 1})
 	}
 	t.phases = append(t.phases, etaPhase{"Placing shapes…", greedyWeight})

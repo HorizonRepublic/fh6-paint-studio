@@ -419,7 +419,10 @@ func init() {
 }
 
 func srgbByte(v float32) uint8 {
-	if v <= 0 {
+	// !(v > 0), not v <= 0: NaN fails every comparison, so it used to reach the table index below,
+	// where int(NaN) is a huge negative number and the preview encode panicked out of a goroutine
+	// with nothing to attribute it to. A NaN pixel is already lost — encode it as black.
+	if !(v > 0) {
 		return 0
 	}
 	if v >= 1 {
@@ -440,19 +443,63 @@ func srgbByte(v float32) uint8 {
 // dst (len(dst) == len(px)), skipping the intermediate float slice EncodeForDisplay allocates.
 // Alpha passes through unencoded, as everywhere else.
 func EncodeDisplayBytes(px []float32, dst []uint8) {
+	n := len(px)
+	if len(dst) < n {
+		n = len(dst)
+	}
+	n -= n % 4
+	if n <= 0 {
+		return
+	}
+	// This runs on every live preview frame and the preview is throttled to a WALL budget, so
+	// making it cheaper turns straight into generation throughput: the frames it no longer costs
+	// are frames the greedy gets back. Pixels are independent, so the band split is a scheduling
+	// change only. The linear branch is hoisted out of the loop — it was a global read per pixel.
 	linear := model.LinearLight
-	for i := 0; i+3 < len(px) && i+3 < len(dst); i += 4 {
+	encRows(n/4, func(p0, p1 int) {
 		if linear {
-			dst[i+0] = srgbByte(px[i+0])
-			dst[i+1] = srgbByte(px[i+1])
-			dst[i+2] = srgbByte(px[i+2])
-		} else {
+			for i := p0 * 4; i < p1*4; i += 4 {
+				dst[i+0] = srgbByte(px[i+0])
+				dst[i+1] = srgbByte(px[i+1])
+				dst[i+2] = srgbByte(px[i+2])
+				dst[i+3] = u8(px[i+3])
+			}
+			return
+		}
+		for i := p0 * 4; i < p1*4; i += 4 {
 			dst[i+0] = u8(px[i+0])
 			dst[i+1] = u8(px[i+1])
 			dst[i+2] = u8(px[i+2])
+			dst[i+3] = u8(px[i+3])
 		}
-		dst[i+3] = u8(px[i+3])
+	})
+}
+
+// encRows splits n pixels into one band per CPU. Below encMinParallel the goroutine handshake
+// costs more than the work, so a small preview stays on one core.
+const encMinParallel = 1 << 15
+
+func encRows(n int, fn func(p0, p1 int)) {
+	nb := runtime.GOMAXPROCS(0)
+	if n < encMinParallel || nb <= 1 {
+		fn(0, n)
+		return
 	}
+	per := (n + nb - 1) / nb
+	var wg sync.WaitGroup
+	for b := 0; b < nb; b++ {
+		p0 := b * per
+		if p0 >= n {
+			break
+		}
+		p1 := p0 + per
+		if p1 > n {
+			p1 = n
+		}
+		wg.Add(1)
+		go func(a, b int) { defer wg.Done(); fn(a, b) }(p0, p1)
+	}
+	wg.Wait()
 }
 
 func SavePreview(path string, px []float32, w, h int) error {

@@ -403,7 +403,17 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		// error. This was the one path that still aliased.
 		pr = PolishResult{Shapes: cloneShapes(shapes)}
 	}
-	recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
+	// recolorVisible assumes opaque replace-ownership: it re-solves each shape's colour from the
+	// pixels it "owns", which a translucent shape does not own. The other two call sites
+	// (run.postProcess, backFit) both gate it on !allowAlpha for exactly that reason and say so;
+	// this one did not, so on the two shipped organic presets — which both set AllowAlpha — every
+	// polish was followed by a mis-tinting recolor. Worse, the two are gated as ONE unit below, so
+	// a polish that improved the image was thrown away whenever the recolor after it lost.
+	// FH6_PRECOLOR=0 pins the old behaviour (its own pin, not the rankfix family: the two land on
+	// the same runs and had to be measurable apart).
+	if !polishRecolorGate || !(opt.AllowAlpha && !opt.TransparentBG) {
+		recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
+	}
 	_ = be.Reset(initCanvas)
 	applyShapes(be, pr.Shapes[1:])
 	g2, _, _, _ := be.ErrorGrid()

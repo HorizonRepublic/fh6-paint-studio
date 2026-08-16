@@ -102,6 +102,7 @@ type run struct {
 	persist    *persistCtx
 	salient    []bool // lazy saliency-quota cell mask (see saliency.go)
 	glyphs     bool   // glyph-dictionary proposer active (Options.GlyphDict + a mask-capable backend)
+	batch      *batchEnv
 	initialErr float64
 	finalErr   float64
 
@@ -119,6 +120,12 @@ func Run(be backend.Backend, opt Options) Result {
 	runStart := time.Now()
 	r := newRun(be, opt)
 	defer r.eta.stop()
+	// Disarm the survivor export before anything else touches the backend: the post-passes run
+	// their own searches and would keep paying for a pool nobody reads.
+	defer r.batch.close()
+	// The hard-edge memo holds a full w*h plane plus a pointer into this run's target. Both are
+	// dead the moment the run is, and engined/the studio outlive many runs.
+	defer metric.ReleaseMaps()
 	if opt.LiveBatch > 0 {
 		r.live() // EXPERIMENTAL co-adaptation scheduler for the structural base...
 		if len(r.shapes)-1 < r.genTarget {
@@ -179,13 +186,29 @@ func (r *run) deviceLost() bool {
 	return ok && dl.DeviceLost()
 }
 
+// masksReady reports whether the mask-word passes can actually run: they need both an option that
+// wants words and a backend that can score them. Kept as a function of (be, opt) alone so the ETA
+// plan and the run itself cannot disagree about which phases exist.
+func masksReady(be backend.Backend, opt Options) bool {
+	if !opt.GlyphDict && !opt.GlyphPrepass && !opt.ShadePrepass && !opt.SmoothBase {
+		return false
+	}
+	dme, ok := be.(deviceMaskEvaluator)
+	return ok && dme.MasksOnDevice()
+}
+
 // newRun builds the run state: it normalises the options, initialises the backend canvas and the
 // background shape, computes the initial error grid + importance sampler, resolves the hill-climb
 // schedule and the optional precomputed fields (orientation / detail / boundary), and wires up the
 // on-device search handles. It consumes no randomness — the RNG is first used in the greedy loop.
 func newRun(be backend.Backend, opt Options) *run {
 	var tm Timings
-	eta := newETA(opt, time.Now(), opt.OnPhase)
+	// Resolve mask support BEFORE planning the phases. The shade and word pre-passes each announce
+	// themselves only when the backend can score mask words, but the plan used to list them on the
+	// option alone — so on a backend without the atlas the run entered one phase fewer than planned
+	// and the bar could never reach 100%. That is the "crawls, then jumps" report.
+	glyphs := masksReady(be, opt)
+	eta := newETA(opt, glyphs, time.Now(), opt.OnPhase)
 	// The polish counts its own iterations, and so does every re-polish a later pass runs, so routing
 	// it here gives the estimate a live signal through the longest phases without each pass wiring one.
 	if eta != nil {
@@ -553,15 +576,24 @@ func newRun(be backend.Backend, opt Options) *run {
 	tm.Maps = mapsDur
 	tm.Setup = time.Since(setupStart) - mapsDur
 
-	glyphs := false
-	if opt.GlyphDict || opt.GlyphPrepass || opt.ShadePrepass || opt.SmoothBase {
-		if dme, ok := be.(deviceMaskEvaluator); ok && dme.MasksOnDevice() {
-			glyphs = true
+	// Batch placement is opt-in (FH6_BATCHK): it changes which shapes get placed, so it stays off
+	// until the owner has judged full frames. The pool it reads is the coarse filter's survivor
+	// set, so it needs that filter on.
+	var batch *batchEnv
+	if bk, bgain := batchKFromEnv(); bk > 1 && opt.CoarseSearch && os.Getenv("FH6_COARSE") != "0" {
+		pool := opt.CoarseK
+		if pool < 1 {
+			pool = 2048 // fp_set_coarse's own default when the option is unset
+		}
+		batch = newBatchEnv(be, bk, pool, bgain)
+		if batch != nil {
+			applog.Printf("batch placement: up to %d shapes per round (gain fraction %.2f)", bk, bgain)
 		}
 	}
 
 	return &run{
 		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm, eta: eta,
+		batch: batch,
 		kinds: kinds, kindWeights: kindWeights, kindCDF: kindCDF,
 		allowAlpha: allowAlpha, alphaMin: alphaMin, maxNI: maxNI, genTarget: genTarget,
 		moveStep: moveStep, radiusStep: radiusStep, rounds: rounds, perRound: perRound,
@@ -609,7 +641,7 @@ func (r *run) greedy() {
 		if r.devProp != nil {
 			if placed := len(r.shapes) - 1; placed%propEvery == 0 {
 				prog := float32(placed) / float32(maxInt(r.genTarget, 1))
-					// The SAME resolved fraction newRun installed: passing the raw option here used to
+				// The SAME resolved fraction newRun installed: passing the raw option here used to
 				// overwrite the 0.5 fallback with 0 on the FIRST iteration (placed=0 hits the
 				// refresh), silently disabling the proposer for the whole run.
 				frac := float32(r.opt.ProposerFrac)
@@ -673,10 +705,33 @@ func (r *run) greedy() {
 			}
 		}
 		noImprove = 0
+		// Batch placement (batchplace.go): the survivor pool this search already priced at the
+		// full budget still holds winners whose boxes miss this one, and disjoint boxes have
+		// exactly additive ΔSSE. Take them now instead of paying another 50k-candidate search.
+		var extras []model.Candidate
+		var extraScores []float32
+		if r.batch != nil {
+			if room := r.genTarget - (len(r.shapes) - 1) - 1; room > 0 {
+				extras, extraScores = r.batch.extras(best, bestScore, r.w, r.h, r.opt.MinShapeGain)
+				if len(extras) > room {
+					extras, extraScores = extras[:room], extraScores[:room]
+				}
+				if r.batch.refine && len(extras) > 0 {
+					r.refineExtras(extras, extraScores)
+				}
+			}
+		}
 		t0 := time.Now()
-		_ = r.be.Apply(best)
+		if len(extras) > 0 {
+			r.batchApply(best, extras)
+		} else {
+			_ = r.be.Apply(best)
+		}
 		r.tm.Apply += time.Since(t0)
 		r.shapes = append(r.shapes, best.ToShape(float64(bestScore)))
+		for i, c := range extras {
+			r.shapes = append(r.shapes, c.ToShape(float64(extraScores[i])))
+		}
 		t0 = time.Now()
 		r.grid, r.gw, r.gh, _ = r.be.ErrorGrid()
 		r.tm.ErrorGrid += time.Since(t0)
@@ -703,6 +758,8 @@ func (r *run) greedy() {
 	if r.opt.FoBaEvery > 0 {
 		applog.Printf("foba: %d shapes dropped mid-greedy in total", r.fobaDropped)
 	}
+	// Only the greedy reads the survivor pool; the post-passes would keep paying for the copy.
+	r.batch.close()
 }
 
 // searchOne finds the best candidate for the next shape. It delegates the candidate generation and

@@ -160,9 +160,18 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 		owner1[i] = -1
 		owner2[i] = -1
 	}
+	// Per-shape geometry, kept for the second pass: a gradient's effective alpha is its declared
+	// alpha times the per-pixel falloff, so the pixel loop below needs the kind and params again.
+	kinds := make([]model.ShapeKind, n)
+	params := make([][6]float32, n)
+	grad := make([]bool, n)
+	for j := 0; j < n; j++ {
+		kinds[j] = model.KindFromType(shapes[j].Type)
+		params[j] = model.ParamsFromShape(shapes[j])
+		grad[j] = raster.IsGradient(kinds[j])
+	}
 	for j := n - 1; j >= 1; j-- {
-		kind := model.KindFromType(shapes[j].Type)
-		p := model.ParamsFromShape(shapes[j])
+		kind, p := kinds[j], params[j]
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
@@ -170,7 +179,15 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 				if owner1[idx] != -1 && owner2[idx] != -1 {
 					continue
 				}
-				if !raster.Inside(kind, p, x, y) {
+				// A glow's footprint is an ellipse but its coverage falls to zero at the rim, so
+				// membership by Inside made the whole ellipse an owner and priced the shape as a
+				// uniform fill — the same defect the pruneOccluded rankfix cured. Own a pixel only
+				// where the shape still writes something a byte can hold.
+				if blendContribFix && grad[j] {
+					if raster.Coverage(kind, p, x, y) < 1.0/255 {
+						continue
+					}
+				} else if !raster.Inside(kind, p, x, y) {
 					continue
 				}
 				if owner1[idx] == -1 {
@@ -219,14 +236,34 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 
 		// Color beneath j: owner2, or the fallback (empty for cutouts, bg otherwise).
 		var rr, rg, rb float64
-		if o2 := owner2[idx]; o2 >= 1 {
-			rr, rg, rb = cr[o2], cg[o2], cb[o2]
-		} else if transparent {
+		if transparent {
 			rr, rg, rb = 0, 0, 0
 		} else {
 			rr, rg, rb = bgr, bgg, bgb
 		}
+		if o2 := owner2[idx]; o2 >= 1 {
+			if blendContribFix {
+				// owner2 does not replace what is under IT either: composite it over the
+				// fallback with its own effective alpha, so a faint layer under j is not
+				// credited as if it were opaque.
+				a2 := ca[o2]
+				if grad[o2] {
+					a2 *= raster.Coverage(kinds[o2], params[o2], idx%w, idx/w)
+				}
+				rr = a2*cr[o2] + (1-a2)*rr
+				rg = a2*cg[o2] + (1-a2)*rg
+				rb = a2*cb[o2] + (1-a2)*rb
+			} else {
+				rr, rg, rb = cr[o2], cg[o2], cb[o2]
+			}
+		}
 		a := ca[j]
+		if blendContribFix && grad[j] {
+			// A glow at alpha 255 still writes only its falloff. Pricing it at a flat alpha
+			// over the whole ellipse overstated what removing it would cost, so the ranking
+			// protected soft shapes that were barely contributing.
+			a *= raster.Coverage(kinds[j], params[j], idx%w, idx/w)
+		}
 		// Error with j present (alpha blend over the color beneath).
 		wr, wg, wb := a*cr[j]+(1-a)*rr, a*cg[j]+(1-a)*rg, a*cb[j]+(1-a)*rb
 		dr, dg, db := tr-wr, tg-wg, tb-wb

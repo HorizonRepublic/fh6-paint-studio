@@ -21,10 +21,16 @@ func OrientationCoherenceMap(target []float32, w, h int) (orient, coherence []fl
 }
 
 func orientationTensor(target []float32, w, h int, coh []float32) []float32 {
+	// Every loop here writes one output per pixel and reads only the input, so a row-band split
+	// reproduces the serial order exactly — same values, same order, byte-identical. This map is
+	// built unconditionally on every run in serial float64 (Sobel, then a 3x3 box, then an Atan2
+	// per pixel), which at the 4096 fit cap is tens of millions of transcendentals on one core.
 	lum := make([]float32, w*h)
-	for i := 0; i < w*h; i++ {
-		lum[i] = Luma(target[i*4], target[i*4+1], target[i*4+2])
-	}
+	heRows(h, func(y0, y1 int) {
+		for i := y0 * w; i < y1*w; i++ {
+			lum[i] = Luma(target[i*4], target[i*4+1], target[i*4+2])
+		}
+	})
 	at := func(x, y int) float64 {
 		if x < 0 {
 			x = 0
@@ -42,16 +48,18 @@ func orientationTensor(target []float32, w, h int, coh []float32) []float32 {
 	jxx := make([]float64, w*h)
 	jyy := make([]float64, w*h)
 	jxy := make([]float64, w*h)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			gx := (at(x+1, y-1) + 2*at(x+1, y) + at(x+1, y+1)) - (at(x-1, y-1) + 2*at(x-1, y) + at(x-1, y+1))
-			gy := (at(x-1, y+1) + 2*at(x, y+1) + at(x+1, y+1)) - (at(x-1, y-1) + 2*at(x, y-1) + at(x+1, y-1))
-			i := y*w + x
-			jxx[i] = gx * gx
-			jyy[i] = gy * gy
-			jxy[i] = gx * gy
+	heRows(h, func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := 0; x < w; x++ {
+				gx := (at(x+1, y-1) + 2*at(x+1, y) + at(x+1, y+1)) - (at(x-1, y-1) + 2*at(x-1, y) + at(x-1, y+1))
+				gy := (at(x-1, y+1) + 2*at(x, y+1) + at(x+1, y+1)) - (at(x-1, y-1) + 2*at(x, y-1) + at(x+1, y-1))
+				i := y*w + x
+				jxx[i] = gx * gx
+				jyy[i] = gy * gy
+				jxy[i] = gx * gy
+			}
 		}
-	}
+	})
 	// Smooth the tensor with a 3x3 box so orientation is locally coherent.
 	box := func(src []float64, x, y int) float64 {
 		var s float64
@@ -76,25 +84,31 @@ func orientationTensor(target []float32, w, h int, coh []float32) []float32 {
 	}
 	out := make([]float32, w*h)
 	const rad2deg = 180 / math.Pi
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			i := y*w + x
-			sxx := box(jxx, x, y)
-			syy := box(jyy, x, y)
-			sxy := box(jxy, x, y)
-			// Eigenvector of the smaller eigenvalue = along-edge direction.
-			ang := 0.5 * math.Atan2(2*sxy, sxx-syy) // direction of max change (gradient)
-			along := ang*rad2deg + 90               // rotate 90° -> along the edge
-			along = math.Mod(along, 180)
-			if along < 0 {
-				along += 180
-			}
-			out[i] = float32(along)
-			if coh != nil {
-				coh[i] = float32(tensorCoherence(sxx, syy, sxy))
+	heRows(h, func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := 0; x < w; x++ {
+				i := y*w + x
+				sxx := box(jxx, x, y)
+				syy := box(jyy, x, y)
+				sxy := box(jxy, x, y)
+				// Eigenvector of the smaller eigenvalue = along-edge direction.
+				ang := 0.5 * math.Atan2(2*sxy, sxx-syy) // direction of max change (gradient)
+				along := ang*rad2deg + 90               // rotate 90° -> along the edge
+				// atan2 returns (-pi,pi], so `along` is within (-90, 270] and one compare-subtract
+				// lands it in [0,180) exactly where math.Mod did — Mod is a full remainder with
+				// argument reduction, called once per pixel for a range this loop already knows.
+				if along >= 180 {
+					along -= 180
+				} else if along < 0 {
+					along += 180
+				}
+				out[i] = float32(along)
+				if coh != nil {
+					coh[i] = float32(tensorCoherence(sxx, syy, sxy))
+				}
 			}
 		}
-	}
+	})
 	return out
 }
 

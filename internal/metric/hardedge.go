@@ -11,6 +11,41 @@ import (
 	"fh6-paint-studio/internal/model"
 )
 
+// cellRows runs fn over row bands of h that each own WHOLE cell-rows, one band per CPU. Every cell
+// is therefore accumulated entirely within one band, in row-major order — the exact order the
+// serial loop used — so per-cell float sums stay bit-identical (addition is not associative) and
+// bands touch disjoint cells. For the cell-accumulating loops; heRows is for per-pixel outputs.
+func cellRows(h, cell int, fn func(y0, y1 int)) {
+	ch := (h + cell - 1) / cell
+	nb := runtime.GOMAXPROCS(0)
+	if nb > ch {
+		nb = ch
+	}
+	if nb <= 1 {
+		fn(0, h)
+		return
+	}
+	per := (ch + nb - 1) / nb
+	var wg sync.WaitGroup
+	for b := 0; b < nb; b++ {
+		cy0 := b * per
+		if cy0 >= ch {
+			break
+		}
+		cy1 := cy0 + per
+		if cy1 > ch {
+			cy1 = ch
+		}
+		y0, y1 := cy0*cell, cy1*cell
+		if y1 > h {
+			y1 = h
+		}
+		wg.Add(1)
+		go func(a, b int) { defer wg.Done(); fn(a, b) }(y0, y1)
+	}
+	wg.Wait()
+}
+
 // heRows runs fn over row bands [y0,y1) of h, one per CPU, concurrently. For loops whose rows write
 // disjoint outputs and carry no cross-row reduction.
 func heRows(h int, fn func(y0, y1 int)) {
@@ -93,8 +128,11 @@ func HardEdgeMap(target []float32, w, h int) []float32 {
 	// map, term weight, kind gate) at ~3 pow + a 27-tap Sobel per pixel — ~50M pow at the 4096
 	// cap. Keyed on the slice identity + dims; a fresh COPY is returned so callers stay free to
 	// scribble on their map. Bit-identical by construction (memoisation of a pure function).
+	if len(target) == 0 || w <= 0 || h <= 0 {
+		return nil // the memo keys on &target[0]; an empty target indexed out of range
+	}
 	heMemo.mu.Lock()
-	if heMemo.w == w && heMemo.h == h && len(target) > 0 && heMemo.key == &target[0] {
+	if heMemo.w == w && heMemo.h == h && heMemo.key == &target[0] {
 		out := make([]float32, len(heMemo.val))
 		copy(out, heMemo.val)
 		heMemo.mu.Unlock()
@@ -115,6 +153,16 @@ var heMemo struct {
 	key  *float32
 	w, h int
 	val  []float32
+}
+
+// ReleaseMaps drops the HardEdgeMap memo. It holds one w*h float32 plane AND a pointer into the
+// target for the process lifetime — 64MB at the 4096 fit cap, per image, kept alive long after the
+// run that built it (the studio and engined are long-lived processes that fit many images).
+// Call it when a run's target goes out of scope.
+func ReleaseMaps() {
+	heMemo.mu.Lock()
+	heMemo.key, heMemo.w, heMemo.h, heMemo.val = nil, 0, 0, nil
+	heMemo.mu.Unlock()
 }
 
 func hardEdgeMapUncached(target []float32, w, h int) []float32 {

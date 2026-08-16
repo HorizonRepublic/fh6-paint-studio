@@ -75,7 +75,7 @@ const (
 var refineScaleGain = os.Getenv("FH6_SKEW_SCALE") == "1"
 
 const (
-	refineTile   = 64
+	refineTile = 64
 	// refineSweeps is how many times the parameter list is walked. Parameters interact — moving a
 	// centre changes the best width — but the second sweep finds far less than the first, and a third
 	// costs another full pass for almost nothing.

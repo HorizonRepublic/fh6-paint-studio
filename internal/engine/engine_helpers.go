@@ -174,6 +174,15 @@ func opaqueShape(s model.Shape) bool {
 // contribution rankings mixing raw sRGB colour bytes with the linear-light target.
 var rankFixOn = os.Getenv("FH6_RANKFIX") != "0"
 
+// blendContribFix: shapeContributionsBlend prices a gradient by its per-pixel falloff rather than
+// as a uniform fill over its whole footprint, and composites the layer beneath with ITS alpha
+// instead of treating it as opaque. FH6_BFCONTRIB=0 restores the old ranking.
+var blendContribFix = os.Getenv("FH6_BFCONTRIB") != "0"
+
+// polishRecolorGate: applyPolish skips recolorVisible when the preset allows translucent shapes,
+// matching the two other call sites. FH6_PRECOLOR=0 restores the unconditional recolor.
+var polishRecolorGate = os.Getenv("FH6_PRECOLOR") != "0"
+
 // pickBest evaluates a candidate batch and returns the lowest-score candidate
 // (with the backend's optimal color merged in) and its RAW score. When penalty is
 // non-nil, selection uses score+penalty(candidate) but the RAW score is returned
