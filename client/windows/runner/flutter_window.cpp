@@ -2,6 +2,7 @@
 
 #include <commctrl.h>
 
+#include <shobjidl_core.h>
 #include <windowsx.h>
 
 #include <atomic>
@@ -10,6 +11,26 @@
 #include "flutter/generated_plugin_registrant.h"
 
 namespace {
+
+// The taskbar button, created on first use and held for the process. COM is
+// already initialised by the Flutter runner, so this only has to ask for the
+// object. A null return means the shell is not available (a rare session type,
+// or the shell restarted) — every caller treats progress as optional.
+ITaskbarList3* ShellTaskbar() {
+  static ITaskbarList3* bar = [] {
+    ITaskbarList3* p = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(&p)))) {
+      return static_cast<ITaskbarList3*>(nullptr);
+    }
+    if (p && FAILED(p->HrInit())) {
+      p->Release();
+      return static_cast<ITaskbarList3*>(nullptr);
+    }
+    return p;
+  }();
+  return bar;
+}
 
 // Kept in step with win32_window.cpp and lib/ui/window.dart.
 constexpr int kCaptionHeightDip = 52;
@@ -118,6 +139,27 @@ bool FlutterWindow::OnCreate() {
             fw.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
             fw.uCount = 3;
             FlashWindowEx(&fw);
+          }
+        } else if (name == "progress") {
+          // The taskbar button IS the progress bar for a job the user walks
+          // away from — a fit runs for minutes and they are usually alt-tabbed
+          // into the game. Explorer copies and browser downloads set the same
+          // state, so it needs no explaining.
+          //
+          // Argument: 0..1 while running, -1 to clear, -2 for the error state.
+          if (const auto* v = std::get_if<double>(call.arguments())) {
+            if (auto* bar = ShellTaskbar()) {
+              if (*v < -1.5) {
+                bar->SetProgressState(hwnd, TBPF_ERROR);
+                bar->SetProgressValue(hwnd, 1, 1);
+              } else if (*v < 0) {
+                bar->SetProgressState(hwnd, TBPF_NOPROGRESS);
+              } else {
+                bar->SetProgressState(hwnd, TBPF_NORMAL);
+                bar->SetProgressValue(
+                    hwnd, static_cast<ULONGLONG>(*v * 1000.0), 1000);
+              }
+            }
           }
         } else if (name == "setControlsWidth") {
           if (const auto* w = std::get_if<int32_t>(call.arguments())) {

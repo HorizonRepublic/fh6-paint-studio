@@ -347,6 +347,33 @@ Win32Window::MessageHandler(HWND hwnd,
     case WM_NCACTIVATE:
       return DefWindowProc(hwnd, WM_NCACTIVATE, wparam, -1);
 
+    // A floor under the window. The UI carries fixed-width furniture — the
+    // expert sheet is 620 logical px, the log drawer 720, the rail 92 — so a
+    // window dragged below that does not reflow, it overflows: clipped controls
+    // and Flutter's overflow stripes. Scaled by the window's own DPI so the
+    // limit means the same thing at 100% and 150%.
+    case WM_GETMINMAXINFO: {
+      const UINT dpi = FlutterDesktopGetDpiForHWND(hwnd);
+      const double scale = dpi / 96.0;
+      auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+      // 1100x680, not a guess: client/test/command_bar_test.dart pumps the whole
+      // shell at exactly this size in all twelve locales and fails on any
+      // RenderFlex overflow. 900 was picked from panel widths alone and the
+      // header overran it by up to 348px in German.
+      //
+      // Clamped to the work area so a 1366x768 laptop at 150% scaling can still
+      // size the window down to its own screen.
+      RECT work = {};
+      SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+      const LONG wantX = static_cast<LONG>(1100 * scale);
+      const LONG wantY = static_cast<LONG>(680 * scale);
+      const LONG maxX = work.right - work.left;
+      const LONG maxY = work.bottom - work.top;
+      info->ptMinTrackSize.x = (maxX > 0 && wantX > maxX) ? maxX : wantX;
+      info->ptMinTrackSize.y = (maxY > 0 && wantY > maxY) ? maxY : wantY;
+      return 0;
+    }
+
     case WM_DPICHANGED: {
       auto newRectSize = reinterpret_cast<RECT*>(lparam);
       LONG newWidth = newRectSize->right - newRectSize->left;
