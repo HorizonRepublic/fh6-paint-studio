@@ -68,9 +68,12 @@ jobs:
         working-directory: client
     steps:
       - uses: actions/checkout@v7
+      # Same exact pin as release-build.yml — CI must exercise the SDK the release ships, or a
+      # green check validates a runtime users never receive.
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.47.0
           cache: true
       - run: flutter pub get
       # Warnings fail the build. The analyzer is the only static check this half has -- there is no
