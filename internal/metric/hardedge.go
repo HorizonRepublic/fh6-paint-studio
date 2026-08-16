@@ -67,6 +67,17 @@ var hardEdgeTau, hardDensSat, hardCohFloor = func() (float64, float64, float64) 
 	return tau, dens, coh
 }()
 
+// encSRGB encodes a working-space channel to sRGB for the perceptual maps. Under -linear=false
+// the working pixels ARE sRGB already — encoding unconditionally double-encoded them, silently
+// invalidating the sRGB A/B arm (the shipped default is linear, where this is a plain encode;
+// weight.go's PerceptualLuma gate is the same contract).
+func encSRGB(v float32) float32 {
+	if model.LinearLight {
+		return model.LinearToSRGB(v)
+	}
+	return v
+}
+
 // HardEdgeMap returns, per pixel, how much the local target neighbourhood is HARD-EDGED STRUCTURE
 // (line-work, spikes/wedges, geometric borders) in [0,1] — the regions where hard-cornered shape
 // kinds (rectangle/triangle) earn their keep. Smooth shading scores ~0: a rect/tri placed there
@@ -78,6 +89,35 @@ var hardEdgeTau, hardDensSat, hardCohFloor = func() (float64, float64, float64) 
 // orientations and keeps a floor, since corners are triangle territory). The cell grid is box-3x3
 // smoothed and bilinearly upsampled, so the gate has no cell-boundary steps. len = w*h.
 func HardEdgeMap(target []float32, w, h int) []float32 {
+	// One-entry memo. An anime run builds this THREE times on the byte-identical target (ramp
+	// map, term weight, kind gate) at ~3 pow + a 27-tap Sobel per pixel — ~50M pow at the 4096
+	// cap. Keyed on the slice identity + dims; a fresh COPY is returned so callers stay free to
+	// scribble on their map. Bit-identical by construction (memoisation of a pure function).
+	heMemo.mu.Lock()
+	if heMemo.w == w && heMemo.h == h && len(target) > 0 && heMemo.key == &target[0] {
+		out := make([]float32, len(heMemo.val))
+		copy(out, heMemo.val)
+		heMemo.mu.Unlock()
+		return out
+	}
+	heMemo.mu.Unlock()
+	out := hardEdgeMapUncached(target, w, h)
+	heMemo.mu.Lock()
+	heMemo.key, heMemo.w, heMemo.h = &target[0], w, h
+	heMemo.val = make([]float32, len(out))
+	copy(heMemo.val, out)
+	heMemo.mu.Unlock()
+	return out
+}
+
+var heMemo struct {
+	mu   sync.Mutex
+	key  *float32
+	w, h int
+	val  []float32
+}
+
+func hardEdgeMapUncached(target []float32, w, h int) []float32 {
 	const cell = 12
 	edgeTau, densSat, cohFloor := hardEdgeTau, hardDensSat, hardCohFloor
 	// Perceptual per-channel planes: sRGB-encode each channel so shadow edges keep their visual
@@ -87,7 +127,7 @@ func HardEdgeMap(target []float32, w, h int) []float32 {
 	heRows(h, func(y0, y1 int) {
 		for i := y0 * w; i < y1*w; i++ {
 			for c := 0; c < 3; c++ {
-				chans[c][i] = model.LinearToSRGB(target[i*4+c])
+				chans[c][i] = encSRGB(target[i*4+c])
 			}
 		}
 	})

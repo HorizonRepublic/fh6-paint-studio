@@ -2,7 +2,9 @@ package engine
 
 import (
 	"math"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 
 	"fh6-paint-studio/internal/backend"
@@ -167,6 +169,11 @@ func opaqueShape(s model.Shape) bool {
 	return len(s.Color) >= 4 && s.Color[3] >= 255 && !raster.IsGradient(model.KindFromType(s.Type))
 }
 
+// rankFixOn gates the 2026-08-16 ranking-correctness pair as ONE pin (FH6_RANKFIX=0 = the old
+// behaviour): (1) pruneOccluded treating an alpha-255 glow/disk as a solid occluder, (2) the
+// contribution rankings mixing raw sRGB colour bytes with the linear-light target.
+var rankFixOn = os.Getenv("FH6_RANKFIX") != "0"
+
 // pickBest evaluates a candidate batch and returns the lowest-score candidate
 // (with the backend's optimal color merged in) and its RAW score. When penalty is
 // non-nil, selection uses score+penalty(candidate) but the RAW score is returned
@@ -256,7 +263,16 @@ func planHillClimb(budget int) (rounds, perRound int) {
 	// and halving the round count halves the host round-trips per shape — the mutate phase is
 	// bound by host round-trip latency, not GPU compute. div=256 (≈19 rounds) is too coarse,
 	// so 128 is the sweet spot.
-	rounds = budget / 128
+	// NB that trade was measured when every round paid a host round trip. With the on-device
+	// hill climb (fp_search_mutate) the rounds are free of that cost, so the depth/breadth
+	// knee may sit elsewhere — FH6_HC_DIV overrides the divisor for paired A/Bs only.
+	div := 128
+	if v := os.Getenv("FH6_HC_DIV"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 8 {
+			div = n
+		}
+	}
+	rounds = budget / div
 	if rounds < 1 {
 		rounds = 1
 	}
@@ -297,7 +313,11 @@ func pruneOccluded(shapes []model.Shape, w, h int) []model.Shape {
 			}
 		}
 		keep[j] = visible
-		opaque := len(s.Color) >= 4 && s.Color[3] >= 255
+		// opaqueShape, NOT a bare byte-alpha test: a glow/disk at alpha 255 still shows what is
+		// UNDER its transparent skirt (the falloff hits 0 at the rim), and moment-seeded glows
+		// carry alpha 1 by construction — the inline test marked everything beneath their whole
+		// ellipse bbox as hidden and DELETED visible shapes. FH6_RANKFIX=0 pins the old behaviour.
+		opaque := rankFixOn && opaqueShape(s) || !rankFixOn && len(s.Color) >= 4 && s.Color[3] >= 255
 		if visible && opaque {
 			for y := yMin; y <= yMax; y++ {
 				for x := xMin; x <= xMax; x++ {

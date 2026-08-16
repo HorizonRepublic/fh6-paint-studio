@@ -91,6 +91,9 @@ func (looRefitPass) apply(r *run) {
 	env := r.newBackfitEnv()
 	target, weight := r.be.Target(), r.be.Weight()
 	for round := 0; round < r.opt.LooRefit; round++ {
+		if r.opt.Cancel != nil && r.opt.Cancel() {
+			break // Stop pressed: the stack as of the last accepted round is a complete result
+		}
 		// Progress inside the phase is per-round: base..base+span. Without this the re-polish below
 		// reports its own iterations through the run-wide hook and drives the PHASE counter to 100%
 		// in round 0 — the bar then sits frozen for the remaining rounds (the counter is forward-only).
@@ -146,9 +149,7 @@ func (looRefitPass) apply(r *run) {
 		// Re-render the survivors, regrow the freed budget against the residual (backFit's loop).
 		tRegrow := time.Now()
 		_ = r.be.Reset(r.initCanvas)
-		for _, s := range kept[1:] {
-			_ = r.be.Apply(shapeToCandidate(s))
-		}
+		applyShapes(r.be, kept[1:])
 		targetCount := len(r.shapes)
 		grid, gw, gh, _ := r.be.ErrorGrid()
 		sampler := NewErrorSampler(grid, gw, gh, r.w, r.h)
@@ -177,7 +178,11 @@ func (looRefitPass) apply(r *run) {
 			}
 		}
 		tPol := time.Now()
-		candShapes, candErr := applyPolish(r.be, kept, rerender(r.be, r.initCanvas, kept), r.initCanvas, popt, r.w, r.h, &r.tm)
+		// The device canvas ALREADY holds exactly `kept` (the Reset+Apply loop above plus one
+		// Apply per regrown shape), and `grid` is current for it on every regrow-loop exit path —
+		// a rerender() here was a full Reset + n fenced Applies purely to recompute this sum.
+		preErr := sumGrid(grid)
+		candShapes, candErr := applyPolish(r.be, kept, preErr, r.initCanvas, popt, r.w, r.h, &r.tm)
 		applog.Printf("loo round %d walls: gcolor %.1fs rank %.1fs regrow %.1fs(%d shapes) repolish %.1fs total %.1fs err %.1f -> %.1f",
 			round, gcDur.Seconds(), rankDur.Seconds(), regrowDur.Seconds(), regrown, time.Since(tPol).Seconds(), time.Since(tRound).Seconds(),
 			errBefore, math.Min(candErr, r.finalErr))

@@ -2,8 +2,6 @@ package metric
 
 import (
 	"math"
-
-	"fh6-paint-studio/internal/model"
 )
 
 // GradientStats summarizes how much of an image is SMOOTH SHADING (gradients/ramps) versus flat
@@ -33,7 +31,7 @@ func RampMap(target []float32, w, h int) []float32 {
 	)
 	luma := make([]float32, w*h)
 	for i := 0; i < w*h; i++ {
-		luma[i] = 0.2126*model.LinearToSRGB(target[i*4+0]) + 0.7152*model.LinearToSRGB(target[i*4+1]) + 0.0722*model.LinearToSRGB(target[i*4+2])
+		luma[i] = 0.2126*encSRGB(target[i*4+0]) + 0.7152*encSRGB(target[i*4+1]) + 0.0722*encSRGB(target[i*4+2])
 	}
 	at := func(x, y int) float64 {
 		if x < 0 {
@@ -152,9 +150,9 @@ func GradientFraction(target []float32, w, h int) GradientStats {
 	// Per-pixel luma slope (central difference on sRGB luma) and opacity.
 	luma := make([]float32, w*h)
 	for i := 0; i < w*h; i++ {
-		r := model.LinearToSRGB(target[i*4+0])
-		g := model.LinearToSRGB(target[i*4+1])
-		b := model.LinearToSRGB(target[i*4+2])
+		r := encSRGB(target[i*4+0])
+		g := encSRGB(target[i*4+1])
+		b := encSRGB(target[i*4+2])
 		luma[i] = 0.2126*r + 0.7152*g + 0.0722*b
 	}
 	at := func(x, y int) float64 {

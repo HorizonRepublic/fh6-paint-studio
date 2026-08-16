@@ -65,6 +65,16 @@ const (
 	refineMinGain = 0.002
 	// refineStride caps the pixels sampled per shape, as looFitContrib does.
 	refineStride = 4096
+)
+
+// refineScaleGain: scale each shape's gain by step² so the cross-shape conflict sort compares
+// true pixel units. MEASURED 2026-08-16, n=27 paired: mean +0.72% WORSE, 22/27 (REJECT) — the
+// "wrong" unscaled ordering is accidentally protective (it prioritises small, safe moves; large
+// shapes' exact-at-judgment gains compose worse across overlapping accepts). Default stays the
+// shipped unscaled sort; FH6_SKEW_SCALE=1 keeps the experiment reachable.
+var refineScaleGain = os.Getenv("FH6_SKEW_SCALE") == "1"
+
+const (
 	refineTile   = 64
 	// refineSweeps is how many times the parameter list is walked. Parameters interact — moving a
 	// centre changes the best width — but the second sweep finds far less than the first, and a third
@@ -160,9 +170,7 @@ func (skewRefinePass) apply(r *run) {
 
 func rerenderStack(r *run, shapes []model.Shape) {
 	_ = r.be.Reset(r.initCanvas)
-	for _, s := range shapes[1:] {
-		_ = r.be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(r.be, shapes[1:])
 }
 
 // skewEligible reports whether a shear gives this kind a shape it cannot already reach.
@@ -313,6 +321,9 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 		C            []float32 // 3 per sample
 		dev          []float32 // 1 per sample: the shipped geometry's own worst-channel miss
 		cov          []float32 // 1 per sample: how much the shipped geometry itself covered
+		tgt          []float32 // 3 per sample: the target, gathered once per shape
+		wt           []float64 // 1 per sample: the resolved pixel weight, ditto
+		eZero        []float64 // 1 per sample: the error term when the trial covers NOTHING here
 		intruded     float64   // filled by trialErr: px of new paint this trial put on clean ground
 	}
 	build := func(ctx *winCtx, i int, b [4]int, step int) {
@@ -328,13 +339,33 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 			ctx.dev = make([]float32, need)
 			ctx.cov = make([]float32, need)
 		}
+		if cap(ctx.tgt) < need*3 {
+			ctx.tgt = make([]float32, need*3)
+			ctx.wt = make([]float64, need)
+			ctx.eZero = make([]float64, need)
+		}
 		ctx.nx, ctx.ny, ctx.step, ctx.b = nx, ny, step, b
 		ctx.below, ctx.C, ctx.T = ctx.below[:need*3], ctx.C[:need*3], ctx.T[:need]
 		ctx.dev, ctx.cov = ctx.dev[:need], ctx.cov[:need]
+		ctx.tgt, ctx.wt, ctx.eZero = ctx.tgt[:need*3], ctx.wt[:need], ctx.eZero[:need]
 		si := 0
 		for y := b[1]; y <= b[3]; y += step {
 			trow := (y / refineTile) * tw
 			for x := b[0]; x <= b[2]; x += step {
+				// Gather the target and weight for this sample once. Every trial of this shape used
+				// to re-read them through strided indices into two canvas-sized arrays — with
+				// step>1 that is a fresh cache line per sample per trial, and it was 15-25% of the
+				// pass. Same values, same order: the score is byte-identical.
+				{
+					idx := y*w + x
+					q := idx * 4
+					ctx.tgt[si*3+0], ctx.tgt[si*3+1], ctx.tgt[si*3+2] = target[q], target[q+1], target[q+2]
+					if refineUnweighted {
+						ctx.wt[si] = 1
+					} else {
+						ctx.wt[si] = float64(weight[idx])
+					}
+				}
 				var br, bg, bb float32
 				var cr, cg, cb float32
 				tt := float32(1)
@@ -365,6 +396,20 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 				ctx.below[si*3+0], ctx.below[si*3+1], ctx.below[si*3+2] = br, bg, bb
 				ctx.C[si*3+0], ctx.C[si*3+1], ctx.C[si*3+2] = cr, cg, cb
 				ctx.T[si] = tt
+				// The zero-coverage error term, precomputed with trialErr's exact arithmetic at
+				// c==0 (a=0 leaves the blend at `below`, so f = T*below + C). A trial only pays
+				// full evaluation inside its own bbox; every sample it cannot touch adds this
+				// SAME value at the SAME position in the sum — byte-identical, most of the
+				// window's Coverage() calls gone.
+				{
+					fr := tt*br + cr
+					fg := tt*bg + cg
+					fb := tt*bb + cb
+					dr := float64(fr) - float64(ctx.tgt[si*3+0])
+					dg := float64(fg) - float64(ctx.tgt[si*3+1])
+					db := float64(fb) - float64(ctx.tgt[si*3+2])
+					ctx.eZero[si] = ctx.wt[si] * (dr*dr + dg*dg + db*db)
+				}
 				si++
 			}
 		}
@@ -374,13 +419,29 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 	// catches first: a pass monotone in the total will happily trade a new visible blemish on clean
 	// ground for a diffuse gain elsewhere. Measured — the owner spotted exactly that, two pale smudges
 	// pushed onto img_24's white background, in a run the metric called 4.58% better.
-	trialErr := func(ctx *winCtx, sub *raster.Prepared, alpha float32, col [4]float32, setDev bool) float64 {
+	// bb is the TRIAL geometry's own bbox: outside it Coverage is exactly zero (every kind's
+	// falloff has finite support inside raster.BBox), so those samples contribute ctx.eZero —
+	// the identical value the full expression yields at c==0, added in the identical order.
+	// The intrusion veto cannot fire at c==0 either, so skipping it there changes nothing.
+	trialErr := func(ctx *winCtx, sub *raster.Prepared, alpha float32, col [4]float32, setDev bool, bb [4]int) float64 {
 		var e float64
 		ctx.intruded = 0
 		area := float64(ctx.step * ctx.step) // each sample stands for this many pixels
 		si := 0
 		for y := ctx.b[1]; y <= ctx.b[3]; y += ctx.step {
+			if y < bb[1] || y > bb[3] {
+				for x := ctx.b[0]; x <= ctx.b[2]; x += ctx.step {
+					e += ctx.eZero[si]
+					si++
+				}
+				continue
+			}
 			for x := ctx.b[0]; x <= ctx.b[2]; x += ctx.step {
+				if x < bb[0] || x > bb[2] {
+					e += ctx.eZero[si]
+					si++
+					continue
+				}
 				c := float32(sub.Coverage(x, y))
 				a := c * alpha
 				inv := 1 - a
@@ -391,15 +452,10 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 				fr := tt*xr + ctx.C[si*3+0]
 				fg := tt*xg + ctx.C[si*3+1]
 				fb := tt*xb + ctx.C[si*3+2]
-				idx := y*w + x
-				q := idx * 4
-				wt := 1.0
-				if !refineUnweighted {
-					wt = float64(weight[idx])
-				}
-				dr := float64(fr) - float64(target[q])
-				dg := float64(fg) - float64(target[q+1])
-				db := float64(fb) - float64(target[q+2])
+				wt := ctx.wt[si]
+				dr := float64(fr) - float64(ctx.tgt[si*3+0])
+				dg := float64(fg) - float64(ctx.tgt[si*3+1])
+				db := float64(fb) - float64(ctx.tgt[si*3+2])
 				e += wt * (dr*dr + dg*dg + db*db)
 				if setDev {
 					// dev is only consumed here, on the once-per-shape context build; computing it on
@@ -467,7 +523,8 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 					cur := g.p
 					score := func(p [6]float32) float64 {
 						pr := raster.Prep(g.kind, p)
-						e := trialErr(&ctx, &pr, g.col[3], g.col, false)
+						bx0, by0, bx1, by1 := raster.BBox(g.kind, p, w, h)
+						e := trialErr(&ctx, &pr, g.col[3], g.col, false, [4]int{bx0, by0, bx1, by1})
 						if refineDebug {
 							atomic.AddInt64(&refineTried, 1)
 						}
@@ -480,7 +537,7 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 						return e
 					}
 					basePrep := raster.Prep(g.kind, cur)
-					base := trialErr(&ctx, &basePrep, g.col[3], g.col, true)
+					base := trialErr(&ctx, &basePrep, g.col[3], g.col, true, b) // full window: this pass fills dev/cov
 					if base <= 0 {
 						continue
 					}
@@ -500,7 +557,18 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 						}
 					}
 					if base-best >= refineMinGain*base {
-						moved[i], touched[i], gain[i] = cur, true, base-best
+						// Scale to TRUE pixel units (one strided sample stands for step² pixels;
+						// looFitContrib does the same). Without it the cross-shape conflict sort
+						// deflated large shapes' gains up to step²× against small ones, so they
+						// systematically lost the disjointness race — and roundGain (the round
+						// floor's signal) summed mismatched units. The accept test above is a
+						// RATIO of same-window sums, so it is unaffected either way.
+						// FH6_SKEW_SCALE=0 pins the old unscaled ordering for A/Bs.
+						sc := 1.0
+						if refineScaleGain {
+							sc = float64(step * step)
+						}
+						moved[i], touched[i], gain[i] = cur, true, (base-best)*sc
 					}
 				}
 			}()

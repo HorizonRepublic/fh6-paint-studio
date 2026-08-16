@@ -58,6 +58,24 @@ func DeltaE76(a, b []float32, w, h int) (mean, p95 float64) {
 	return sum / float64(n), de[int(float64(n)*0.95)]
 }
 
+// DeltaE76Mean is DeltaE76's mean alone — the SAME serial accumulation, so the number is
+// bit-identical to DeltaE76's first return — without materialising and sorting an n-element
+// array for a percentile the caller was discarding (134MB + a 16.7M-element sort at the 4096
+// fit, paid at the end of EVERY run). Callers that want the p95 keep using DeltaE76.
+func DeltaE76Mean(a, b []float32, w, h int) float64 {
+	n := w * h
+	if n == 0 || len(a) < n*4 || len(b) < n*4 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i < n; i++ {
+		l1, a1, b1 := srgbToLab(float64(a[i*4]), float64(a[i*4+1]), float64(a[i*4+2]))
+		l2, a2, b2 := srgbToLab(float64(b[i*4]), float64(b[i*4+1]), float64(b[i*4+2]))
+		sum += math.Sqrt((l1-l2)*(l1-l2) + (a1-a2)*(a1-a2) + (b1-b2)*(b1-b2))
+	}
+	return sum / float64(n)
+}
+
 // FalseEdges quantifies POSTERIZATION (banding): the mean render edge energy at pixels where the SOURCE
 // is smooth. A flat-cell render puts hard steps inside smooth gradients — exactly the artefact ΔE/SSIM
 // are blind to and the eye hates. a=source, b=render (sRGB RGBA [0,1]); smoothThresh is the source-gradient

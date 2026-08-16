@@ -53,9 +53,18 @@ func shapeContributions(shapes []model.Shape, target, weight []float32, w, h int
 	cb := make([]float64, n)
 	for j := 0; j < n; j++ {
 		if len(shapes[j].Color) >= 3 {
-			cr[j] = float64(shapes[j].Color[0]) / 255
-			cg[j] = float64(shapes[j].Color[1]) / 255
-			cb[j] = float64(shapes[j].Color[2]) / 255
+			if rankFixOn {
+				// DecChan, not byte/255: Color holds sRGB bytes while target/bg are in the
+				// WORKING space (linear by default) — the raw-byte read overstated dark shapes'
+				// with-shape error ~5× and made them the first to be pruned.
+				cr[j] = float64(model.DecChan(shapes[j].Color[0]))
+				cg[j] = float64(model.DecChan(shapes[j].Color[1]))
+				cb[j] = float64(model.DecChan(shapes[j].Color[2]))
+			} else {
+				cr[j] = float64(shapes[j].Color[0]) / 255
+				cg[j] = float64(shapes[j].Color[1]) / 255
+				cb[j] = float64(shapes[j].Color[2]) / 255
+			}
 		}
 	}
 	bgr, bgg, bgb := float64(bg.R), float64(bg.G), float64(bg.B)

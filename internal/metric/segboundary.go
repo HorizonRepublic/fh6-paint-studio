@@ -2,8 +2,6 @@ package metric
 
 import (
 	"math"
-
-	"fh6-paint-studio/internal/model"
 )
 
 // BoundaryHardMap turns a segmentation into the per-pixel "hard-edged structure" score the shape
@@ -37,7 +35,7 @@ func BoundaryHardMap(seg *Segments, w, h int, contrastFull, falloff float64) []f
 		}
 		var s float64
 		for c := 0; c < 3; c++ {
-			d := float64(model.LinearToSRGB(seg.Mean[int(a)*3+c]) - model.LinearToSRGB(seg.Mean[int(b)*3+c]))
+			d := float64(encSRGB(seg.Mean[int(a)*3+c]) - encSRGB(seg.Mean[int(b)*3+c]))
 			s += d * d
 		}
 		return math.Sqrt(s)

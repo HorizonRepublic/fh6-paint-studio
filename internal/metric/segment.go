@@ -2,8 +2,6 @@ package metric
 
 import (
 	"math"
-
-	"fh6-paint-studio/internal/model"
 )
 
 // Segments is a colour-coherent partition of the target: every pixel carries the dense label of the
@@ -198,7 +196,7 @@ func smoothSRGB(target []float32, w, h int) []float32 {
 	src := make([]float32, w*h*3)
 	for i := 0; i < w*h; i++ {
 		for c := 0; c < 3; c++ {
-			src[i*3+c] = model.LinearToSRGB(target[i*4+c])
+			src[i*3+c] = encSRGB(target[i*4+c])
 		}
 	}
 	kern := [5]float32{1.0 / 16, 4.0 / 16, 6.0 / 16, 4.0 / 16, 1.0 / 16}

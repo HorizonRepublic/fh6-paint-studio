@@ -187,11 +187,15 @@ func localFalseEdge(reconLuma, targetLuma []float32, w, h, x0, y0, x1, y1 int) f
 // one index (skip<0 = none) — the building block for a removal trial and the final re-render.
 func renderExcept(be backend.Backend, initCanvas []float32, shapes []model.Shape, skip int) float64 {
 	_ = be.Reset(initCanvas)
-	for j := 1; j < len(shapes); j++ {
-		if j == skip {
-			continue
-		}
-		_ = be.Apply(shapeToCandidate(shapes[j]))
+	// Batched: this runs per MENU TRIAL (~hundreds per pass), and the per-shape Apply loop paid
+	// a fence per shape — ~600k fenced submits on a 1000-shape stack. Same order, same output.
+	if skip < 0 {
+		applyShapes(be, shapes[1:])
+	} else {
+		rest := make([]model.Shape, 0, len(shapes)-1)
+		rest = append(rest, shapes[1:skip]...)
+		rest = append(rest, shapes[skip+1:]...)
+		applyShapes(be, rest)
 	}
 	g, _, _, _ := be.ErrorGrid()
 	return sumGrid(g)

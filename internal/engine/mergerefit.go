@@ -160,6 +160,11 @@ func mergeFit(kind model.ShapeKind, p1, p2 [6]float32, c1, c2 [4]float32, overla
 	a1 := float64(area(kind, p1))
 	a2 := float64(area(kind, p2))
 	tw := a1 + a2
+	if tw <= 0 {
+		// Degenerate pair (a collinear triangle has zero area yet a live bbox): the weighted
+		// colour below would be NaN and reach EncByte.
+		return model.Candidate{}, false
+	}
 	var col model.RGBA
 	col.R = float32((a1*float64(c1[0]) + a2*float64(c2[0])) / tw)
 	col.G = float32((a1*float64(c1[1]) + a2*float64(c2[1])) / tw)

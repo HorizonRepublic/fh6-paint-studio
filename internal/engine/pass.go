@@ -76,7 +76,7 @@ func (r *run) newBackfitEnv() *greedyEnv {
 	return &greedyEnv{
 		be: r.be, rng: r.rng, w: r.w, h: r.h,
 		kinds: r.kinds, kindWeights: r.kindWeights, kindCDF: r.kindCDF, orient: r.orient, coh: r.coh, aspectCap: r.aspectCap, compSeeds: r.opt.CompSeeds, kg: r.kindGate,
-		devSearch: r.devSearch, allowAlpha: r.allowAlpha, alphaMin: r.alphaMin, aspectMax: r.opt.AspectMax,
+		devSearch: r.devSearch, devMutate: r.devMutate, allowAlpha: r.allowAlpha, alphaMin: r.alphaMin, aspectMax: r.opt.AspectMax,
 		compact: r.opt.CompactPenalty, moveStep: r.moveStep, radiusStep: r.radiusStep,
 		rounds: r.rounds, perRound: r.perRound, randomN: r.opt.RandomSamples, canvasPad: r.opt.CanvasPad, tm: nil,
 	}
@@ -109,9 +109,7 @@ func (backfitPolishPass) apply(r *run) {
 	r.shapes, r.finalErr = baseShapes, baseErr
 	// Branch B left the backend rendering bfShapes — restore the winning baseline.
 	_ = r.be.Reset(r.initCanvas)
-	for _, s := range r.shapes[1:] {
-		_ = r.be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(r.be, r.shapes[1:])
 }
 
 // backfitPass handles back-fitting with polish off: gate it directly on the hard-rendered error.
