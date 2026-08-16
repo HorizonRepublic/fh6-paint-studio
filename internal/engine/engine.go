@@ -397,7 +397,11 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		applog.Printf("polish: device lacks polish support — skipping polish (shapes returned unpolished)")
-		pr = PolishResult{Shapes: shapes}
+		// CLONE, like every other return here: recolorVisible below mutates
+		// pr.Shapes in place, and a gate-rejected recolor would otherwise hand the
+		// caller shapes it had already recoloured, labelled with the pre-recolor
+		// error. This was the one path that still aliased.
+		pr = PolishResult{Shapes: cloneShapes(shapes)}
 	}
 	recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
 	_ = be.Reset(initCanvas)

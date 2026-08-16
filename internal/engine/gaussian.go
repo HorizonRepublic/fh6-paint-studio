@@ -134,10 +134,11 @@ func gaussRenderErr(be backend.Backend, shapes []model.Shape, w, h int) float64 
 	canvas := make([]float32, w*h*4)
 	_ = be.Reset(canvas)
 	for _, s := range shapes {
-		c := model.Candidate{Kind: model.KindFromType(s.Type), P: model.ParamsFromShape(s)}
-		if len(s.Color) >= 4 {
-			c.Color = model.RGBA{R: float32(s.Color[0]) / 255, G: float32(s.Color[1]) / 255, B: float32(s.Color[2]) / 255, A: float32(s.Color[3]) / 255}
-		}
+		// shapeToCandidate, not /255: the bytes were written by EncByte, which is
+		// LinearToSRGB under the default LinearLight — decoding them linearly
+		// gamma-shifted every colour, so both the reported error and the canvas
+		// this leaves behind were computed from the wrong values.
+		c := shapeToCandidate(s)
 		_ = be.Apply(c)
 	}
 	out := make([]float32, w*h*4)
