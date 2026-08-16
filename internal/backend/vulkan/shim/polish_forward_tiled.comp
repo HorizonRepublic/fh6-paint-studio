@@ -27,12 +27,15 @@ layout(std430, binding = 8) readonly  buffer Tb { int    tileOff[]; };  // binni
 layout(std430, binding = 9) readonly  buffer Lb { int    tileList[]; }; // binning: shape indices, ascending
 layout(std430, binding = 10) readonly buffer MA { float maskAtlas[]; };
 layout(std430, binding = 11) readonly buffer MM { int   maskMeta[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; } pc;
+// first = pixel index of thread 0. The host splits this dispatch across submits so no single one
+// approaches the ~2s Windows TDR watchdog (and so a 4096x4096 fit stays under the 65535 workgroup
+// limit, which it crosses on its own). Threads are independent, so the split changes nothing.
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices, first; } pc;
 #include "mask_common.glsl"
 #include "polish_common.glsl"
 
 void main() {
-    int idx = int(gl_GlobalInvocationID.x);
+    int idx = int(gl_GlobalInvocationID.x) + pc.first;
     if (idx >= pc.w * pc.h) return;
     int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];

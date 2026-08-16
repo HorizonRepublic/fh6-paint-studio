@@ -36,6 +36,10 @@ layout(push_constant) uniform PC {
                 // in a different basin that the polish cannot recover. Measured on img_9 @1000:
                 // 16 gradients / 89876 SSE gated off vs 7 / 90916 forced on, and the eye sees
                 // smearing over the eyes. Default OFF; FH6_GRAD_EVAL=1 turns it on for A/Bs.
+    int first;  // candidate index of workgroup 0. The host splits one 65535-workgroup dispatch
+                // across several submits so no single one approaches the ~2s Windows TDR watchdog;
+                // workgroups are independent and each writes only outb[gid*5..+4], so the range
+                // split changes nothing but which submit carries the work. first=0 = whole pool.
 } pc;
 
 const int   NACC     = 19;
@@ -159,7 +163,7 @@ void bboxOf(int kind, float P[6], int W, int H, out int xMin, out int yMin, out 
 }
 
 void main() {
-    uint gid = gl_WorkGroupID.x;
+    uint gid = gl_WorkGroupID.x + uint(pc.first);
     uint lid = gl_LocalInvocationID.x;
 
     int kind = 999;

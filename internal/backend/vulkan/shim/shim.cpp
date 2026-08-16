@@ -105,6 +105,7 @@ struct Buf { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
 
 // ---- global single device context (engine drives one backend serially) ----
 VkInstance       g_instance = VK_NULL_HANDLE;
+VkDebugUtilsMessengerEXT g_dbgMsgr = VK_NULL_HANDLE; // FH6VK_VALIDATE=1 only
 VkPhysicalDevice g_phys     = VK_NULL_HANDLE;
 VkDevice         g_device   = VK_NULL_HANDLE;
 VkQueue          g_queue    = VK_NULL_HANDLE;
@@ -167,7 +168,7 @@ int g_fp64 = 1;
 size_t g_rs = 8;
 #define RSPV(base) (g_fp64 ? base##_spv : base##_f32_spv), (g_fp64 ? sizeof(base##_spv) : sizeof(base##_f32_spv))
 
-struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; int32_t gradOn; };
+struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; int32_t gradOn; int32_t first; };
 // DICTIONARY MASKS: the bank words are captured coverage textures packed into one atlas, with a
 // meta table {count, then (offset,w,h) per word}. Kept as plain storage buffers so every shader
 // that scores or composites a word reads the same data the CUDA constant/global pair holds.
@@ -413,7 +414,7 @@ const int SSWIN = 8;
 // 0=P 1=col 2=kinds 3=render 4=below 5=bbx 6=boff 7=base. bbx/boff live on-device. ----
 // slices: dispatch height of the backward reduce — the per-shape slice cap (see
 // polish_backward_reduce.comp). The forward/hard/walk shaders declare only the prefix.
-struct TiledPC { int32_t n, w, h, ste; float tau; int32_t tilesX, tile, binned; int32_t slices; };
+struct TiledPC { int32_t n, w, h, ste; float tau; int32_t tilesX, tile, binned; int32_t slices, first; };
 // PBSLICES bounds one shape's reduce slices. 64 keeps the worst canvas-sized bbox near the
 // measured 4096 px/workgroup sweet spot without drowning small stacks in empty workgroups.
 constexpr int32_t PBSLICES = 64;
@@ -615,6 +616,7 @@ void teardown() {
     if (g_fence)     { vkDestroyFence(g_device, g_fence, nullptr); g_fence = VK_NULL_HANDLE; }
     if (g_cmdPool)   { vkDestroyCommandPool(g_device, g_cmdPool, nullptr); g_cmdPool = VK_NULL_HANDLE; g_cmd = VK_NULL_HANDLE; }
     if (g_device)    { vkDestroyDevice(g_device, nullptr); g_device = VK_NULL_HANDLE; }
+    if (g_dbgMsgr)   { vkDestroyDebugUtilsMessengerEXT(g_instance, g_dbgMsgr, nullptr); g_dbgMsgr = VK_NULL_HANDLE; }
     if (g_instance)  { vkDestroyInstance(g_instance, nullptr); g_instance = VK_NULL_HANDLE; }
     g_phys = VK_NULL_HANDLE; g_queue = VK_NULL_HANDLE;
 }
@@ -637,8 +639,43 @@ bool buildContext() {
     if (volkInitialize() != VK_SUCCESS) { g_lastError = 1001; return false; }
     VkApplicationInfo ai{VK_STRUCTURE_TYPE_APPLICATION_INFO}; ai.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO}; ici.pApplicationInfo = &ai;
+    // FH6VK_VALIDATE=1 turns on VK_LAYER_KHRONOS_validation + VK_EXT_debug_utils and prints every
+    // message to stderr. Off by default and only enabled when the layer is actually present, so a
+    // machine without the SDK behaves exactly as before. This is the only way a descriptor-set or
+    // synchronisation mistake in a shader path shows up as a diagnostic rather than as silent
+    // garbage in the output.
+    const char* vEnv = getenv("FH6VK_VALIDATE");
+    const char* vLayer = "VK_LAYER_KHRONOS_validation";
+    const char* vExt = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    bool wantVal = vEnv && vEnv[0] == '1';
+    if (wantVal) {
+        uint32_t nl = 0; vkEnumerateInstanceLayerProperties(&nl, nullptr);
+        std::vector<VkLayerProperties> lp(nl ? nl : 1);
+        if (nl) vkEnumerateInstanceLayerProperties(&nl, lp.data());
+        bool have = false;
+        for (uint32_t i = 0; i < nl; i++) if (!strcmp(lp[i].layerName, vLayer)) { have = true; break; }
+        if (have) {
+            ici.enabledLayerCount = 1; ici.ppEnabledLayerNames = &vLayer;
+            ici.enabledExtensionCount = 1; ici.ppEnabledExtensionNames = &vExt;
+        } else {
+            fprintf(stderr, "fh6vk: FH6VK_VALIDATE=1 but %s is not installed\n", vLayer);
+            wantVal = false;
+        }
+    }
     if (vkCreateInstance(&ici, nullptr, &g_instance) != VK_SUCCESS) { g_lastError = 1002; return false; }
     volkLoadInstance(g_instance);
+    if (wantVal && vkCreateDebugUtilsMessengerEXT) {
+        VkDebugUtilsMessengerCreateInfoEXT dci{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+        dci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        dci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                          VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        dci.pfnUserCallback = [](VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT,
+                                 const VkDebugUtilsMessengerCallbackDataEXT* d, void*) -> VkBool32 {
+            fprintf(stderr, "fh6vk/validation: %s\n", d && d->pMessage ? d->pMessage : "(null)");
+            return VK_FALSE;
+        };
+        vkCreateDebugUtilsMessengerEXT(g_instance, &dci, nullptr, &g_dbgMsgr);
+    }
 
     uint32_t nd = 0; vkEnumeratePhysicalDevices(g_instance, &nd, nullptr);
     if (!nd) { g_lastError = 1003; return false; }
@@ -914,6 +951,104 @@ void cmdBarrierRW() {
     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
+void beginCmd() {
+    vkResetCommandBuffer(g_cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(g_cmd, &bi);
+}
+
+void endSubmit() {
+    flushBarrier();
+    vkEndCommandBuffer(g_cmd);
+    submitWait();
+}
+
+// ---- TDR chunking for the eval dispatch ----
+// Windows resets the GPU when ONE submit runs past ~2s. eval runs one workgroup per candidate —
+// up to 65535 of them, each scoring up to sampleBudget pixels — so a weak card crosses the
+// watchdog inside a single search and the run dies mid-way (the "freezes then quits" report).
+// The workgroups are independent and each writes only outb[gid*5..+4], so splitting the range
+// across submits changes the fence count and NOTHING else: same commands, same reads, same
+// writes, byte-identical result. g_evalCandCost is a seconds-per-candidate EMA; when it says the
+// whole pool fits in one 250ms submit the callers record the search exactly as they always did,
+// in ONE submit, so a fast card pays nothing.
+double g_evalCandCost = 0.0;
+int g_evalChunkForce = -1; // FH6VK_EVALCHUNK=<k>: pin the chunk size. A fast card never splits on
+                           // its own, so this is how the split path gets exercised and proved
+                           // byte-identical against the unsplit one.
+
+int chunkForce() {
+    if (g_evalChunkForce < 0) {
+        const char* e = getenv("FH6VK_EVALCHUNK");
+        g_evalChunkForce = e ? atoi(e) : 0;
+        if (g_evalChunkForce < 0) g_evalChunkForce = 0;
+    }
+    return g_evalChunkForce;
+}
+
+int evalChunk(int n) {
+    if (chunkForce() > 0) return g_evalChunkForce < n ? g_evalChunkForce : n;
+    if (g_evalCandCost > 0.0) {
+        double c = 0.25 / g_evalCandCost;
+        if (c >= (double)n) return n;
+        return c < 1.0 ? 1 : (int)c;
+    }
+    return n > 8192 ? 8192 : n; // first call of the process: probe before the cost is known
+}
+
+void evalCost(double dt, int n) {
+    if (dt <= 0.0 || n < 1 || g_fatal) return;
+    double per = dt / (double)n;
+    g_evalCandCost = g_evalCandCost > 0.0 ? 0.7 * g_evalCandCost + 0.3 * per : per;
+}
+
+// cmdEvalRange records eval over candidates [first, first+count) against the given set.
+void cmdEvalRange(VkDescriptorSet set, EvalPC pc, int first, int count) {
+    pc.first = first;
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &set, 0, nullptr);
+    vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(g_cmd, (uint32_t)count, 1, 1);
+}
+
+// evalChunked scores the whole pool in submits of its own. Only for the split path — the
+// unsplit path records cmdEvalRange straight into the caller's open buffer.
+void evalChunked(VkDescriptorSet set, EvalPC pc, int n, int chunk) {
+    for (int f = 0; f < n && !g_fatal; f += chunk) {
+        int cnt = n - f < chunk ? n - f : chunk;
+        beginCmd();
+        cmdEvalRange(set, pc, f, cnt);
+        endSubmit();
+    }
+}
+
+// ---- the same chunking for the polish passes ----
+// forward / hard / dcwalk are one INDEPENDENT thread per pixel and the backward reduce is a grid
+// of independent (shape, slice) workgroups, so a range split is byte-identical here too. It also
+// puts a ceiling under the 65535 workgroup limit, which a 4096x4096 fit crosses on its own:
+// (4096*4096 + 255) / 256 == 65536.
+enum { PCH_FWD = 0, PCH_HARD, PCH_WALK, PCH_REDUCE, PCH_N };
+double g_polishCost[PCH_N] = {0, 0, 0, 0}; // seconds per workgroup, per pass
+
+int polishChunk(int which, int wg) {
+    int cap = wg < 65535 ? wg : 65535;
+    if (chunkForce() > 0) return g_evalChunkForce < cap ? g_evalChunkForce : cap;
+    double per = g_polishCost[which];
+    if (per > 0.0) {
+        double k = 0.25 / per;
+        if (k < (double)cap) return k < 1.0 ? 1 : (int)k;
+        return cap;
+    }
+    return cap > 4096 ? 4096 : cap; // first call of the process: probe before the cost is known
+}
+
+void polishCost(int which, double dt, int wg) {
+    if (dt <= 0.0 || wg < 1 || g_fatal) return;
+    double per = dt / (double)wg;
+    g_polishCost[which] = g_polishCost[which] > 0.0 ? 0.7 * g_polishCost[which] + 0.3 * per : per;
 }
 
 bool makePolishPipe(const unsigned int* spv, size_t bytes, VkPipeline& pipe) {
@@ -1675,11 +1810,30 @@ bool ensureCoarse(int k) {
     return true;
 }
 
-// cmdCoarseRefine records the fine half of the coarse-to-fine search into g_cmd: partition argmin
-// over the cheap pass's adjusted scores, gather the kpart survivors, re-score them at the FULL
-// sample budget, re-adjust, and argmin into g_best. Caller has already recorded gen + cheap eval +
-// prepadj and stands after a cmdBarrierRW().
-void cmdCoarseRefine(int n, int compact, int shapeCount) {
+// searchTail records everything after the candidate pool has been scored: the selection-adjusted
+// score, then either a plain argmin or the coarse-to-fine refine (partition argmin over the cheap
+// pass, gather the kpart survivors, re-score them at the FULL sample budget, re-adjust, argmin).
+// Caller stands after a cmdBarrierRW() — or after a fence, which is a superset.
+//
+// `split` = the TDR path: the refine's full-budget eval gets its own chunked submits (kpart at the
+// full budget is a big dispatch in its own right) and the buffer is left OPEN for the caller to
+// close, exactly as in the unsplit case. Same commands in the same order either way.
+void searchTail(int n, int compact, int shapeCount, bool useCoarse, bool split) {
+    if (split) beginCmd();
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPL, 0, 1, &g_prepSet, 0, nullptr);
+    PrepPC ppc{n, compact, shapeCount, g_w, g_h};
+    vkCmdPushConstants(g_cmd, g_prepPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ppc), &ppc);
+    vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
+    cmdBarrierRW();
+    if (!useCoarse) {
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
+        ArgPC apc{n, 0, 0, 0, 0, 0, 0};
+        vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
+        vkCmdDispatch(g_cmd, 1, 1, 1);
+        return;
+    }
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_cminPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_cminPL, 0, 1, &g_cminSet, 0, nullptr);
     CminPC cpc{n, g_kpart};
@@ -1691,13 +1845,17 @@ void cmdCoarseRefine(int n, int compact, int shapeCount) {
     CgatPC gpc2{g_kpart};
     vkCmdPushConstants(g_cmd, g_cgatPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc2), &gpc2);
     vkCmdDispatch(g_cmd, (uint32_t)((g_kpart + 255) / 256), 1, 1);
-    cmdBarrierRW();
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_seval2Set, 0, nullptr);
-    EvalPC e2{g_kpart, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
-    vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(e2), &e2);
-    vkCmdDispatch(g_cmd, (uint32_t)g_kpart, 1, 1);
-    cmdBarrierRW();
+    EvalPC e2{g_kpart, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn, 0};
+    if (split) {
+        endSubmit();
+        evalChunked(g_seval2Set, e2, g_kpart, evalChunk(g_kpart));
+        if (g_fatal) { beginCmd(); return; } // caller still closes a buffer; submitWait no-ops
+        beginCmd();
+    } else {
+        cmdBarrierRW();
+        cmdEvalRange(g_seval2Set, e2, 0, g_kpart);
+        cmdBarrierRW();
+    }
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPL, 0, 1, &g_prep2Set, 0, nullptr);
     PrepPC p2{g_kpart, compact, shapeCount, g_w, g_h};
@@ -1855,18 +2013,14 @@ API void fp_eval(const float* cands, int n, float* out) {
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the guaranteed dispatch limit (Intel iGPUs enforce exactly 65535)
     memcpy(g_cands.map, cands, (size_t)n * 11 * sizeof(float));
 
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_evalSet, 0, nullptr);
-    EvalPC pc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
-    vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1); // one workgroup per candidate
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
+    EvalPC pc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn, 0};
+    // One workgroup per candidate, chunked across submits when the measured cost says a single one
+    // would approach the TDR watchdog. See evalChunk — chunk == n on a healthy card, so this is the
+    // same single submit it has always been.
+    int chunk = evalChunk(n);
+    auto t0 = std::chrono::steady_clock::now();
+    evalChunked(g_evalSet, pc, n, chunk);
+    evalCost(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), n);
 
     memcpy(out, g_out.map, (size_t)n * 5 * sizeof(float));
 }
@@ -2407,10 +2561,14 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     }
     const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
 
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
+    // TDR guard, byte-identical: see evalChunk. A fast card measures chunk >= n and records the
+    // whole search in ONE submit exactly as before; a slow one pays extra fences instead of a
+    // device reset.
+    int chunk = evalChunk(n);
+    bool split = chunk < n;
+    auto tSearch = std::chrono::steady_clock::now();
+
+    beginCmd();
     cmdStageCopies(ups, 3);
     // 1. generate
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPipe);
@@ -2441,36 +2599,26 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // pay the full budget below — the winner is always full-budget scored.
     bool useCoarse = g_coarseOn && g_scand2.buf != VK_NULL_HANDLE && n > 4 * g_kpart;
     int budget1 = useCoarse ? (g_coarseBudget < g_sampleBudget ? g_coarseBudget : g_sampleBudget) : g_sampleBudget;
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
     // g_gradOn belongs here too. Leaving it off aggregate-initialised it to 0, so fp_set_gradients
     // reached the host Evaluate path and NOT the on-device search — the two halves of one run scored
     // gradients differently, and every A/B ever run with the honest-gradient flag moved only half the
     // system. The shipped default is 0, so this is inert until the flag is set.
-    EvalPC epc{n, g_w, g_h, budget1, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
-    vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
-    vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1);
-    cmdBarrierRW();
-    // 3. selection-adjusted score
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPL, 0, 1, &g_prepSet, 0, nullptr);
-    PrepPC ppc{n, compact, shapeCount, g_w, g_h};
-    vkCmdPushConstants(g_cmd, g_prepPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ppc), &ppc);
-    vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
-    cmdBarrierRW();
-    if (useCoarse) {
-        cmdCoarseRefine(n, compact, shapeCount);
+    EvalPC epc{n, g_w, g_h, budget1, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn, 0};
+    if (split) {
+        endSubmit();
+        evalChunked(g_sevalSet, epc, n, chunk);
     } else {
-        // 4. argmin + gather
-        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
-        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
-        ArgPC apc{n, 0, 0, 0, 0, 0, 0};
-        vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
-        vkCmdDispatch(g_cmd, 1, 1, 1);
+        // 2. score (reuse eval pipeline on the search buffers). With the coarse filter on, this
+        // first pass runs at the CHEAP pixel cap; the partition argmin keeps kpart survivors and
+        // only those pay the full budget below — the winner is always full-budget scored.
+        cmdEvalRange(g_sevalSet, epc, 0, n);
+        cmdBarrierRW();
     }
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
+    if (g_fatal) { out_best[0] = 3.4028235e38f; return; } // an eval chunk died: nothing left to reduce
+    // 3. selection-adjusted score, then 4. argmin (or the coarse refine)
+    searchTail(n, compact, shapeCount, useCoarse, split);
+    endSubmit();
+    evalCost(std::chrono::duration<double>(std::chrono::steady_clock::now() - tSearch).count(), n);
     if (g_fatal) { out_best[0] = 3.4028235e38f; return; } // the submit died: g_best is stale
     memcpy(out_best, g_best.map, 12 * sizeof(float));
 }
@@ -2507,10 +2655,11 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     }
     const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
 
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
+    int chunk = evalChunk(nGen); // TDR guard, byte-identical — see evalChunk
+    bool split = chunk < nGen;
+    auto tSearch = std::chrono::steady_clock::now();
+
+    beginCmd();
     cmdStageCopies(ups, 3);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_msPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_msPL, 0, 1, &g_msSet, 0, nullptr);
@@ -2526,30 +2675,18 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     cmdBarrierRW();
     bool useCoarse = g_coarseOn && g_scand2.buf != VK_NULL_HANDLE && nGen > 4 * g_kpart;
     int budget1 = useCoarse ? (g_coarseBudget < g_sampleBudget ? g_coarseBudget : g_sampleBudget) : g_sampleBudget;
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
-    EvalPC epc{nGen, g_w, g_h, budget1, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
-    vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
-    vkCmdDispatch(g_cmd, (uint32_t)nGen, 1, 1);
-    cmdBarrierRW();
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPL, 0, 1, &g_prepSet, 0, nullptr);
-    PrepPC ppc{nGen, compact, shapeCount, g_w, g_h};
-    vkCmdPushConstants(g_cmd, g_prepPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ppc), &ppc);
-    vkCmdDispatch(g_cmd, (uint32_t)((nGen + 255) / 256), 1, 1);
-    cmdBarrierRW();
-    if (useCoarse) {
-        cmdCoarseRefine(nGen, compact, shapeCount);
+    EvalPC epc{nGen, g_w, g_h, budget1, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn, 0};
+    if (split) {
+        endSubmit();
+        evalChunked(g_sevalSet, epc, nGen, chunk);
     } else {
-        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
-        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
-        ArgPC apc{nGen, 0, 0, 0, 0, 0, 0};
-        vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
-        vkCmdDispatch(g_cmd, 1, 1, 1);
+        cmdEvalRange(g_sevalSet, epc, 0, nGen);
+        cmdBarrierRW();
     }
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
+    if (g_fatal) { out_best[0] = 3.4028235e38f; return; } // an eval chunk died: nothing left to reduce
+    searchTail(nGen, compact, shapeCount, useCoarse, split);
+    endSubmit();
+    evalCost(std::chrono::duration<double>(std::chrono::steady_clock::now() - tSearch).count(), nGen);
     if (g_fatal) { out_best[0] = 3.4028235e38f; return; } // the submit died: g_best is stale
     memcpy(out_best, g_best.map, 12 * sizeof(float));
 }
@@ -2569,7 +2706,7 @@ API void fp_search_mutate(unsigned long long seed, const int* ip, const float* f
     if (!ensureSearch(m)) return;
     memcpy(g_best.map, io_best, 12 * sizeof(float));
 
-    EvalPC epc{m, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
+    EvalPC epc{m, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn, 0};
     ArgPC apc{m, 1, 1, compact, shapeCount, g_w, g_h}; // inlineAdj: prepadj folded into the argmin
     // TDR guard: Windows resets the GPU when ONE submit runs past ~2s, and all the rounds in a
     // single submit can cross that on a weak or busy card (the exact "freeze then the run dies"
@@ -2578,19 +2715,41 @@ API void fp_search_mutate(unsigned long long seed, const int* ip, const float* f
     // seeds (absolute round index) and device state are IDENTICAL, so the output is byte-equal to
     // the single-submit version; on a fast card the second chunk covers every remaining round.
     for (int done = 0; done < rounds && !g_fatal; ) {
+        // The expert panel ships a near-unclamped per-round counter, so ONE round can be
+        // watchdog-sized on its own — the round chunk below cannot go below 1. When the shared
+        // eval-cost EMA says m candidates do not fit in a 250ms submit, split the round itself
+        // into mutate | eval chunks | argmin. Fences replace the barriers; nothing else changes.
+        int ec = evalChunk(m);
+        if (ec < m) {
+            unsigned long long rs = seed + (unsigned long long)(done + 1) * 0x9E3779B97F4A7C15ull;
+            MutPC mpc{(uint32_t)rs, (uint32_t)(rs >> 32), m, g_w, g_h, allowAlpha, fp[0], fp[1], fp[2], fp[3]};
+            beginCmd();
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_mutPipe);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_mutPL, 0, 1, &g_mutSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_mutPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mpc), &mpc);
+            vkCmdDispatch(g_cmd, (uint32_t)((m + 255) / 256), 1, 1);
+            endSubmit();
+            evalChunked(g_sevalSet, epc, m, ec);
+            if (g_fatal) break;
+            beginCmd();
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
+            vkCmdDispatch(g_cmd, 1, 1, 1);
+            endSubmit();
+            done++;
+            continue;
+        }
         int chunk = rounds - done;
         if (g_mutRoundCost > 0.0) {
             int c = (int)(0.25 / g_mutRoundCost);
             if (c < 1) c = 1;
             if (c < chunk) chunk = c;
-        } else if (chunk > 4) {
-            chunk = 4; // first-ever call: conservative probe until a round cost is known
+        } else if (chunk > 1) {
+            chunk = 1; // first-ever call: single-round probe until a round cost is known
         }
         auto t0 = std::chrono::steady_clock::now();
-        vkResetCommandBuffer(g_cmd, 0);
-        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(g_cmd, &bi);
+        beginCmd();
         for (int rd = done; rd < done + chunk; rd++) {
             // A fresh seed per round on the host side keeps the shader's counter scheme untouched.
             unsigned long long rs = seed + (unsigned long long)(rd + 1) * 0x9E3779B97F4A7C15ull;
@@ -3055,18 +3214,20 @@ API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
     g_profScope = PROF_PFWD;
     if (!g_device || g_pn < 1) return;
     (void)bbxHost; // bbx now lives on-device (g_pbbxBuf)
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptFwd);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptPL, 0, 1, &g_ptSet, 0, nullptr);
-    TiledPC pc{ g_pn, g_w, g_h, g_pste, (float)*tauPtr, g_tilesX, PTILE, g_binned };
-    vkCmdPushConstants(g_cmd, g_ptPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
+    int wg = (int)(((size_t)g_w * g_h + 255) / 256);
+    int chunk = polishChunk(PCH_FWD, wg);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int f = 0; f < wg && !g_fatal; f += chunk) {
+        int cnt = wg - f < chunk ? wg - f : chunk;
+        beginCmd();
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptFwd);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptPL, 0, 1, &g_ptSet, 0, nullptr);
+        TiledPC pc{ g_pn, g_w, g_h, g_pste, (float)*tauPtr, g_tilesX, PTILE, g_binned, 0, f * 256 };
+        vkCmdPushConstants(g_cmd, g_ptPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(g_cmd, (uint32_t)cnt, 1, 1);
+        endSubmit();
+    }
+    polishCost(PCH_FWD, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), wg);
 }
 
 API void fp_polish_loss(double* out) {
@@ -3081,18 +3242,20 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
     g_profScope = PROF_PHARD;
     if (!g_device || g_pn < 1) { *out = 0; return; }
     (void)bbxHost; // bbx lives on-device (g_pbbxBuf)
-    vkResetCommandBuffer(g_cmd, 0);
-    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(g_cmd, &bi);
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptHard);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptPL, 0, 1, &g_ptSet, 0, nullptr);
-    TiledPC pc{ g_pn, g_w, g_h, g_pste, 0.0f, g_tilesX, PTILE, g_binned };
-    vkCmdPushConstants(g_cmd, g_ptPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(g_cmd, (uint32_t)(((size_t)g_w * g_h + 255) / 256), 1, 1);
-    flushBarrier();
-    vkEndCommandBuffer(g_cmd);
-    submitWait();
+    int wg = (int)(((size_t)g_w * g_h + 255) / 256);
+    int chunk = polishChunk(PCH_HARD, wg);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int f = 0; f < wg && !g_fatal; f += chunk) {
+        int cnt = wg - f < chunk ? wg - f : chunk;
+        beginCmd();
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptHard);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_ptPL, 0, 1, &g_ptSet, 0, nullptr);
+        TiledPC pc{ g_pn, g_w, g_h, g_pste, 0.0f, g_tilesX, PTILE, g_binned, 0, f * 256 };
+        vkCmdPushConstants(g_cmd, g_ptPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(g_cmd, (uint32_t)cnt, 1, 1);
+        endSubmit();
+    }
+    polishCost(PCH_HARD, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), wg);
     *out = computeLoss();
 }
 
@@ -3111,13 +3274,8 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
     static int bwProbe = -1;
     if (bwProbe < 0) { const char* e = getenv("FH6VK_BWPROBE"); bwProbe = (e && e[0] == '1') ? 1 : 0; }
     PolishPC pcd{0, g_w, g_h, 0, 0, 0, 0, 0, g_pste, g_w * g_h, (float)tau, g_poklab, (float)g_pfelambda, (float)g_psslambda, (float)g_peglambda, (float)g_pldlambda};
-    TiledPC tpc{ g_pn, g_w, g_h, g_pste, (float)tau, g_tilesX, PTILE, g_binned, PBSLICES };
-    auto begin = [&]() {
-        vkResetCommandBuffer(g_cmd, 0);
-        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(g_cmd, &bi);
-    };
+    TiledPC tpc{ g_pn, g_w, g_h, g_pste, (float)tau, g_tilesX, PTILE, g_binned, PBSLICES, 0 };
+    auto begin = [&]() { beginCmd(); };
     auto recTerms = [&]() {
         // False-edge + SSIM adjoint planes first, feeding the dcinit dC seed below.
         if (g_pfelambda > 0.0 || g_pldlambda > 0.0) cmdFEPasses(true);
@@ -3154,10 +3312,53 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
         vkCmdDispatch(g_cmd, (uint32_t)g_pn, 1, 1);
         flushBarrier(); // pgrad shader write -> host read
     };
-    if (!bwProbe) {
+    // TDR split. Pass A is thread-per-pixel and Pass B a grid of independent (shape, slice)
+    // workgroups, so slicing them by range is byte-identical — the fence count changes, nothing
+    // else. Costs are measured on the first backward of the process (its probe chunks), and after
+    // that a healthy card measures chunk == whole and records the fused single submit as before.
+    int pwg = (int)(((size_t)g_w * g_h + 255) / 256);
+    int wchunk = polishChunk(PCH_WALK, pwg);
+    int rchunk = polishChunk(PCH_REDUCE, g_pn);
+    if (!bwProbe && wchunk >= pwg && rchunk >= g_pn) {
         begin(); recTerms(); recWalk(); recReduce();
         vkEndCommandBuffer(g_cmd);
         submitWait();
+        return;
+    }
+    if (!bwProbe) {
+        begin(); recTerms(); endSubmit();
+        auto tw = std::chrono::steady_clock::now();
+        for (int f = 0; f < pwg && !g_fatal; f += wchunk) {
+            int cnt = pwg - f < wchunk ? pwg - f : wchunk;
+            begin();
+            tpc.first = f * 256;
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbWalk);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
+            vkCmdDispatch(g_cmd, (uint32_t)cnt, 1, 1);
+            endSubmit();
+        }
+        polishCost(PCH_WALK, std::chrono::duration<double>(std::chrono::steady_clock::now() - tw).count(), pwg);
+        auto tr = std::chrono::steady_clock::now();
+        for (int f = 0; f < g_pn && !g_fatal; f += rchunk) {
+            int cnt = g_pn - f < rchunk ? g_pn - f : rchunk;
+            begin();
+            tpc.first = f;
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbReduce);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
+            vkCmdDispatch(g_cmd, (uint32_t)cnt, (uint32_t)PBSLICES, 1);
+            endSubmit();
+        }
+        polishCost(PCH_REDUCE, std::chrono::duration<double>(std::chrono::steady_clock::now() - tr).count(), g_pn);
+        if (g_fatal) return;
+        begin();
+        tpc.first = 0;
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbCombine);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_pbPL, 0, 1, &g_pbSet, 0, nullptr);
+        vkCmdPushConstants(g_cmd, g_pbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tpc), &tpc);
+        vkCmdDispatch(g_cmd, (uint32_t)g_pn, 1, 1);
+        endSubmit();
         return;
     }
     static double tTerms = 0, tWalk = 0, tReduce = 0;

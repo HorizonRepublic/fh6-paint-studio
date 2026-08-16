@@ -27,12 +27,12 @@ layout(std430, binding = 9) readonly  buffer Tb { int    tileOff[]; };
 layout(std430, binding = 10) readonly buffer Lb { int    tileList[]; };
 layout(std430, binding = 11) readonly buffer MA { float maskAtlas[]; };
 layout(std430, binding = 12) readonly buffer MM { int   maskMeta[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; } pc;
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices, first; } pc; // first: see polish_forward_tiled
 #include "mask_common.glsl"
 #include "polish_common.glsl"
 
 void main() {
-    int idx = int(gl_GlobalInvocationID.x);
+    int idx = int(gl_GlobalInvocationID.x) + pc.first;
     if (idx >= pc.w * pc.h) return;
     int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
     float d0 = dC[p], d1 = dC[p + 1], d2 = dC[p + 2], d3 = dC[p + 3];
