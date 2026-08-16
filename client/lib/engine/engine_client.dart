@@ -14,6 +14,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'protocol.dart';
@@ -351,12 +352,23 @@ class EngineClient {
     required int pixelW,
     required int pixelH,
     bool replace = false,
-  }) => call('library.save', {
-    'shapes': shapes,
-    'entry': entry,
-    'preview': {'w': pixelW, 'h': pixelH, 'pix': base64Encode(pixels)},
-    'replace': replace,
-  });
+  }) async {
+    // Off the UI isolate. A 2000x2000 preview is 16 MB raw and base64 of it is
+    // ~21 MB of string building — on the main isolate that is a visible freeze,
+    // and since finished runs started saving themselves it happens at the exact
+    // moment the result lands on screen. The transfer hands the bytes over
+    // without copying them.
+    final t = TransferableTypedData.fromList([pixels]);
+    final pix = await Isolate.run(
+      () => base64Encode(t.materialize().asUint8List()),
+    );
+    return call('library.save', {
+      'shapes': shapes,
+      'entry': entry,
+      'preview': {'w': pixelW, 'h': pixelH, 'pix': pix},
+      'replace': replace,
+    });
+  }
 
   Future<void> libraryDelete(String id) => call('library.delete', {'id': id});
 

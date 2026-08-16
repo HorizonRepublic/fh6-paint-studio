@@ -128,6 +128,16 @@ class EditLayer {
   };
 }
 
+/// One undo frame: the shapes AND the layers they belong to, plus which layer
+/// was active. Layers used to sit outside undo entirely.
+class _Snap {
+  _Snap(this.shapes, this.layers, this.active);
+
+  final List<EditShape> shapes;
+  final List<EditLayer> layers;
+  final int active;
+}
+
 /// A shape as the document stores it. Mutable on purpose: an edit is a change to
 /// this list, and the list is what is exported and injected.
 class EditShape {
@@ -154,10 +164,14 @@ class EditShape {
   /// separate membership list in step by hand.
   int layer;
 
+  /// COPIES of data/color, not the live lists. The maps this returns are handed
+  /// to the engine, written to disk and adopted back into the document; returning
+  /// the live lists meant a later edit reached through every one of them, so a
+  /// change made after an export could still turn up in what got injected.
   Map<String, dynamic> toJson() => {
     'type': type,
-    'data': data,
-    'color': color,
+    'data': List<double>.of(data),
+    'color': List<int>.of(color),
     'layer': layer,
     'score': 0,
   };
@@ -605,8 +619,11 @@ class Editor extends ChangeNotifier {
   int selected = -1;
   String? error;
 
-  final _undo = <List<EditShape>>[];
-  final _redo = <List<EditShape>>[];
+  /// An undo frame is the shapes AND the layers. Layers used to sit outside it,
+  /// so undoing a layer delete brought the shapes back with nowhere to live —
+  /// they had already been reassigned to another layer and stayed there.
+  final _undo = <_Snap>[];
+  final _redo = <_Snap>[];
 
   bool get canUndo => _undo.isNotEmpty;
   bool get canRedo => _redo.isNotEmpty;
@@ -760,23 +777,38 @@ class Editor extends ChangeNotifier {
   /// Snapshots the document before a change. Every mutation goes through this,
   /// which is what makes undo total rather than a list of special cases.
   void mark() {
-    _undo.add(shapes.map((s) => s.copy()).toList());
+    _undo.add(_snapshot());
     if (_undo.length > 100) _undo.removeAt(0);
     _redo.clear();
   }
 
+  _Snap _snapshot() => _Snap(
+    shapes.map((s) => s.copy()).toList(),
+    layers.map((l) => EditLayer(l.id, l.name, locked: l.locked, hidden: l.hidden)).toList(),
+    activeLayer,
+  );
+
   void undo() => _swap(_undo, _redo);
   void redo() => _swap(_redo, _undo);
 
-  void _swap(List<List<EditShape>> from, List<List<EditShape>> to) {
+  void _swap(List<_Snap> from, List<_Snap> to) {
     if (from.isEmpty) return;
     endInteraction();
     extra.clear();
-    to.add(shapes.map((s) => s.copy()).toList());
+    to.add(_snapshot());
     final restored = from.removeLast();
     shapes
       ..clear()
-      ..addAll(restored);
+      ..addAll(restored.shapes);
+    layers
+      ..clear()
+      ..addAll(restored.layers);
+    if (layers.any((l) => l.id == restored.active)) {
+      activeLayer = restored.active;
+    } else if (layers.isNotEmpty) {
+      activeLayer = layers.first.id;
+    }
+    if (!layers.any((l) => l.id == groupLayer)) groupLayer = null;
     if (selected >= shapes.length) selected = shapes.length - 1;
     notifyListeners();
     refresh();
@@ -1054,7 +1086,11 @@ class Editor extends ChangeNotifier {
   void removeLayer(int id) {
     if (layers.length <= 1) return;
     mark();
-    final home = layers.firstWhere((l) => l.id != id).id;
+    // The NEIGHBOUR, not layers.first: shapes from a layer deleted anywhere in
+    // the stack all landed in the bottom one, which on a multi-layer document
+    // is nowhere near where the user was working.
+    final at = layers.indexWhere((l) => l.id == id);
+    final home = layers[at > 0 ? at - 1 : (at + 1 < layers.length ? at + 1 : 0)].id;
     for (final s in shapes) {
       if (s.layer == id) s.layer = home;
     }
@@ -1074,9 +1110,14 @@ class Editor extends ChangeNotifier {
     if (l == null) return;
     l.locked = v;
     // Nothing in a locked layer may stay selected, or the inspector would go on
-    // editing what the lock was meant to protect.
-    if (v && current != null && current!.layer == id) selected = -1;
-    if (v && groupLayer == id) groupLayer = null;
+    // editing what the lock was meant to protect. That covered `selected` but
+    // not the move-group, so a locked layer's shapes kept travelling with the
+    // next drag — the exact thing extendTo already refuses to put in the group.
+    if (v) {
+      if (current != null && current!.layer == id) selected = -1;
+      extra.removeWhere((i) => i < shapes.length && shapes[i].layer == id);
+      if (groupLayer == id) groupLayer = null;
+    }
     notifyListeners();
   }
 
@@ -1084,7 +1125,13 @@ class Editor extends ChangeNotifier {
     final l = layerOf(id);
     if (l == null) return;
     l.hidden = v;
-    if (v && current != null && current!.layer == id) selected = -1;
+    if (v) {
+      if (current != null && current!.layer == id) selected = -1;
+      // Same as the lock: a hidden layer's shapes must leave the move-group, or
+      // the next drag silently moves things the user cannot see.
+      extra.removeWhere((i) => i < shapes.length && shapes[i].layer == id);
+      if (groupLayer == id) groupLayer = null;
+    }
     commit();
   }
 
@@ -1163,7 +1210,22 @@ class Editor extends ChangeNotifier {
       ..insert(0, s.type);
     if (recent.length > 10) recent.removeLast();
     mark();
-    s.layer = activeLayer;
+    // Never drop a new shape into a layer the user cannot see or touch: it
+    // would vanish the moment it was drawn and refuse every edit afterwards.
+    // Fall back to the nearest usable layer, adding one if there is none.
+    var target = layerOf(activeLayer);
+    if (target == null || target.locked || target.hidden) {
+      target = layers.cast<EditLayer?>().firstWhere(
+        (l) => l != null && !l.locked && !l.hidden,
+        orElse: () => null,
+      );
+      if (target == null) {
+        target = EditLayer(_nextLayerId++, 'Layer ${layers.length + 1}');
+        layers.add(target);
+      }
+      activeLayer = target.id;
+    }
+    s.layer = target.id;
     shapes.add(s);
     selected = shapes.length - 1;
     extra.clear();
@@ -1214,9 +1276,15 @@ class Editor extends ChangeNotifier {
 
   void duplicateSelected() {
     final s = current;
-    if (s == null) return;
+    // The background is index 0 and is not a shape the user owns: duplicating it
+    // put a second full-canvas rect over the art. Every other structural op
+    // guards this; this one did not.
+    if (s == null || selected == 0) return;
     mark();
     final copy = s.copy()..translate(8, 8);
+    // The insert shifts every index above it, and `extra` holds INDICES — the
+    // only structural op that left them pointing at their neighbours.
+    extra.clear();
     shapes.insert(selected + 1, copy);
     selected += 1;
     commit();

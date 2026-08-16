@@ -176,7 +176,11 @@ class _GalleryState extends State<Gallery> {
   });
 
   void _deletePicked(List<Map<String, dynamic>> visible) {
-    final ids = List<String>.of(_picked);
+    // Only what the user can actually SEE. `visible` was passed in and then
+    // ignored, so a pick made before a search was narrowed still got deleted —
+    // and the count in the confirmation counted runs that were not on screen.
+    final shown = {for (final e in visible) e['id'] as String?}..remove(null);
+    final ids = _picked.where(shown.contains).toList();
     if (ids.isEmpty) return;
     widget.onConfirm(
       Confirm(
@@ -195,8 +199,10 @@ class _GalleryState extends State<Gallery> {
           await studio.refreshLibrary();
           if (mounted) {
             setState(() {
-              _picked.clear();
-              _selecting = false;
+              // Only the ones actually deleted; a pick hidden by the filter
+              // stays picked so it is still there when the filter is cleared.
+              _picked.removeAll(ids);
+              _selecting = _picked.isNotEmpty;
             });
           }
         },

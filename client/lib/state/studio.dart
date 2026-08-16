@@ -342,6 +342,7 @@ class Studio extends ChangeNotifier {
     resultH = 0;
     selectedRunId = null;
     compare = 1;
+    compareN.value = 1;
     shapes = 0;
     total = 0;
     error = 0;
@@ -388,9 +389,14 @@ class Studio extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The wipe position, as its own listenable. It used to go through
+  /// notifyListeners, so one drag rebuilt every widget that watches the studio —
+  /// the whole shell — at pointer rate, for a number two painters read.
+  final compareN = ValueNotifier<double>(1);
+
   void setCompare(double v) {
     compare = v;
-    notifyListeners();
+    compareN.value = v;
   }
 
   /// Starts a reconstruction. Everything about HOW to fit it belongs to the
@@ -723,6 +729,7 @@ class Studio extends ChangeNotifier {
       sourceH = 0;
       region = null;
       compare = 1;
+    compareN.value = 1;
 
       // Then put the run's OWN source back if it is still on this machine. The
       // compare wipe — the app's main way of judging a result — was dead for
@@ -821,6 +828,7 @@ class Studio extends ChangeNotifier {
       sourceH = 0;
       region = null;
       compare = 1;
+    compareN.value = 1;
 
       geometry = Map<String, dynamic>.of(doc as Map<String, dynamic>);
       resultW = w;
@@ -867,6 +875,7 @@ class Studio extends ChangeNotifier {
     selectedRunId = null;
     phase = Phase.done;
     compare = 1;
+    compareN.value = 1;
     _note('done', 'edited: $shapes shapes');
     notifyListeners();
   }
@@ -1050,7 +1059,13 @@ class Studio extends ChangeNotifier {
         height: resultH,
         layers: injectLayers,
         scale: injectScale,
-        onLog: (line) => _note('info', line),
+        // _note only appends; the notify has to be here or the injector's
+        // progress lines sit in the log unseen until the whole write finishes,
+        // which is exactly the stretch where the user wants to know it is alive.
+        onLog: (line) {
+          _note('info', line);
+          if (!_disposed) notifyListeners();
+        },
       );
       injectSucceeded = true;
     } catch (err) {

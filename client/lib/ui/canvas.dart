@@ -162,14 +162,20 @@ class CanvasView extends StatelessWidget {
           // compare drag. Without the boundary each of those (~20×/s during a
           // fit) re-rasters the shared layer — the 46px plate shadow and the
           // full-canvas checker below — both of which are entirely static.
+          // The wipe listens to its OWN notifier: dragging it used to go through
+          // the studio's notifyListeners and rebuild the whole shell at pointer
+          // rate for a number only this painter and the seam read.
           RepaintBoundary(
-            child: CustomPaint(
-              painter: _ComparePainter(
-                result: result,
-                source: source,
-                srcView: srcView,
-                fraction: result == null ? 1 : 1 - studio.compare,
-                dpr: MediaQuery.devicePixelRatioOf(context),
+            child: ValueListenableBuilder<double>(
+              valueListenable: studio.compareN,
+              builder: (context, cmp, _) => CustomPaint(
+                painter: _ComparePainter(
+                  result: result,
+                  source: source,
+                  srcView: srcView,
+                  fraction: result == null ? 1 : 1 - cmp,
+                  dpr: MediaQuery.devicePixelRatioOf(context),
+                ),
               ),
             ),
           ),
@@ -325,25 +331,35 @@ class _Seam extends StatelessWidget {
   void _set(double x) => studio.setCompare((1 - x / width).clamp(0.0, 1.0));
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Stack(
+    children: [
+      Positioned.fill(
+        child: MouseRegion(
+          cursor: SystemMouseCursors.resizeLeftRight,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragStart: (d) => _set(d.localPosition.dx),
+            onHorizontalDragUpdate: (d) => _set(d.localPosition.dx),
+          ),
+        ),
+      ),
+      // Only the label moves with the drag; the gesture layer above is fixed.
+      ValueListenableBuilder<double>(
+        valueListenable: studio.compareN,
+        builder: (context, cmp, _) => _label(context, cmp),
+      ),
+    ],
+  );
+
+  Widget _label(BuildContext context, double cmp) {
     final x = _ComparePainter.seamAt(
       width,
-      1 - studio.compare,
+      1 - cmp,
       MediaQuery.devicePixelRatioOf(context),
     );
     return Stack(
       children: [
-        Positioned.fill(
-          child: MouseRegion(
-            cursor: SystemMouseCursors.resizeLeftRight,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragStart: (d) => _set(d.localPosition.dx),
-              onHorizontalDragUpdate: (d) => _set(d.localPosition.dx),
-            ),
-          ),
-        ),
-        if (studio.compare < 1)
+        if (cmp < 1)
           Positioned(
             left: x - 1,
             top: 0,
