@@ -1,21 +1,28 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // eagle_sign.comp — the |.| subgradient: s = sign(h - tH). pc.mode: 0 -> sx from hx/tHx, 1 -> sy.
 layout(local_size_x = 256) in;
-layout(std430, binding = 1) readonly buffer THX { double tHx[]; };
-layout(std430, binding = 9) readonly buffer HX { double hx[]; };
-layout(std430, binding = 10) readonly buffer HY { double hy[]; };
-layout(std430, binding = 11) readonly buffer THY { double tHy[]; };
-layout(std430, binding = 14)          buffer SX { double sx[]; };
-layout(std430, binding = 15)          buffer SY { double sy[]; };
+layout(std430, binding = 1) readonly buffer THX { REAL tHx[]; };
+layout(std430, binding = 9) readonly buffer HX { REAL hx[]; };
+layout(std430, binding = 10) readonly buffer HY { REAL hy[]; };
+layout(std430, binding = 11) readonly buffer THY { REAL tHy[]; };
+layout(std430, binding = 14)          buffer SX { REAL sx[]; };
+layout(std430, binding = 15)          buffer SY { REAL sy[]; };
 layout(std430, binding = 18) readonly buffer TW { float tw[]; };
 layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; int hasTW; } pc;
 void main() {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.w * pc.h) return;
-    double d = (pc.mode == 0) ? hx[i] - tHx[i] : hy[i] - tHy[i];
+    REAL d = (pc.mode == 0) ? hx[i] - tHx[i] : hy[i] - tHy[i];
     // region term weight enters the chain at the sign, like the CPU reference
-    double wi = pc.hasTW != 0 ? double(tw[i]) : 1.0LF;
-    double v = d > 0.0LF ? wi : (d < 0.0LF ? -wi : 0.0LF);
+    REAL wi = pc.hasTW != 0 ? REAL(tw[i]) : REAL(1.0);
+    REAL v = d > REAL(0.0) ? wi : (d < REAL(0.0) ? -wi : REAL(0.0));
     if (pc.mode == 0) sx[i] = v; else sy[i] = v;
 }

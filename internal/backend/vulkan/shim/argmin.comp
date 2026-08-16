@@ -3,22 +3,77 @@
 // eval'd colour/RAW-score into best[12] = [score,kind,p0..p5,oR,oG,oB,alpha]. Mirrors
 // shim.cu argminPass + gatherBest fused. Ties resolve to the lowest index.
 
+// With keep != 0 the incumbent in best[] survives unless the batch winner's RAW score is
+// strictly better — the on-device hill climb's cross-round rule, mirroring the host loop's
+// `ms < bestScore` (selection within the batch stays by ADJUSTED score, exactly like pickBest).
+//
+// inlineAdj != 0: compute the adjusted score here instead of reading adj[] — the mutate round
+// loop's prepadj dispatch collapsed into this one. The expressions are copied VERBATIM from
+// prepadj.comp, so the value (and therefore the winner) is bit-identical; the one-shot searches
+// keep prepadj because the coarse filter consumes the materialised adj[] buffer.
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Ad { float adj[]; };
 layout(std430, binding = 1) readonly  buffer Sc { float scand[]; };
 layout(std430, binding = 2) readonly  buffer So { float sout[]; };
-layout(std430, binding = 3) writeonly buffer Bt { float best[]; };
-layout(push_constant) uniform PC { int n; } pc;
+layout(std430, binding = 3) buffer Bt { float best[]; };
+layout(push_constant) uniform PC { int n, keep, inlineAdj, compact, shapeCount, W, H; } pc;
 
+const float DEG2RAD = 0.017453292519943295;
 const float REJECTED = 3.4028235e38;
 shared float sv[256];
 shared int si[256];
+
+int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// bboxSpan: verbatim copy of prepadj.comp's — keep the two in lockstep.
+void bboxSpan(int kind, float P[6], int W, int H, out int dw, out int dh) {
+    int xMin, yMin, xMax, yMax;
+    if (kind == 2) {
+        xMin = clampi(int(floor(min(P[0], min(P[2], P[4])))), 0, W - 1);
+        xMax = clampi(int(ceil(max(P[0], max(P[2], P[4])))), 0, W - 1);
+        yMin = clampi(int(floor(min(P[1], min(P[3], P[5])))), 0, H - 1);
+        yMax = clampi(int(ceil(max(P[1], max(P[3], P[5])))), 0, H - 1);
+    } else {
+        float cx = P[0], cy = P[1], ex, ey;
+        float th = P[4] * DEG2RAD, c = cos(th), s = sin(th);
+        if (kind == 1) {
+            float hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+            float shx = hw + abs(P[5]) * hh;
+            ex = abs(shx * c) + abs(hh * s); ey = abs(shx * s) + abs(hh * c);
+        } else {
+            float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+            if (P[5] != 0.0) {
+                float shx = sqrt(rx * rx + P[5] * P[5] * ry * ry);
+                ex = abs(shx * c) + abs(ry * s); ey = abs(shx * s) + abs(ry * c);
+            } else {
+                ex = sqrt(rx * rx * c * c + ry * ry * s * s); ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+            }
+        }
+        xMin = clampi(int(floor(cx - ex - 1.0)), 0, W - 1); xMax = clampi(int(ceil(cx + ex + 1.0)), 0, W - 1);
+        yMin = clampi(int(floor(cy - ey - 1.0)), 0, H - 1); yMax = clampi(int(ceil(cy + ey + 1.0)), 0, H - 1);
+    }
+    dw = xMax - xMin; dh = yMax - yMin;
+}
+
+// adjOf: verbatim prepadj.comp main-loop body for one index.
+float adjOf(int i) {
+    float sc = sout[i * 5];
+    if (pc.compact != 0 && sc < REJECTED) {
+        int b = i * 11;
+        int kind = int(scand[b] + 0.5);
+        float P[6] = float[6](scand[b + 1], scand[b + 2], scand[b + 3], scand[b + 4], scand[b + 5], scand[b + 6]);
+        int dw, dh; bboxSpan(kind, P, pc.W, pc.H, dw, dh);
+        float hs = float(max(dw, dh)) * 0.5;
+        if (hs >= 96.0) sc += (pc.shapeCount < 8) ? hs * hs * 0.1 : hs * 0.05;
+    }
+    return sc;
+}
 
 void main() {
     uint t = gl_LocalInvocationID.x;
     float bv = REJECTED; int bi = -1;
     for (int i = int(t); i < pc.n; i += 256) {
-        float v = adj[i];
+        float v = (pc.inlineAdj != 0) ? adjOf(i) : adj[i];
         if (v < bv || (v == bv && i < bi)) { bv = v; bi = i; }
     }
     sv[t] = bv; si[t] = bi;
@@ -32,8 +87,12 @@ void main() {
     }
     if (t != 0u) return;
     int b = si[0];
-    if (b < 0) { best[0] = REJECTED; for (int k = 1; k < 12; k++) best[k] = 0.0; return; }
+    if (b < 0) {
+        if (pc.keep == 0) { best[0] = REJECTED; for (int k = 1; k < 12; k++) best[k] = 0.0; }
+        return;
+    }
     int cc = b * 11, o = b * 5;
+    if (pc.keep != 0 && !(sout[o] < best[0])) return;
     best[0] = sout[o + 0];
     best[1] = scand[cc + 0];
     best[2] = scand[cc + 1]; best[3] = scand[cc + 2]; best[4] = scand[cc + 3];

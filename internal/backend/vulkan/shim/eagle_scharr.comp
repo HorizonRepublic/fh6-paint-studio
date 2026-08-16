@@ -1,20 +1,27 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // eagle_scharr.comp — /16 Scharr gradient planes of luma; border ring stays 0 (engine eagleState.scharr).
 layout(local_size_x = 256) in;
 layout(std430, binding = 2) readonly buffer Lb { float luma[]; };
-layout(std430, binding = 3)          buffer GX { double gx[]; };
-layout(std430, binding = 4)          buffer GY { double gy[]; };
+layout(std430, binding = 3)          buffer GX { REAL gx[]; };
+layout(std430, binding = 4)          buffer GY { REAL gy[]; };
 layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
 void main() {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.w * pc.h) return;
     int x = i % pc.w, y = i / pc.w;
-    if (x == 0 || x == pc.w - 1 || y == 0 || y == pc.h - 1) { gx[i] = 0.0LF; gy[i] = 0.0LF; return; }
+    if (x == 0 || x == pc.w - 1 || y == 0 || y == pc.h - 1) { gx[i] = REAL(0.0); gy[i] = REAL(0.0); return; }
     int w = pc.w;
-    double tl = luma[i - w - 1], tc = luma[i - w], tr = luma[i - w + 1];
-    double ml = luma[i - 1], mr = luma[i + 1];
-    double bl = luma[i + w - 1], bc = luma[i + w], br = luma[i + w + 1];
-    gx[i] = ((3.0LF * tr + 10.0LF * mr + 3.0LF * br) - (3.0LF * tl + 10.0LF * ml + 3.0LF * bl)) / 16.0LF;
-    gy[i] = ((3.0LF * bl + 10.0LF * bc + 3.0LF * br) - (3.0LF * tl + 10.0LF * tc + 3.0LF * tr)) / 16.0LF;
+    REAL tl = luma[i - w - 1], tc = luma[i - w], tr = luma[i - w + 1];
+    REAL ml = luma[i - 1], mr = luma[i + 1];
+    REAL bl = luma[i + w - 1], bc = luma[i + w], br = luma[i + w + 1];
+    gx[i] = ((REAL(3.0) * tr + REAL(10.0) * mr + REAL(3.0) * br) - (REAL(3.0) * tl + REAL(10.0) * ml + REAL(3.0) * bl)) / REAL(16.0);
+    gy[i] = ((REAL(3.0) * bl + REAL(10.0) * bc + REAL(3.0) * br) - (REAL(3.0) * tl + REAL(10.0) * tc + REAL(3.0) * tr)) / REAL(16.0);
 }

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -84,6 +85,7 @@ type run struct {
 	devProp    deviceProposer
 	propEvery  int
 	devMoment  momentSearcher
+	devMutate  mutateSearcher
 
 	// Generation strategy: random / moment / hybrid (selected once from the options).
 	src shapeSource
@@ -132,10 +134,14 @@ func Run(be backend.Backend, opt Options) Result {
 		if r.opt.ShadePrepass && r.glyphs {
 			r.phase("Claiming shading…")
 			r.timePass(&r.tm.ShadePre, func() { r.shadePrepass() })
+		} else if r.opt.ShadePrepass {
+			applog.Printf("shade prepass: SKIPPED — backend has no mask-word support (a shipped default silently not reaching the run)")
 		}
 		if r.opt.GlyphPrepass && r.glyphs {
 			r.phase("Claiming words…")
 			r.timePass(&r.tm.GlyphPre, func() { r.glyphPrepass() })
+		} else if r.opt.GlyphPrepass {
+			applog.Printf("glyph prepass: SKIPPED — backend has no mask-word support")
 		}
 		r.phase("Placing shapes…")
 		r.greedy()
@@ -143,10 +149,34 @@ func Run(be backend.Backend, opt Options) Result {
 	if r.opt.CompSeeds > 0 {
 		applog.Printf("comp-seeds: %d proposed, %d won the step", r.compSeedTried, r.compSeedWon)
 	}
+	if r.deviceLost() {
+		// The greedy aborted on a dead device; the post-pipeline would grind for minutes against
+		// error-returning GPU calls before DevErr surfaced. Report now.
+		r.tm.Total = time.Since(runStart)
+		return Result{Shapes: r.shapes, InitialError: r.initialErr, FinalError: r.finalErr,
+			Timings: r.tm, DevErr: errDeviceLost}
+	}
 	r.postProcess()
 	r.refine()
 	r.tm.Total = time.Since(runStart)
-	return Result{Shapes: r.shapes, InitialError: r.initialErr, FinalError: r.finalErr, Timings: r.tm}
+	res := Result{Shapes: r.shapes, InitialError: r.initialErr, FinalError: r.finalErr, Timings: r.tm}
+	if r.deviceLost() {
+		res.DevErr = errDeviceLost
+	}
+	return res
+}
+
+// errDeviceLost is what a run reports after the GPU context died under it (Windows TDR, a driver
+// reset, or VRAM exhaustion killing the device). The message is user-facing via the runner's
+// Failed event, so it says what to actually do about it.
+var errDeviceLost = errors.New("the GPU device was lost during generation (driver reset / TDR watchdog). " +
+	"This usually means the card ran out of memory or was too busy — close other GPU-heavy apps " +
+	"(the game, browsers), lower the generation resolution, and try again")
+
+// deviceLost reports the backend's sticky device-loss flag; false on backends without it.
+func (r *run) deviceLost() bool {
+	dl, ok := r.be.(interface{ DeviceLost() bool })
+	return ok && dl.DeviceLost()
 }
 
 // newRun builds the run state: it normalises the options, initialises the backend canvas and the
@@ -169,6 +199,9 @@ func newRun(be backend.Backend, opt Options) *run {
 			}
 		}
 	}
+	// Stop must reach the polish loops too — they are most of a run's wall time (see
+	// PolishOptions.Cancel). Every re-polish (LOO, backfit) inherits it through r.opt.
+	opt.PolishOpts.Cancel = opt.Cancel
 	rng := rand.New(rand.NewSource(seed(opt.Seed)))
 	w, h := opt.Width, opt.Height
 	if opt.RandomSamples < 1 {
@@ -243,7 +276,8 @@ func newRun(be backend.Backend, opt Options) *run {
 	// re-score the survivors at the full budget. Set unconditionally (enable OR disable) so a
 	// reused backend never carries stale coarse state from a prior run.
 	if cs, ok := be.(coarseSearcher); ok {
-		cs.SetCoarse(opt.CoarseSearch, opt.CoarseBudget, opt.CoarseK)
+		// FH6_COARSE=0 pins the filter off for A/Bs from the studio, which has no flags.
+		cs.SetCoarse(opt.CoarseSearch && os.Getenv("FH6_COARSE") != "0", opt.CoarseBudget, opt.CoarseK)
 		cs.SetCoarseFP16(opt.CoarseFP16)
 	}
 
@@ -408,6 +442,15 @@ func newRun(be backend.Backend, opt Options) *run {
 			devMoment = m
 		}
 	}
+	// On-device hill climb: the whole mutate phase (rounds x perRound) in one submit instead of one
+	// upload + readback per round. Same neighbourhood as MutateShape, device RNG stream — validated
+	// by paired end-to-end quality, not golden-diff. FH6_DEV_MUTATE=0 pins it off for A/Bs.
+	var devMutate mutateSearcher
+	if opt.OnDeviceSearch && os.Getenv("FH6_DEV_MUTATE") != "0" {
+		if m, ok := be.(mutateSearcher); ok {
+			devMutate = m
+		}
+	}
 	// Region gate × device generators: upload the map (fp_set_kind_gate) when supported, else
 	// disable the gate (see the comment above). ALWAYS clear a stale map when the gate is off —
 	// a pooled backend must not carry the previous run's gate.
@@ -525,7 +568,7 @@ func newRun(be backend.Backend, opt Options) *run {
 		detailStart: detailStart,
 		orient:      orient, coh: coh, aspectCap: aspectCap, detailGrid: detailGrid, boundCtx: boundCtx, kindGate: kg,
 		devProp: devProp, propEvery: opt.ProposerEvery,
-		devSearch: devSearch, devMoment: devMoment, src: newShapeSource(opt),
+		devSearch: devSearch, devMoment: devMoment, devMutate: devMutate, src: newShapeSource(opt),
 		initCanvas: initCanvas, shapes: shapes, grid: grid, gw: gw, gh: gh,
 		sampler: sampler, persist: persist, glyphs: glyphs, initialErr: initialErr,
 		fobaNext: opt.FoBaEvery,
@@ -556,10 +599,24 @@ func (r *run) greedy() {
 		if r.opt.Cancel != nil && r.opt.Cancel() {
 			break
 		}
+		// A lost device (TDR/driver reset) makes every Evaluate come back as an error, which reads
+		// as "no improving candidate" — the loop would spin through maxNI expensive host-side
+		// generations against a dead GPU. Abort instead; Run() turns this into Result.DevErr.
+		if r.deviceLost() {
+			applog.Printf("greedy: GPU device lost at shape %d — aborting the run", len(r.shapes)-1)
+			break
+		}
 		if r.devProp != nil {
 			if placed := len(r.shapes) - 1; placed%propEvery == 0 {
 				prog := float32(placed) / float32(maxInt(r.genTarget, 1))
-				r.devProp.SetProposerEnabled(true, prog, float32(r.opt.ProposerFrac), float32(jitterOr(r.opt.ProposerJitter)))
+					// The SAME resolved fraction newRun installed: passing the raw option here used to
+				// overwrite the 0.5 fallback with 0 on the FIRST iteration (placed=0 hits the
+				// refresh), silently disabling the proposer for the whole run.
+				frac := float32(r.opt.ProposerFrac)
+				if frac <= 0 {
+					frac = 0.5
+				}
+				r.devProp.SetProposerEnabled(true, prog, frac, float32(jitterOr(r.opt.ProposerJitter)))
 				r.devProp.RunProposer(prog)
 			}
 		}
@@ -678,16 +735,33 @@ func (r *run) searchOne(progress float32, sampGrid []float32, penalty func(model
 		}
 		r.tm.Evaluate += time.Since(t0)
 	}
-	for i := 0; i < r.rounds && bestScore < 0; i++ {
-		t0 := time.Now()
-		mut := MutateShape(r.rng, best, r.perRound, float32(w), float32(h), r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin)
-		clampCandidatesToCanvas(mut, float32(w), float32(h), r.opt.CanvasPad)
-		r.tm.Mutate += time.Since(t0)
-		t0 = time.Now()
-		mb, ms := pickBest(r.be, mut, penalty)
-		r.tm.Evaluate += time.Since(t0)
-		if ms < bestScore {
-			best, bestScore = mb, ms
+	if r.rounds > 0 && bestScore < 0 {
+		// Device path first: all rounds in one submit. Masks stay on the host loop — the device
+		// eval rejects word candidates, so a mask incumbent would come back unimproved.
+		if r.devMutate != nil && !model.IsMask(best.Kind) {
+			t0 := time.Now()
+			mb, ms, ok := r.devMutate.SearchMutate(r.rng.Int63(), best, bestScore, r.rounds, r.perRound,
+				r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin, r.opt.CompactPenalty, len(r.shapes)-1, r.opt.CanvasPad)
+			r.tm.Evaluate += time.Since(t0)
+			if ok {
+				if ms < bestScore {
+					best, bestScore = mb, ms
+				}
+				return best, bestScore
+			}
+			r.devMutate = nil // older DLL without the export — host rounds for the rest of the run
+		}
+		for i := 0; i < r.rounds && bestScore < 0; i++ {
+			t0 := time.Now()
+			mut := MutateShape(r.rng, best, r.perRound, float32(w), float32(h), r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin)
+			clampCandidatesToCanvas(mut, float32(w), float32(h), r.opt.CanvasPad)
+			r.tm.Mutate += time.Since(t0)
+			t0 = time.Now()
+			mb, ms := pickBest(r.be, mut, penalty)
+			r.tm.Evaluate += time.Since(t0)
+			if ms < bestScore {
+				best, bestScore = mb, ms
+			}
 		}
 	}
 	return best, bestScore
@@ -724,9 +798,7 @@ func (r *run) postProcess() {
 	// Re-render the canvas (from the same init) with the new colors so FinalError
 	// reflects the re-solve.
 	_ = r.be.Reset(r.initCanvas)
-	for _, s := range r.shapes[1:] {
-		_ = r.be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(r.be, r.shapes[1:])
 
 	r.grid, _, _, _ = r.be.ErrorGrid()
 	r.finalErr = sumGrid(r.grid)
@@ -740,10 +812,23 @@ func (r *run) postProcess() {
 func (r *run) refine() {
 	if r.opt.Cancel != nil && r.opt.Cancel() {
 		// Stopped early — keep the finalized partial result (prune + recolor + re-render from
-		// postProcess) and skip the heavy refinement.
+		// postProcess) and skip the heavy refinement. lockColors + clampToBudget still run below
+		// via the finaliser: a cancelled MONO run must not ship un-snapped colours, and the 3000
+		// ceiling holds regardless of how the run ended.
+		r.lockColors()
+		r.clampToBudget()
 		return
 	}
 	for _, p := range postPasses() {
+		// Between-pass Stop AND device-loss: without these, cancel was checked ONCE before the
+		// refinement, and a TDR mid-polish let LOO/standout grind a dead GPU for minutes before
+		// Result.DevErr surfaced.
+		if r.opt.Cancel != nil && r.opt.Cancel() {
+			break
+		}
+		if r.deviceLost() {
+			break
+		}
 		if !p.enabled(r.opt) {
 			continue
 		}

@@ -1,10 +1,17 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 #extension GL_GOOGLE_include_directive : require
 // eval.comp — Vulkan port of shim.cu evalKernel (HARD path). One workgroup per
 // candidate; 128 threads stride the bbox pixels, accumulate 19 float32 sums in
 // shared memory, fixed-order tree-reduce (deterministic, no atomics), then thread 0
-// computes the optimal colour + ΔSSE in double — mirroring the CPU golden reference.
+// computes the optimal colour + ΔSSE in REAL — mirroring the CPU golden reference.
 // Accumulator layout (NACC=19): 0=W 1=n 2=nt 3..6=sT(rgba) 7..10=sC 11..14=sC2 15..18=sTC.
 
 layout(local_size_x = 128) in;
@@ -35,10 +42,18 @@ const int   NACC     = 19;
 const float DEG2RAD  = 0.017453292519943295;
 const float REJECTED = 3.4028235e38; // FLT_MAX, matches shim.cu REJECTED
 
-shared float sh[128 * NACC];
+// Half the workgroup's worth of accumulator slots, not all of it: the first reduction level pairs
+// lane i with lane i+64, so lanes 64..127 park their registers and lanes 0..63 fold them in before
+// the shared-memory tree starts. Same pairing, same order, same floats — but 4.9KB of shared
+// memory per workgroup instead of 9.7KB, which is the occupancy limiter on small GPUs
+// (GTX 1050-class: 62% -> 100% resident threads).
+shared float sh[64 * NACC];
+// Per-lane analytic-alpha trials (hard epilogue): up to 6 grid alphas + the candidate's own.
+shared REAL trD[8], trR[8], trG[8], trB[8];
+shared float trA[8];
 
 int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-double clamp01d(double v) { return v < 0.0LF ? 0.0LF : (v > 1.0LF ? 1.0LF : v); }
+REAL clamp01d(REAL v) { return v < REAL(0.0) ? REAL(0.0) : (v > REAL(1.0) ? REAL(1.0) : v); }
 
 // Per-pixel inside test in float32, mirroring shim.cu insideC. kind: 0=ellipse 1=rect 2=tri 3=line.
 bool insideShape(int kind, float P[6], int x, int y) {
@@ -182,9 +197,18 @@ void main() {
                 // L0=sum(w a^2) L1=n L2=n_transparent | L3-5=sum(w a r) | L6-8=sum(w a^2 s) |
                 // L9-11=sum(w a r s) | L12-14=sum(w a^2 s^2) | L15=alpha dSSE | L16=spill.
                 float ac = clamp(Ain, 1e-3, 1.0);
+                // Strength-reduced (x,y): the per-sample % and / on a runtime divisor compile to
+                // ~20-instruction emulation sequences (no hardware integer divide) and were two
+                // thirds of the loop's address ALU. The recurrence visits the IDENTICAL (x,y)
+                // sequence per thread, so sums are bit-identical. dr < cols always, so one
+                // conditional subtract renormalises.
+                int cxi = int(lid) % cols, cyi = int(lid) / cols;
+                int dq = 128 / cols, dr = 128 % cols;
                 for (int tt = int(lid); tt < total; tt += 128) {
-                    int x = xMin + (tt % cols) * step;
-                    int y = yMin + (tt / cols) * step;
+                    int x = xMin + cxi * step;
+                    int y = yMin + cyi * step;
+                    cxi += dr; cyi += dq;
+                    if (cxi >= cols) { cxi -= cols; cyi++; }
                     float cov = gradCov(kind, P, x, y);
                     if (cov <= 0.0) continue;
                     float ap = ac * cov;
@@ -203,10 +227,15 @@ void main() {
                     float oms = 1.0 - sa;
                     L[15] += wgt * (ap * ap * oms * oms - 2.0 * ap * oms * (ta - sa));
                 }
-            } else
+            } else {
+            // Same strength reduction as the gradient branch above; same bit-identity argument.
+            int cxi = int(lid) % cols, cyi = int(lid) / cols;
+            int dq = 128 / cols, dr = 128 % cols;
             for (int tt = int(lid); tt < total; tt += 128) {
-                int x = xMin + (tt % cols) * step;
-                int y = yMin + (tt / cols) * step;
+                int x = xMin + cxi * step;
+                int y = yMin + cyi * step;
+                cxi += dr; cyi += dq;
+                if (cxi >= cols) { cxi -= cols; cyi++; }
                 if (!insideShape(kind, P, x, y)) continue;
                 int idx = y * pc.W + x, p = idx * 4;
                 float ta = target[p + 3];
@@ -220,93 +249,117 @@ void main() {
                 L[11] += wgt * sr * sr; L[12] += wgt * sg * sg; L[13] += wgt * sb * sb; L[14] += wgt * sa * sa;
                 L[15] += wgt * tr * sr; L[16] += wgt * tg * sg; L[17] += wgt * tb * sb; L[18] += wgt * ta * sa;
             }
+            }
         }
     }
 
-    for (int k = 0; k < NACC; k++) sh[lid * uint(NACC) + uint(k)] = L[k];
+    if (lid >= 64u) {
+        for (int k = 0; k < NACC; k++) sh[(lid - 64u) * uint(NACC) + uint(k)] = L[k];
+    }
     barrier();
-    for (uint s = 64u; s > 0u; s >>= 1) {
+    if (lid < 64u) {
+        for (int k = 0; k < NACC; k++) { L[k] += sh[lid * uint(NACC) + uint(k)]; sh[lid * uint(NACC) + uint(k)] = L[k]; }
+    }
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
         if (lid < s)
             for (int k = 0; k < NACC; k++) sh[lid * uint(NACC) + uint(k)] += sh[(lid + s) * uint(NACC) + uint(k)];
         barrier();
     }
-    if (lid != 0u || gid >= uint(pc.n)) return;
+    if (gid >= uint(pc.n)) return;
 
+    // The whole workgroup stays alive past this point: with the analytic-alpha grid on, the
+    // alpha trials below run one-per-lane instead of as a serial fp64 chain on lane 0 (the chain
+    // ran at the 1/32 fp64 rate on consumer parts while 127 lanes waited). Every branch taken
+    // before the trial barrier is uniform across the workgroup.
     uint ob = gid * 5u;
-    double a = double(Ain);
-    if (a < 1e-3LF) a = 1e-3LF;
-    if (a > 1.0LF) a = 1.0LF;
-    double W_ = double(sh[0]), nn = double(sh[1]), nt = double(sh[2]);
+    REAL a = REAL(Ain);
+    if (a < REAL(1e-3)) a = REAL(1e-3);
+    if (a > REAL(1.0)) a = REAL(1.0);
+    REAL W_ = REAL(sh[0]), nn = REAL(sh[1]), nt = REAL(sh[2]);
     // Same split as the accumulation branch: a mask word is per-pixel by construction and must be
     // reduced the way it was accumulated. Reducing it down the hard path reads accumulator slots that
     // the gradient branch filled with different quantities, which is how every word came back
     // REJECTED with an FLT_MAX score.
     if (kind >= MASKBASE || (isGradKind(kind) && pc.gradOn != 0)) {
+        if (lid != 0u) return;
         // Gradient epilogue: the per-pixel alpha makes the optimal colour a weighted ratio and the
         // dSSE a quadratic in it. Mirrors the CUDA gradient branch term for term.
-        double saa = W_;
-        if (nn < 1.0LF || saa <= 0.0LF) { outb[ob] = REJECTED; return; }
-        if (nt > 0.0LF && nt > 1.5LF * nn) { outb[ob] = REJECTED; return; }
-        double sarR = double(sh[3]), sarG = double(sh[4]), sarB = double(sh[5]);
-        double saasR = double(sh[6]), saasG = double(sh[7]), saasB = double(sh[8]);
-        double sarsR = double(sh[9]), sarsG = double(sh[10]), sarsB = double(sh[11]);
-        double saassR = double(sh[12]), saassG = double(sh[13]), saassB = double(sh[14]);
-        double dAcc = double(sh[15]), saaT = double(sh[16]);
-        double oR = clamp((sarR + saasR) / saa, 0.0LF, 1.0LF);
-        double oG = clamp((sarG + saasG) / saa, 0.0LF, 1.0LF);
-        double oB = clamp((sarB + saasB) / saa, 0.0LF, 1.0LF);
-        double td = dAcc;
-        td += 2.0LF * sarsR + saassR - 2.0LF * oR * (sarR + saasR) + oR * oR * saa;
-        td += 2.0LF * sarsG + saassG - 2.0LF * oG * (sarG + saasG) + oG * oG * saa;
-        td += 2.0LF * sarsB + saassB - 2.0LF * oB * (sarB + saasB) + oB * oB * saa;
-        if (nt > 0.0LF) {
-            double spillFrac = nt / (nn + nt);
-            td += saaT * (1.0LF + 2.0LF * spillFrac) * (oR * oR + oG * oG + oB * oB + 1.0LF);
+        REAL saa = W_;
+        if (nn < REAL(1.0) || saa <= REAL(0.0)) { outb[ob] = REJECTED; return; }
+        if (nt > REAL(0.0) && nt > REAL(1.5) * nn) { outb[ob] = REJECTED; return; }
+        REAL sarR = REAL(sh[3]), sarG = REAL(sh[4]), sarB = REAL(sh[5]);
+        REAL saasR = REAL(sh[6]), saasG = REAL(sh[7]), saasB = REAL(sh[8]);
+        REAL sarsR = REAL(sh[9]), sarsG = REAL(sh[10]), sarsB = REAL(sh[11]);
+        REAL saassR = REAL(sh[12]), saassG = REAL(sh[13]), saassB = REAL(sh[14]);
+        REAL dAcc = REAL(sh[15]), saaT = REAL(sh[16]);
+        REAL oR = clamp((sarR + saasR) / saa, REAL(0.0), REAL(1.0));
+        REAL oG = clamp((sarG + saasG) / saa, REAL(0.0), REAL(1.0));
+        REAL oB = clamp((sarB + saasB) / saa, REAL(0.0), REAL(1.0));
+        REAL td = dAcc;
+        td += REAL(2.0) * sarsR + saassR - REAL(2.0) * oR * (sarR + saasR) + oR * oR * saa;
+        td += REAL(2.0) * sarsG + saassG - REAL(2.0) * oG * (sarG + saasG) + oG * oG * saa;
+        td += REAL(2.0) * sarsB + saassB - REAL(2.0) * oB * (sarB + saasB) + oB * oB * saa;
+        if (nt > REAL(0.0)) {
+            REAL spillFrac = nt / (nn + nt);
+            td += saaT * (REAL(1.0) + REAL(2.0) * spillFrac) * (oR * oR + oG * oG + oB * oB + REAL(1.0));
         }
-        outb[ob] = float(td * double(step * step));
+        outb[ob] = float(td * REAL(step * step));
         outb[ob + 1u] = float(oR); outb[ob + 2u] = float(oG); outb[ob + 3u] = float(oB);
         outb[ob + 4u] = Ain;
         return;
     }
-    if (kind > 5 || nn < 1.0LF || W_ <= 0.0LF) { outb[ob] = REJECTED; return; }
-    if (nt > 0.0LF && nt > 1.5LF * nn) { outb[ob] = REJECTED; return; }
-    double sTR = double(sh[3]), sTG = double(sh[4]), sTB = double(sh[5]), sTA = double(sh[6]);
-    double sCR = double(sh[7]), sCG = double(sh[8]), sCB = double(sh[9]), sCA = double(sh[10]);
-    double sCR2 = double(sh[11]), sCG2 = double(sh[12]), sCB2 = double(sh[13]), sCA2 = double(sh[14]);
-    double sTCR = double(sh[15]), sTCG = double(sh[16]), sTCB = double(sh[17]), sTCA = double(sh[18]);
-    double invW = 1.0LF / W_;
+    if (kind > 5 || nn < REAL(1.0) || W_ <= REAL(0.0)) { if (lid == 0u) outb[ob] = REJECTED; return; }
+    if (nt > REAL(0.0) && nt > REAL(1.5) * nn) { if (lid == 0u) outb[ob] = REJECTED; return; }
+    REAL sTR = REAL(sh[3]), sTG = REAL(sh[4]), sTB = REAL(sh[5]), sTA = REAL(sh[6]);
+    REAL sCR = REAL(sh[7]), sCG = REAL(sh[8]), sCB = REAL(sh[9]), sCA = REAL(sh[10]);
+    REAL sCR2 = REAL(sh[11]), sCG2 = REAL(sh[12]), sCB2 = REAL(sh[13]), sCA2 = REAL(sh[14]);
+    REAL sTCR = REAL(sh[15]), sTCG = REAL(sh[16]), sTCB = REAL(sh[17]), sTCA = REAL(sh[18]);
+    REAL invW = REAL(1.0) / W_;
     // Mirrors shim.cu hardEpilogue: k=-1 scores the candidate's own alpha (grid off keeps exactly
     // that, alpha passed through raw); grid alphas then compete and the ΔSSE-min pair wins.
+    // The trials are independent given the sums, so each runs on its own LANE (expressions kept
+    // verbatim); lane 0 then selects walking k = -1, 0, 1, ... with the same strict-< first-wins
+    // rule the serial loop applied — same values, same selection, agN+1x shorter fp64 chain.
     float agv[6] = float[6](pc.ag0, pc.ag1, pc.ag2, pc.ag3, pc.ag4, pc.ag5);
-    double bR = 0.0LF, bG = 0.0LF, bB = 0.0LF, bD = 0.0LF;
-    float bA = Ain;
-    for (int k = -1; k < pc.agN; k++) {
-        double aa = a;
+    int trials = pc.agN + 1;
+    if (lid < uint(trials)) {
+        int k = int(lid) - 1;
+        REAL aa = a;
         if (k >= 0) {
-            aa = double(agv[k]);
-            if (aa < 1e-3LF) aa = 1e-3LF;
-            if (aa > 1.0LF) aa = 1.0LF;
+            aa = REAL(agv[k]);
+            if (aa < REAL(1e-3)) aa = REAL(1e-3);
+            if (aa > REAL(1.0)) aa = REAL(1.0);
         }
-        double invA = 1.0LF - aa;
-        double oR = clamp01d((sTR * invW - (sCR * invW) * invA) / aa);
-        double oG = clamp01d((sTG * invW - (sCG * invW) * invA) / aa);
-        double oB = clamp01d((sTB * invW - (sCB * invW) * invA) / aa);
-        double a2 = aa * aa, twoA = 2.0LF * aa;
-        double dR = a2 * (W_ * oR * oR - 2.0LF * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
-        double dG = a2 * (W_ * oG * oG - 2.0LF * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
-        double dB = a2 * (W_ * oB * oB - 2.0LF * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
-        double dA = a2 * (W_ - 2.0LF * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
-        double totalDelta = dR + dG + dB + dA;
-        if (nt > 0.0LF) {
-            double spillFrac = nt / (nn + nt);
-            totalDelta += a2 * nt * (1.0LF + 2.0LF * spillFrac) * (oR * oR + oG * oG + oB * oB + 1.0LF);
+        REAL invA = REAL(1.0) - aa;
+        REAL oR = clamp01d((sTR * invW - (sCR * invW) * invA) / aa);
+        REAL oG = clamp01d((sTG * invW - (sCG * invW) * invA) / aa);
+        REAL oB = clamp01d((sTB * invW - (sCB * invW) * invA) / aa);
+        REAL a2 = aa * aa, twoA = REAL(2.0) * aa;
+        REAL dR = a2 * (W_ * oR * oR - REAL(2.0) * oR * sCR + sCR2) - twoA * (oR * sTR - oR * sCR - sTCR + sCR2);
+        REAL dG = a2 * (W_ * oG * oG - REAL(2.0) * oG * sCG + sCG2) - twoA * (oG * sTG - oG * sCG - sTCG + sCG2);
+        REAL dB = a2 * (W_ * oB * oB - REAL(2.0) * oB * sCB + sCB2) - twoA * (oB * sTB - oB * sCB - sTCB + sCB2);
+        REAL dA = a2 * (W_ - REAL(2.0) * sCA + sCA2) - twoA * (sTA - sCA - sTCA + sCA2);
+        REAL totalDelta = dR + dG + dB + dA;
+        if (nt > REAL(0.0)) {
+            REAL spillFrac = nt / (nn + nt);
+            totalDelta += a2 * nt * (REAL(1.0) + REAL(2.0) * spillFrac) * (oR * oR + oG * oG + oB * oB + REAL(1.0));
         }
-        if (k < 0 || totalDelta < bD) {
-            bR = oR; bG = oG; bB = oB; bD = totalDelta;
-            bA = (k < 0) ? Ain : float(aa);
+        trD[lid] = totalDelta;
+        trR[lid] = oR; trG[lid] = oG; trB[lid] = oB;
+        trA[lid] = (k < 0) ? Ain : float(aa);
+    }
+    barrier();
+    if (lid != 0u) return;
+    REAL bR = trR[0], bG = trG[0], bB = trB[0], bD = trD[0];
+    float bA = trA[0];
+    for (int j = 1; j < trials; j++) {
+        if (trD[j] < bD) {
+            bR = trR[j]; bG = trG[j]; bB = trB[j]; bD = trD[j];
+            bA = trA[j];
         }
     }
-    outb[ob + 0u] = float(bD * double(step * step));
+    outb[ob + 0u] = float(bD * REAL(step * step));
     outb[ob + 1u] = float(bR);
     outb[ob + 2u] = float(bG);
     outb[ob + 3u] = float(bB);

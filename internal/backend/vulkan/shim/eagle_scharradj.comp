@@ -1,12 +1,19 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // eagle_scharradj.comp — gather form of the CPU interior-only Scharr scatter, both directions
 // summed into adj (engine adjoint tail / shim.cu egScharrAdjKernel). A neighbour j contributes
 // only when j is itself interior.
 layout(local_size_x = 256) in;
-layout(std430, binding = 14) readonly buffer SX { double sx[]; };
-layout(std430, binding = 15) readonly buffer SY { double sy[]; };
-layout(std430, binding = 16)          buffer Ab { double adj[]; };
+layout(std430, binding = 14) readonly buffer SX { REAL sx[]; };
+layout(std430, binding = 15) readonly buffer SY { REAL sy[]; };
+layout(std430, binding = 16)          buffer Ab { REAL adj[]; };
 layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
 bool interior(int x, int y) { return x >= 1 && x <= pc.w - 2 && y >= 1 && y <= pc.h - 2; }
 void main() {
@@ -14,18 +21,18 @@ void main() {
     if (p >= pc.w * pc.h) return;
     int x = p % pc.w, y = p / pc.w;
     int w = pc.w;
-    double a = 0.0LF;
-    if (interior(x - 1, y + 1)) a += 3.0LF * sx[p + w - 1];
-    if (interior(x - 1, y))     a += 10.0LF * sx[p - 1];
-    if (interior(x - 1, y - 1)) a += 3.0LF * sx[p - w - 1];
-    if (interior(x + 1, y + 1)) a += -3.0LF * sx[p + w + 1];
-    if (interior(x + 1, y))     a += -10.0LF * sx[p + 1];
-    if (interior(x + 1, y - 1)) a += -3.0LF * sx[p - w + 1];
-    if (interior(x + 1, y - 1)) a += 3.0LF * sy[p - w + 1];
-    if (interior(x, y - 1))     a += 10.0LF * sy[p - w];
-    if (interior(x - 1, y - 1)) a += 3.0LF * sy[p - w - 1];
-    if (interior(x + 1, y + 1)) a += -3.0LF * sy[p + w + 1];
-    if (interior(x, y + 1))     a += -10.0LF * sy[p + w];
-    if (interior(x - 1, y + 1)) a += -3.0LF * sy[p + w - 1];
-    adj[p] = a / 16.0LF;
+    REAL a = REAL(0.0);
+    if (interior(x - 1, y + 1)) a += REAL(3.0) * sx[p + w - 1];
+    if (interior(x - 1, y))     a += REAL(10.0) * sx[p - 1];
+    if (interior(x - 1, y - 1)) a += REAL(3.0) * sx[p - w - 1];
+    if (interior(x + 1, y + 1)) a += -REAL(3.0) * sx[p + w + 1];
+    if (interior(x + 1, y))     a += -REAL(10.0) * sx[p + 1];
+    if (interior(x + 1, y - 1)) a += -REAL(3.0) * sx[p - w + 1];
+    if (interior(x + 1, y - 1)) a += REAL(3.0) * sy[p - w + 1];
+    if (interior(x, y - 1))     a += REAL(10.0) * sy[p - w];
+    if (interior(x - 1, y - 1)) a += REAL(3.0) * sy[p - w - 1];
+    if (interior(x + 1, y + 1)) a += -REAL(3.0) * sy[p + w + 1];
+    if (interior(x, y + 1))     a += -REAL(10.0) * sy[p + w];
+    if (interior(x - 1, y + 1)) a += -REAL(3.0) * sy[p + w - 1];
+    adj[p] = a / REAL(16.0);
 }

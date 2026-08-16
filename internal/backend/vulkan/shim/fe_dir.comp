@@ -1,5 +1,12 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // fe_dir.comp — false-edge detector (engine feState, falseedge.go): per INTERIOR pixel,
 // d = relu(|∇L_recon| − |∇L_target|) with Sobel on luma; active pixels write their
 // normalised gradient direction into dir (zeroed otherwise) and the excess d into the
@@ -8,8 +15,8 @@
 layout(local_size_x = 256) in;
 layout(std430, binding = 1) readonly buffer Tb { float tl[]; };
 layout(std430, binding = 2) readonly buffer Rb { float rl[]; };
-layout(std430, binding = 3)          buffer Db { double dir[]; };
-layout(std430, binding = 5)          buffer Pb { double feparts[]; };
+layout(std430, binding = 3)          buffer Db { REAL dir[]; };
+layout(std430, binding = 5)          buffer Pb { REAL feparts[]; };
 layout(std430, binding = 6) readonly buffer TW { float tw[]; };
 layout(push_constant) uniform PC { int w, h; float feLambda; int hasTW; float ldLambda; } pc;
 
@@ -22,12 +29,12 @@ layout(push_constant) uniform PC { int w, h; float feLambda; int hasTW; float ld
 // The magnitude is epsilon-smoothed for the lost-detail side only: |grad| has a kink at zero, so
 // the exact derivative vanishes in a perfectly flat recon — exactly the case this term exists for.
 // The false-edge side keeps the unsmoothed magnitude so its shipped behaviour is unchanged.
-const double LD_EPS = 1e-3LF;
+const REAL LD_EPS = REAL(1e-3);
 
-shared double sh[256];
+shared REAL sh[256];
 
-void sobelAt(int i, int w, bool ofR, out double gx, out double gy) {
-    double tl_, tc, tr, ml, mr, bl, bc, br;
+void sobelAt(int i, int w, bool ofR, out REAL gx, out REAL gy) {
+    REAL tl_, tc, tr, ml, mr, bl, bc, br;
     if (ofR) {
         tl_ = rl[i - w - 1]; tc = rl[i - w]; tr = rl[i - w + 1];
         ml = rl[i - 1]; mr = rl[i + 1];
@@ -37,36 +44,36 @@ void sobelAt(int i, int w, bool ofR, out double gx, out double gy) {
         ml = tl[i - 1]; mr = tl[i + 1];
         bl = tl[i + w - 1]; bc = tl[i + w]; br = tl[i + w + 1];
     }
-    gx = (tr + 2.0LF * mr + br) - (tl_ + 2.0LF * ml + bl);
-    gy = (bl + 2.0LF * bc + br) - (tl_ + 2.0LF * tc + tr);
+    gx = (tr + REAL(2.0) * mr + br) - (tl_ + REAL(2.0) * ml + bl);
+    gy = (bl + REAL(2.0) * bc + br) - (tl_ + REAL(2.0) * tc + tr);
 }
 
 void main() {
     int N = pc.w * pc.h;
-    double s = 0.0LF;
+    REAL s = REAL(0.0);
     for (int i = int(gl_GlobalInvocationID.x); i < N; i += int(gl_NumWorkGroups.x) * 256) {
         int x = i % pc.w, y = i / pc.w;
-        double cx = 0.0LF, cy = 0.0LF;
+        REAL cx = REAL(0.0), cy = REAL(0.0);
         if (x > 0 && x < pc.w - 1 && y > 0 && y < pc.h - 1) {
-            double gx, gy, tx, ty;
+            REAL gx, gy, tx, ty;
             sobelAt(i, pc.w, true, gx, gy);
             sobelAt(i, pc.w, false, tx, ty);
-            double gr = sqrt(gx * gx + gy * gy);
-            double tr = sqrt(tx * tx + ty * ty);
+            REAL gr = sqrt(gx * gx + gy * gy);
+            REAL tr = sqrt(tx * tx + ty * ty);
             // region term weight: dir carries wi so the adjoint gather scales for free
-            double wi = pc.hasTW != 0 ? double(tw[i]) : 1.0LF;
-            double d = gr - tr;
-            if (pc.feLambda > 0.0 && d > 0.0LF && gr >= 1e-12LF) {
-                double lw = double(pc.feLambda) * wi;
+            REAL wi = pc.hasTW != 0 ? REAL(tw[i]) : REAL(1.0);
+            REAL d = gr - tr;
+            if (pc.feLambda > 0.0 && d > REAL(0.0) && gr >= REAL(1e-12)) {
+                REAL lw = REAL(pc.feLambda) * wi;
                 s += lw * d;
                 cx = lw * gx / gr;
                 cy = lw * gy / gr;
-            } else if (pc.ldLambda > 0.0 && d < 0.0LF) {
-                double grs = sqrt(gx * gx + gy * gy + LD_EPS * LD_EPS);
-                double trs = sqrt(tx * tx + ty * ty + LD_EPS * LD_EPS);
-                double dl = trs - grs;
-                if (dl > 0.0LF) {
-                    double lw = double(pc.ldLambda) * wi;
+            } else if (pc.ldLambda > 0.0 && d < REAL(0.0)) {
+                REAL grs = sqrt(gx * gx + gy * gy + LD_EPS * LD_EPS);
+                REAL trs = sqrt(tx * tx + ty * ty + LD_EPS * LD_EPS);
+                REAL dl = trs - grs;
+                if (dl > REAL(0.0)) {
+                    REAL lw = REAL(pc.ldLambda) * wi;
                     s += lw * dl;
                     // negated: raising |grad recon| LOWERS this energy
                     cx = -lw * gx / grs;

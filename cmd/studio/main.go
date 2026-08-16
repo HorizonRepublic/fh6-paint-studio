@@ -68,6 +68,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--engine-service" {
 		applog.Init("engined.log")
 		defer applog.Close()
+		// Same crash-trace contract as cmd/engined: this IS the shipped engined for the two-file
+		// release, and a panic here must land in the log, not vanish with the process.
+		defer applog.Recover()
 		if err := enginesvc.Serve(enginesvc.Options{}); err != nil {
 			fmt.Fprintln(os.Stderr, "engine service:", err)
 			os.Exit(1)

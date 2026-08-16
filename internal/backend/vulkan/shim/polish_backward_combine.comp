@@ -1,14 +1,21 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // polish_backward_combine.comp — TILED backward Pass C: one small workgroup per shape sums the
 // slice partials Pass B wrote (polish_backward_reduce.comp) into the shape's pgrad slot, in
 // ascending slice order — fixed order, no atomics, deterministic. Recomputes the slice count from
 // the bbox the same way Pass B does, so it never reads a slot Pass B did not write this iteration.
 
 layout(local_size_x = 16) in;
-layout(std430, binding = 6) writeonly buffer Gb { double pgrad[]; };
+layout(std430, binding = 6) writeonly buffer Gb { REAL pgrad[]; };
 layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
-layout(std430, binding = 13) readonly buffer Wb { double partialb[]; };
+layout(std430, binding = 13) readonly buffer Wb { REAL partialb[]; };
 layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices; } pc;
 
 const int NG = 10;
@@ -29,7 +36,7 @@ void main() {
     int bw = xMax - xMin + 1, bh = yMax - yMin + 1;
     int total = (bw < 1 || bh < 1) ? 0 : bw * bh;
 
-    double sum = 0.0LF;
+    REAL sum = REAL(0.0);
     if (total > 0) {
         int sc = sliceCount(total);
         int base = si * pc.slices * NG + int(k);

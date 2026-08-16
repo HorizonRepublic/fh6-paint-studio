@@ -1,11 +1,18 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // ssim_gh.comp — horizontal box-correlation of the moment-gradients: HG(y,qx) = Σ G(y,px),
 // px ∈ [qx−7, qx] clamped to valid window columns, ascending (engine adjoint / shim.cu ssGH).
 
 layout(local_size_x = 256) in;
-layout(std430, binding = 5) readonly buffer Gb { double gm[]; };
-layout(std430, binding = 6)          buffer HGb { double hg[]; };
+layout(std430, binding = 5) readonly buffer Gb { REAL gm[]; };
+layout(std430, binding = 6)          buffer HGb { REAL hg[]; };
 layout(push_constant) uniform PC { int w, h, mw, mh, writeG; float lambda; } pc;
 
 void main() {
@@ -16,7 +23,7 @@ void main() {
     int p1 = qx; if (p1 > pc.mw - 1) p1 = pc.mw - 1;
     int nwin = pc.mw * pc.mh;
     int grow = gy * pc.mw;
-    double t1 = 0.0LF, t2 = 0.0LF, t3 = 0.0LF;
+    REAL t1 = REAL(0.0), t2 = REAL(0.0), t3 = REAL(0.0);
     for (int px = p0; px <= p1; px++) {
         t1 += gm[grow + px];
         t2 += gm[nwin + grow + px];

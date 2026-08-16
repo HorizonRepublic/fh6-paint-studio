@@ -16,12 +16,18 @@ layout(std430, binding = 7) readonly  buffer Rg { float rampGlow[]; };
 layout(std430, binding = 8) readonly  buffer Pm { float prop[]; };      // proposal map, (heads*8) planes
 layout(std430, binding = 9) readonly  buffer Pk { float propKinds[]; }; // kind per head
 layout(std430, binding = 10) readonly buffer Ch { float coh[]; };       // structure-tensor coherence
+// Proposer config lives in a tiny SSBO, NOT the push-constant block: with these 11 words inline
+// the PC was 164 bytes, past the 128-byte guaranteed maxPushConstantsSize — vkCreatePipelineLayout
+// failed outright on AMD/most Intel (invisible on NVIDIA's 256). The values change at most once
+// per proposer refresh, so a buffer costs nothing.
+layout(std430, binding = 11) readonly buffer Cf {
+    int cfg_hasProp; int cfg_propW; int cfg_propH; int cfg_propHeads; int cfg_propOff; int cfg_propConfGate;
+    float cfg_propFrac; float cfg_propPatch; float cfg_propJitter; float cfg_propStride; float cfg_propConfTau; // propStride: canvas pixels per map cell
+};
 layout(push_constant) uniform PC {
     uint seedLo, seedHi;
-    int n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind;
-    int hasProp, propW, propH, propHeads, propOff, propConfGate, hasCoh;
-    float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb;
-    float propFrac, propPatch, propJitter, propStride, propConfTau, aspectCap; // propStride: canvas pixels per map cell
+    int n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind, hasCoh;
+    float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb, aspectCap;
 } pc;
 
 uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -54,9 +60,9 @@ void clampExtents(float cx, float cy, inout float a, inout float b, float thetaD
 // CENTRED on (cx, cy) sits propOff cells earlier in both axes. Reading it without that shift asks the
 // network about a region offset from where the shape will actually land.
 float propAt(int hd, int k, float cx, float cy) {
-    int gx = clamp(int(cx / pc.propStride) - pc.propOff, 0, pc.propW - 1);
-    int gy = clamp(int(cy / pc.propStride) - pc.propOff, 0, pc.propH - 1);
-    return prop[(hd * 8 + k) * (pc.propW * pc.propH) + gy * pc.propW + gx];
+    int gx = clamp(int(cx / cfg_propStride) - cfg_propOff, 0, cfg_propW - 1);
+    int gy = clamp(int(cy / cfg_propStride) - cfg_propOff, 0, cfg_propH - 1);
+    return prop[(hd * 8 + k) * (cfg_propW * cfg_propH) + gy * cfg_propW + gx];
 }
 
 // proposeCandidate writes one network-proposed shape in the wire format and returns its kind.
@@ -64,12 +70,12 @@ float propAt(int hd, int k, float cx, float cy) {
 // normalised against, and the angle arrives as a doubled-angle sin/cos pair (an ellipse at t and
 // t+180 degrees is the same ellipse). Everything downstream is untouched -- the proposal is scored
 // by the same exact eval as a random draw, which is why a weak network costs speed, never quality.
-// jit returns a symmetric perturbation of magnitude ~pc.propJitter. Without it every candidate that
+// jit returns a symmetric perturbation of magnitude ~cfg_propJitter. Without it every candidate that
 // picks the same head at the same location is the SAME shape, so a batch of a thousand would carry
 // only propHeads distinct proposals. The network supplies the eight modes; the jitter spreads a full
 // batch around them, and the exact eval still decides which spread candidate actually wins.
 float jit(int i, inout uint ctr) {
-    return (uf(uint(i), ctr) - 0.5) * 2.0 * pc.propJitter;
+    return (uf(uint(i), ctr) - 0.5) * 2.0 * cfg_propJitter;
 }
 
 void proposeCandidate(int i, inout uint ctr, int base, float cx, float cy) {
@@ -78,9 +84,9 @@ void proposeCandidate(int i, inout uint ctr, int base, float cx, float cy) {
     // own. Drawing one at random per candidate throws that away -- measured as the proposer merely
     // matching random search in the engine while beating it comfortably in the simulator, where all
     // heads are always scored at every location.
-    int hd = i % pc.propHeads;
+    int hd = i % cfg_propHeads;
     int kind = int(propKinds[hd] + 0.5);
-    float ps = pc.propPatch;
+    float ps = cfg_propPatch;
     scand[base + 0] = float(kind);
     scand[base + 7] = 0.0; scand[base + 8] = 0.0; scand[base + 9] = 0.0;
     scand[base + 10] = propAt(hd, 6, cx, cy);
@@ -113,7 +119,7 @@ void main() {
         // With the proposer on, consecutive candidates form GROUPS that share one centre, so the
         // group covers every head at that location. The centre draw is therefore keyed on the group
         // index; the per-candidate stream still diverges afterwards, which is what spreads the jitter.
-        uint rid = (pc.hasProp != 0 && pc.propHeads > 0) ? uint(i / pc.propHeads) : uint(i);
+        uint rid = (cfg_hasProp != 0 && cfg_propHeads > 0) ? uint(i / cfg_propHeads) : uint(i);
         float total = gridCDF[pc.gw * pc.gh - 1];
         float cx, cy;
         if (total <= 0.0) {
@@ -140,8 +146,8 @@ void main() {
         // is exactly the edge behaviour the network lacks, while the network sees shadow detail the
         // linear-light score is blind to. So proposals run at full share in structureless cells and
         // fade out where the target has real structure.
-        float pf = pc.propFrac;
-        if (pc.hasProp != 0 && pc.hasGate != 0 && pc.propConfGate == 0) {
+        float pf = cfg_propFrac;
+        if (cfg_hasProp != 0 && pc.hasGate != 0 && cfg_propConfGate == 0) {
             int gi = int(cy) * pc.W + int(cx);
             if (gi >= 0 && gi < pc.W * pc.H) pf *= 1.0 - clamp(kindGate[gi], 0.0, 1.0);
         }
@@ -150,16 +156,16 @@ void main() {
         // network's own confidence head answers the narrower question directly: at this location, is
         // this head's proposal better than what a uniform draw would have found? Where it says no,
         // the candidate falls through to the random path, which costs nothing and cannot be worse.
-        if (pc.hasProp != 0 && pc.propConfGate != 0 && pc.propHeads > 0) {
-            int hd = int(uint(i) % uint(pc.propHeads));
+        if (cfg_hasProp != 0 && cfg_propConfGate != 0 && cfg_propHeads > 0) {
+            int hd = int(uint(i) % uint(cfg_propHeads));
             // The threshold is NOT zero by default for a measured reason: the head was trained
             // against the best of a handful of uniform draws, while the engine takes the best of
             // roughly two thousand. Its idea of "better than random" is therefore optimistic, and
             // the stronger the model gets the more places it wrongly claims. propConfTau raises the
             // bar back towards the baseline the engine actually offers.
-            if (propAt(hd, 7, cx, cy) <= pc.propConfTau) pf = 0.0;
+            if (propAt(hd, 7, cx, cy) <= cfg_propConfTau) pf = 0.0;
         }
-        if (pc.hasProp != 0 && uf(uint(i), ctr) < pf) {
+        if (cfg_hasProp != 0 && uf(uint(i), ctr) < pf) {
             proposeCandidate(i, ctr, base, cx, cy);
             continue;
         }

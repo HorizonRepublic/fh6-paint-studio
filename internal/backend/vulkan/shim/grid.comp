@@ -1,7 +1,14 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // grid.comp — per-cell weighted-SSE error grid (importance-sampling map). One workgroup
-// per gw*gh cell; 64 threads stride the cell's pixels, reduce in double. Mirrors
+// per gw*gh cell; 64 threads stride the cell's pixels, reduce in REAL. Mirrors
 // cpu.ErrorGrid, moved on-device so the engine's per-shape re-seed no longer reads the
 // whole canvas back to the host each step.
 
@@ -10,25 +17,36 @@ layout(std430, binding = 0) readonly  buffer Tb { float target[]; };
 layout(std430, binding = 1) readonly  buffer Cb { float canvasb[]; };
 layout(std430, binding = 2) readonly  buffer Wb { float weightb[]; };
 layout(std430, binding = 3) writeonly buffer Gb { float grid[]; };
-layout(push_constant) uniform PC { int W, H, gw, gh; } pc;
+layout(push_constant) uniform PC { int W, H, gw, gh, cx0, cy0, cx1, cy1; } pc;
 
-shared double sh[64];
+shared REAL sh[64];
 
 void main() {
     uint cell = gl_WorkGroupID.x;
     uint lid = gl_LocalInvocationID.x;
     if (cell >= uint(pc.gw * pc.gh)) return;
     int gx = int(cell) % pc.gw, gy = int(cell) / pc.gw;
+    // Incremental update: cells outside the dirty rect keep their stored value. The condition is
+    // uniform per workgroup, so returning before the barrier is legal.
+    if (gx < pc.cx0 || gx > pc.cx1 || gy < pc.cy0 || gy > pc.cy1) return;
     int x0 = gx * pc.W / pc.gw, x1 = (gx + 1) * pc.W / pc.gw;
     int y0 = gy * pc.H / pc.gh, y1 = (gy + 1) * pc.H / pc.gh;
     int cw = x1 - x0, ch = y1 - y0, total = cw * ch;
 
-    double acc = 0.0LF;
+    REAL acc = REAL(0.0);
+    // Strength-reduced (x,y): identical pixel sequence per thread without the per-pixel emulated
+    // integer divisions (see eval.comp). This kernel runs once per placed shape over the frame.
+    // cwSafe guards the divisor for a degenerate empty cell (the loop then never runs anyway).
+    int cwSafe = cw < 1 ? 1 : cw;
+    int cxi = int(lid) % cwSafe, cyi = int(lid) / cwSafe;
+    int dq = 64 / cwSafe, dr = 64 % cwSafe;
     for (int t = int(lid); t < total; t += 64) {
-        int x = x0 + t % cw, y = y0 + t / cw;
+        int x = x0 + cxi, y = y0 + cyi;
+        cxi += dr; cyi += dq;
+        if (cxi >= cw) { cxi -= cw; cyi++; }
         int idx = y * pc.W + x, p = idx * 4;
-        double wt = double(weightb[idx]);
-        for (int c = 0; c < 4; c++) { double d = double(target[p + c]) - double(canvasb[p + c]); acc += wt * d * d; }
+        REAL wt = REAL(weightb[idx]);
+        for (int c = 0; c < 4; c++) { REAL d = REAL(target[p + c]) - REAL(canvasb[p + c]); acc += wt * d * d; }
     }
     sh[lid] = acc;
     barrier();

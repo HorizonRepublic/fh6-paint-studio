@@ -1,9 +1,16 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // momentseed.comp — fit K covariance-ellipse seeds from the residual error grid (port of
 // shim.cu momentSeedKernel + momentFitDevice). Each thread samples a centre from the
 // error-grid CDF (same importance bias as the random search), caps its radius at the
-// boundary, and fits the residual blob's covariance ellipse (in double; sqrt/atan via
+// boundary, and fits the residual blob's covariance ellipse (in REAL; sqrt/atan via
 // float). An empty window falls back to a round seed so genmoment always has a seed.
 
 layout(local_size_x = 128) in;
@@ -52,30 +59,30 @@ void main() {
     int gcx = int(cx / sx), gcy = int(cy / sy);
     int rcx = int(capR / sx) + 1, rcy = int(capR / sy) + 1;
     int gx0 = max(gcx - rcx, 0), gy0 = max(gcy - rcy, 0), gx1 = min(gcx + rcx, pc.gw - 1), gy1 = min(gcy + rcy, pc.gh - 1);
-    double m00 = 0.0LF, m10 = 0.0LF, m01 = 0.0LF;
+    REAL m00 = REAL(0.0), m10 = REAL(0.0), m01 = REAL(0.0);
     for (int gy = gy0; gy <= gy1; gy++) for (int gx = gx0; gx <= gx1; gx++) {
         int idx = gy * pc.gw + gx; float e = cellErr(idx); if (e <= 0.0) continue;
-        m00 += double(e); m10 += double(gx) * double(e); m01 += double(gy) * double(e);
+        m00 += REAL(e); m10 += REAL(gx) * REAL(e); m01 += REAL(gy) * REAL(e);
     }
     float scx, scy, srx, sry, sth; int valid = 1;
-    if (m00 <= 1e-9LF) { valid = 0; }
+    if (m00 <= REAL(1e-9)) { valid = 0; }
     else {
-        double mcx = m10 / m00, mcy = m01 / m00;
-        double u20 = 0.0LF, u02 = 0.0LF, u11 = 0.0LF;
+        REAL mcx = m10 / m00, mcy = m01 / m00;
+        REAL u20 = REAL(0.0), u02 = REAL(0.0), u11 = REAL(0.0);
         for (int gy = gy0; gy <= gy1; gy++) for (int gx = gx0; gx <= gx1; gx++) {
             int idx = gy * pc.gw + gx; float e = cellErr(idx); if (e <= 0.0) continue;
-            double dx = double(gx) - mcx, dy = double(gy) - mcy;
-            u20 += double(e) * dx * dx; u02 += double(e) * dy * dy; u11 += double(e) * dx * dy;
+            REAL dx = REAL(gx) - mcx, dy = REAL(gy) - mcy;
+            u20 += REAL(e) * dx * dx; u02 += REAL(e) * dy * dy; u11 += REAL(e) * dx * dy;
         }
         u20 /= m00; u02 /= m00; u11 /= m00;
-        double hlf = (u20 - u02) / 2.0LF;
-        double d = double(sqrt(float(max(0.0LF, hlf * hlf + u11 * u11))));
-        double lmax = (u20 + u02) / 2.0LF + d, lmin = (u20 + u02) / 2.0LF - d; if (lmin < 0.0LF) lmin = 0.0LF;
-        double major = 2.0LF * double(sqrt(float(lmax))), minor = 2.0LF * double(sqrt(float(lmin)));
+        REAL hlf = (u20 - u02) / REAL(2.0);
+        REAL d = REAL(sqrt(float(max(REAL(0.0), hlf * hlf + u11 * u11))));
+        REAL lmax = (u20 + u02) / REAL(2.0) + d, lmin = (u20 + u02) / REAL(2.0) - d; if (lmin < REAL(0.0)) lmin = REAL(0.0);
+        REAL major = REAL(2.0) * REAL(sqrt(float(lmax))), minor = REAL(2.0) * REAL(sqrt(float(lmin)));
         float s = (sx + sy) / 2.0;
-        scx = float((mcx + 0.5LF) * double(sx)); scy = float((mcy + 0.5LF) * double(sy));
-        srx = float(max(major, 0.5LF) * double(s)); sry = float(max(minor, 0.5LF) * double(s));
-        sth = 0.5 * atan(float(2.0LF * u11), float(u20 - u02)) * 57.295779513082323;
+        scx = float((mcx + REAL(0.5)) * REAL(sx)); scy = float((mcy + REAL(0.5)) * REAL(sy));
+        srx = float(max(major, REAL(0.5)) * REAL(s)); sry = float(max(minor, REAL(0.5)) * REAL(s));
+        sth = 0.5 * atan(float(REAL(2.0) * u11), float(u20 - u02)) * 57.295779513082323;
     }
     if (valid == 0) { scx = cx; scy = cy; srx = max(4.0, capR * 0.3); sry = srx; sth = uf(uint(k), ctr) * 360.0; }
     int base = k * 6;

@@ -1,5 +1,12 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // ssim_h.comp — horizontal 8-term window sums of luma, luma² and luma·targetLuma (engine
 // ssimState.hpass / shim.cu ssHPass). One thread per (row, valid px); k ascends 0..7 like the
 // CPU loop. Binding 2 is the luma plane just produced by the luma pipe (recon on setR; the
@@ -8,7 +15,7 @@
 layout(local_size_x = 256) in;
 layout(std430, binding = 1) readonly buffer Tb { float tl[]; };
 layout(std430, binding = 2) readonly buffer Lb { float rl[]; };
-layout(std430, binding = 3)          buffer Hb { double hsum[]; };
+layout(std430, binding = 3)          buffer Hb { REAL hsum[]; };
 layout(push_constant) uniform PC { int w, h, mw, mh, writeG; float lambda; } pc;
 
 void main() {
@@ -16,12 +23,12 @@ void main() {
     if (i >= pc.mw * pc.h) return;
     int y = i / pc.mw, px = i % pc.mw;
     int row = y * pc.w;
-    double sx = 0.0LF, sxx = 0.0LF, sxy = 0.0LF;
+    REAL sx = REAL(0.0), sxx = REAL(0.0), sxy = REAL(0.0);
     for (int k = 0; k < 8; k++) {
-        double v = double(rl[row + px + k]);
+        REAL v = REAL(rl[row + px + k]);
         sx += v;
         sxx += v * v;
-        sxy += v * double(tl[row + px + k]);
+        sxy += v * REAL(tl[row + px + k]);
     }
     int hp = pc.mw * pc.h;
     hsum[i] = sx;

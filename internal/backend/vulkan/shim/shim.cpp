@@ -12,6 +12,8 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "volk.h"
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -25,6 +27,37 @@
 #include "gen.spv.h"     // gen_spv (on-device random candidate generator)
 #include "prepadj.spv.h" // prepadj_spv
 #include "argmin.spv.h"  // argmin_spv
+#include "mutate.spv.h"  // mutate_spv (on-device hill-climb mutation batch)
+#include "coarse_min.spv.h"    // coarse_min_spv (partition argmin over the cheap pass)
+#include "coarse_gather.spv.h" // coarse_gather_spv (compact the survivors)
+// fp32 variants of every REAL-typed shader, for devices without shaderFloat64 (see buildContext).
+#include "eval_f32.spv.h"
+#include "grid_f32.spv.h"
+#include "momentseed_f32.spv.h"
+#include "polish_forward_tiled_f32.spv.h"
+#include "polish_hard_tiled_f32.spv.h"
+#include "polish_dcinit_f32.spv.h"
+#include "polish_loss_f32.spv.h"
+#include "polish_dcwalk_tiled_f32.spv.h"
+#include "polish_backward_reduce_f32.spv.h"
+#include "polish_backward_combine_f32.spv.h"
+#include "fe_dir_f32.spv.h"
+#include "fe_adj_f32.spv.h"
+#include "ssim_h_f32.spv.h"
+#include "ssim_myinit_f32.spv.h"
+#include "ssim_map_f32.spv.h"
+#include "ssim_gh_f32.spv.h"
+#include "ssim_adj_f32.spv.h"
+#include "eagle_scharr_f32.spv.h"
+#include "eagle_var_f32.spv.h"
+#include "eagle_boxx_f32.spv.h"
+#include "eagle_boxy_f32.spv.h"
+#include "eagle_hpfin_f32.spv.h"
+#include "eagle_loss_f32.spv.h"
+#include "eagle_sign_f32.spv.h"
+#include "eagle_um_f32.spv.h"
+#include "eagle_varadj_f32.spv.h"
+#include "eagle_scharradj_f32.spv.h"
 #include "momentseed.spv.h" // momentseed_spv (covariance-ellipse seeds)
 #include "genmoment.spv.h"  // genmoment_spv (localised pool around seeds)
 #include "polish_forward_tiled.spv.h" // pt_forward_spv (one-dispatch tiled forward)
@@ -98,6 +131,41 @@ Buf g_target, g_weight, g_canvas, g_cands, g_out, g_staging, g_gridBuf;
 int g_w = 0, g_h = 0, g_maxCands = 0, g_grid = 0;
 int g_sampleBudget = 4000;
 int g_lastError = 0;
+// Sticky device-loss flag: once a submit or fence wait fails (TDR / driver reset / OOM kill),
+// the device never recovers inside this fp_init generation. Every later submit short-circuits
+// and re-arms g_lastError so ALL callers see the fault, not just the one that hit it first.
+int g_fatal = 0;
+int g_memBudgetExt = 0; // VK_EXT_memory_budget enabled on the device (see buildContext)
+uint32_t g_maxGroupsX = 65535; // device limit on 1-D dispatch workgroups (guaranteed floor 65535)
+// Measured seconds-per-round EMA for the hill-climb submit chunking (fp_search_mutate's TDR
+// guard). Survives fp_init on purpose: the card does not change between runs.
+double g_mutRoundCost = 0.0;
+
+// ---- built-in GPU profiler (FH6VK_PROF=1) ----
+// Every submit here is synchronous — submitWait blocks on the fence — so the host time spent
+// inside submitWait IS the GPU time of that submit to within ~50us of fixed overhead. Each API
+// entry names its scope; submitWait accumulates seconds + submit counts per scope. The table
+// (fp_prof_dump) therefore shows real per-phase GPU seconds AND the round-trip counts that
+// wall-clock profiling can only guess at. Off (the default) costs one integer compare per submit.
+enum ProfScope {
+    PROF_OTHER = 0, PROF_INIT, PROF_EVAL, PROF_SEARCH, PROF_MUTATE, PROF_APPLY, PROF_GRID,
+    PROF_RESET, PROF_READCANVAS, PROF_PSETUP, PROF_PUPLOAD, PROF_PFWD, PROF_PLOSS, PROF_PBWD,
+    PROF_PHARD, PROF_PREADRENDER, PROF_TERMSET, PROF_N
+};
+const char* const g_profNames[PROF_N] = {
+    "other", "init", "eval", "search", "mutate", "apply", "error_grid",
+    "reset", "read_canvas", "polish_setup", "polish_upload", "polish_forward", "polish_loss",
+    "polish_backward", "polish_hard", "polish_read_render", "term_setup",
+};
+int g_profOn = -1; // resolved from FH6VK_PROF on first submit
+int g_profScope = PROF_OTHER;
+double g_profSec[PROF_N] = {};
+long long g_profCnt[PROF_N] = {};
+// fp64-vs-fp32 pipeline family (see buildContext). g_rs is sizeof(REAL) for the buffers whose
+// element type follows the shaders' REAL macro.
+int g_fp64 = 1;
+size_t g_rs = 8;
+#define RSPV(base) (g_fp64 ? base##_spv : base##_f32_spv), (g_fp64 ? sizeof(base##_spv) : sizeof(base##_f32_spv))
 
 struct EvalPC  { int32_t n, W, H, sampleBudget; int32_t agN; float ag[6]; int32_t gradOn; };
 // DICTIONARY MASKS: the bank words are captured coverage textures packed into one atlas, with a
@@ -107,22 +175,109 @@ Buf g_maskAtlas, g_maskMeta;
 int g_masksOn = 0; // agN/ag = analytic-alpha grid (fp_set_alpha_grid), agN=0 off; gradOn = per-pixel-alpha scoring for the radial gradients
 int g_gradOn = 0;
 struct ApplyPC { int32_t kind; float p0, p1, p2, p3, p4, p5; float cr, cg, cb, ca; int32_t W, H; };
-struct GridPC  { int32_t W, H, gw, gh; };
+struct GridPC  { int32_t W, H, gw, gh, cx0, cy0, cx1, cy1; };
+
+// ---- incremental error grid ----
+// fp_error_grid used to re-reduce the ENTIRE frame (36 B/px) once per placed shape, when fp_apply
+// had only written inside one bbox. fp_apply unions a conservative host-side bbox into this dirty
+// rect and the grid pass recomputes only the cells it touches; every other cell keeps its value in
+// the persistent grid buffer. Conservative on purpose: the host bbox is the shader's formula
+// widened by two pixels (float-library divergence headroom), bank words and anything exotic mark
+// the whole frame, and a missed cell would be silent quality corruption, so err wide.
+int  g_dirtyX0 = 0, g_dirtyY0 = 0, g_dirtyX1 = -1, g_dirtyY1 = -1;
+bool g_dirtyFull = true;
+
+void dirtyUnion(int x0, int y0, int x1, int y1) {
+    if (g_dirtyX1 < g_dirtyX0) { g_dirtyX0 = x0; g_dirtyY0 = y0; g_dirtyX1 = x1; g_dirtyY1 = y1; return; }
+    if (x0 < g_dirtyX0) g_dirtyX0 = x0;
+    if (y0 < g_dirtyY0) g_dirtyY0 = y0;
+    if (x1 > g_dirtyX1) g_dirtyX1 = x1;
+    if (y1 > g_dirtyY1) g_dirtyY1 = y1;
+}
+
+// shapeRect computes the conservative CLAMPED pixel bbox for kinds 0..5 (a strict superset of
+// the shaders' own per-kind bboxes — verified per kind against apply.comp). false = a mask kind,
+// whose reach only the atlas knows: treat as whole-frame. Shared by the dirty-rect tracking and
+// fp_apply's dispatch sizing.
+bool shapeRect(int kind, const float* P, int& x0o, int& y0o, int& x1o, int& y1o) {
+    if (kind > 5) return false;
+    double minX, maxX, minY, maxY;
+    if (kind == 2) {
+        minX = std::min((double)P[0], std::min((double)P[2], (double)P[4]));
+        maxX = std::max((double)P[0], std::max((double)P[2], (double)P[4]));
+        minY = std::min((double)P[1], std::min((double)P[3], (double)P[5]));
+        maxY = std::max((double)P[1], std::max((double)P[3], (double)P[5]));
+    } else if (kind == 3) {
+        double hw = std::max(0.5, (double)P[4]);
+        minX = std::min((double)P[0], (double)P[2]) - hw; maxX = std::max((double)P[0], (double)P[2]) + hw;
+        minY = std::min((double)P[1], (double)P[3]) - hw; maxY = std::max((double)P[1], (double)P[3]) + hw;
+    } else {
+        double cx = P[0], cy = P[1];
+        double a = std::max(1.0, (double)P[2]), b = std::max(1.0, (double)P[3]);
+        double sh = std::fabs((double)P[5]);
+        // One formula covers rect and (sheared) ellipse conservatively: the rotated bbox of the
+        // shear-widened extents is an upper bound for both shader variants.
+        double th = (double)P[4] * 0.017453292519943295, c = std::fabs(std::cos(th)), s = std::fabs(std::sin(th));
+        double shx = a + sh * b + std::sqrt(a * a + sh * sh * b * b);
+        double ex = shx * c + b * s + 2.0, ey = shx * s + b * c + 2.0;
+        minX = cx - ex; maxX = cx + ex; minY = cy - ey; maxY = cy + ey;
+    }
+    int x0 = (int)std::floor(minX) - 2, y0 = (int)std::floor(minY) - 2;
+    int x1 = (int)std::ceil(maxX) + 2, y1 = (int)std::ceil(maxY) + 2;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > g_w - 1) x1 = g_w - 1;
+    if (y1 > g_h - 1) y1 = g_h - 1;
+    x0o = x0; y0o = y0; x1o = x1; y1o = y1;
+    return true;
+}
+
+void applyDirty(int kind, const float* P) {
+    if (g_dirtyFull) return;
+    int x0, y0, x1, y1;
+    if (!shapeRect(kind, P, x0, y0, x1, y1)) { g_dirtyFull = true; return; }
+    if (x0 > x1 || y0 > y1) return;
+    dirtyUnion(x0, y0, x1, y1);
+}
 
 // ---- on-device random search (fp_search_random) ----
-struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind;
-                // propConfGate: use the network's confidence head instead of the hand-made region gate.
-                int32_t hasProp, propW, propH, propHeads, propOff, propConfGate, hasCoh;
-                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb;
-                float propFrac, propPatch, propJitter, propStrideF, propConfTau, aspectCap; };
+// GenPC is capped at 120 bytes: the guaranteed maxPushConstantsSize is 128, AMD/Intel report
+// exactly that, and this block once grew to 164 (proposer + coherence fields) — which failed
+// fp_init on every non-NVIDIA card. The proposer scalars live in the g_genCfg SSBO instead
+// (binding 11 of gen.comp); do NOT grow this struct past 32 words.
+struct GenPC  { uint32_t seedLo, seedHi; int32_t n, nKinds, gw, gh, W, H, allowAlpha, hasOrient, hasBound, hasGate, hasRampGlow, bigKinds, bigKind, hasCoh;
+                float maxR, alphaMin, aspectMax, boundPad, boundMix, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb, aspectCap; };
+// GenCfg mirrors gen.comp's binding-11 block (the proposer scalars moved out of the PC).
+struct GenCfg { int32_t hasProp, propW, propH, propHeads, propOff, propConfGate;
+                float propFrac, propPatch, propJitter, propStrideF, propConfTau; };
+static_assert(sizeof(GenPC) <= 128, "GenPC exceeds the guaranteed push-constant limit");
 struct PrepPC { int32_t n, compact, shapeCount, W, H; };
-struct ArgPC  { int32_t n; };
+struct ArgPC  { int32_t n, keep, inlineAdj, compact, shapeCount, W, H; };
+// keep != 0: the argmin leaves best[] alone unless the batch winner's raw score beats it —
+// the on-device hill climb's cross-round accept rule. The one-shot searches pass 0.
+struct MutPC  { uint32_t seedLo, seedHi; int32_t n, W, H, allowAlpha; float moveStep, radiusStep, alphaMin, canvasPad; };
 
-VkDescriptorSetLayout g_genDSL = VK_NULL_HANDLE, g_prepDSL = VK_NULL_HANDLE, g_argDSL = VK_NULL_HANDLE;
-VkPipelineLayout      g_genPL = VK_NULL_HANDLE, g_prepPL = VK_NULL_HANDLE, g_argPL = VK_NULL_HANDLE;
-VkPipeline            g_genPipe = VK_NULL_HANDLE, g_prepPipe = VK_NULL_HANDLE, g_argPipe = VK_NULL_HANDLE;
-VkDescriptorSet       g_genSet = VK_NULL_HANDLE, g_sevalSet = VK_NULL_HANDLE, g_prepSet = VK_NULL_HANDLE, g_argSet = VK_NULL_HANDLE;
-Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound, g_kgate, g_rampglow, g_coh;
+VkDescriptorSetLayout g_genDSL = VK_NULL_HANDLE, g_prepDSL = VK_NULL_HANDLE, g_argDSL = VK_NULL_HANDLE, g_mutDSL = VK_NULL_HANDLE;
+VkPipelineLayout      g_genPL = VK_NULL_HANDLE, g_prepPL = VK_NULL_HANDLE, g_argPL = VK_NULL_HANDLE, g_mutPL = VK_NULL_HANDLE;
+VkPipeline            g_genPipe = VK_NULL_HANDLE, g_prepPipe = VK_NULL_HANDLE, g_argPipe = VK_NULL_HANDLE, g_mutPipe = VK_NULL_HANDLE;
+VkDescriptorSet       g_genSet = VK_NULL_HANDLE, g_sevalSet = VK_NULL_HANDLE, g_prepSet = VK_NULL_HANDLE, g_argSet = VK_NULL_HANDLE, g_mutSet = VK_NULL_HANDLE;
+Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound, g_kgate, g_rampglow, g_coh, g_genCfg;
+
+// ---- coarse-to-fine filter (fp_set_coarse) ----
+// Pass 1 scores the WHOLE candidate pool at a cheap pixel cap, a partition argmin keeps kpart
+// survivors, and only those are re-scored at the full sample budget. The winner is always
+// full-budget scored, so the filter trades nothing the argmin can see — the CUDA backend ran this
+// for months as the dominant eval lever, and the shaders sat here compiled-but-unwired since the
+// 2026-08-03 port note. selection uses the ADJUSTED score, matching the one-pass path.
+struct CminPC { int32_t n, parts; };
+struct CgatPC { int32_t k; };
+VkDescriptorSetLayout g_cminDSL = VK_NULL_HANDLE, g_cgatDSL = VK_NULL_HANDLE;
+VkPipelineLayout      g_cminPL = VK_NULL_HANDLE, g_cgatPL = VK_NULL_HANDLE;
+VkPipeline            g_cminPipe = VK_NULL_HANDLE, g_cgatPipe = VK_NULL_HANDLE;
+VkDescriptorSet       g_cminSet = VK_NULL_HANDLE, g_cgatSet = VK_NULL_HANDLE;
+VkDescriptorSet       g_seval2Set = VK_NULL_HANDLE, g_prep2Set = VK_NULL_HANDLE, g_arg2Set = VK_NULL_HANDLE;
+Buf g_scand2, g_sout2, g_adj2, g_sel;
+int g_coarseOn = 0, g_coarseBudget = 4000, g_kpart = 2048, g_coarseCap = 0;
 int g_searchCap = 0, g_hasOrient = 0, g_hasBound = 0, g_hasGate = 0, g_hasRampGlow = 0, g_hasCoh = 0;
 float g_aspectCap = 0.f;
 float g_glowTau = 0.f, g_glowProb = 0.f; // deep-smooth glow swap (fp_set_glow_swap)
@@ -200,6 +355,7 @@ VkDescriptorPool g_pPool = VK_NULL_HANDLE;
 VkDescriptorSet  g_pSet  = VK_NULL_HANDLE;
 Buf g_pbase, g_prender, g_pbelow, g_pdC, g_pP, g_pcol, g_pkinds, g_ppgrad, g_ppartials, g_pbwPart;
 int g_pn = 0, g_pste = 0, g_poklab = 0;
+bool g_pkindsUp = false; // kinds are invariant per setup; uploaded on the first upload only
 VkDeviceSize g_belowCap = 0;
 
 // ---- false-edge additive polish term (mirrors engine/falseedge.go + shim.cu): its own small
@@ -302,19 +458,25 @@ uint32_t findMemType(uint32_t bits, VkMemoryPropertyFlags want) {
 
 const VkMemoryPropertyFlags HOSTVIS = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
+void destroyBuf(Buf& b);
+
 bool createBufEx(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, bool doMap, Buf& b) {
-    b.size = size;
+    // b.size is committed only on SUCCESS. A failure that left {buf=NULL, size=N} behind made
+    // "need <= b.size" caches (ensureStaging, g_belowCap) believe the allocation exists, which
+    // turned a survivable OOM into null-descriptor writes and host null-pointer memcpys.
+    b.size = 0;
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = size; bci.usage = usage; bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (vkCreateBuffer(g_device, &bci, nullptr, &b.buf) != VK_SUCCESS) return false;
     VkMemoryRequirements mr; vkGetBufferMemoryRequirements(g_device, b.buf, &mr);
     uint32_t mt = findMemType(mr.memoryTypeBits, props);
-    if (mt == UINT32_MAX) return false;
+    if (mt == UINT32_MAX) { destroyBuf(b); return false; }
     VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     mai.allocationSize = mr.size; mai.memoryTypeIndex = mt;
-    if (vkAllocateMemory(g_device, &mai, nullptr, &b.mem) != VK_SUCCESS) return false;
-    if (vkBindBufferMemory(g_device, b.buf, b.mem, 0) != VK_SUCCESS) return false;
-    if (doMap && vkMapMemory(g_device, b.mem, 0, size, 0, &b.map) != VK_SUCCESS) return false;
+    if (vkAllocateMemory(g_device, &mai, nullptr, &b.mem) != VK_SUCCESS) { destroyBuf(b); return false; }
+    if (vkBindBufferMemory(g_device, b.buf, b.mem, 0) != VK_SUCCESS) { destroyBuf(b); return false; }
+    if (doMap && vkMapMemory(g_device, b.mem, 0, size, 0, &b.map) != VK_SUCCESS) { destroyBuf(b); return false; }
+    b.size = size;
     return true;
 }
 
@@ -416,16 +578,27 @@ void teardown() {
     if (g_gridPL)    { vkDestroyPipelineLayout(g_device, g_gridPL, nullptr); g_gridPL = VK_NULL_HANDLE; }
     if (g_gridDSL)   { vkDestroyDescriptorSetLayout(g_device, g_gridDSL, nullptr); g_gridDSL = VK_NULL_HANDLE; }
     destroyBuf(g_scand); destroyBuf(g_sout); destroyBuf(g_adj); destroyBuf(g_best);
-    destroyBuf(g_kindsB); destroyBuf(g_kindcdf); destroyBuf(g_gridcdf); destroyBuf(g_orient); destroyBuf(g_bound); destroyBuf(g_kgate); destroyBuf(g_rampglow); destroyBuf(g_coh);
+    destroyBuf(g_kindsB); destroyBuf(g_kindcdf); destroyBuf(g_gridcdf); destroyBuf(g_orient); destroyBuf(g_bound); destroyBuf(g_kgate); destroyBuf(g_rampglow); destroyBuf(g_coh); destroyBuf(g_genCfg);
     if (g_genPipe)  { vkDestroyPipeline(g_device, g_genPipe, nullptr);  g_genPipe = VK_NULL_HANDLE; }
     if (g_prepPipe) { vkDestroyPipeline(g_device, g_prepPipe, nullptr); g_prepPipe = VK_NULL_HANDLE; }
     if (g_argPipe)  { vkDestroyPipeline(g_device, g_argPipe, nullptr);  g_argPipe = VK_NULL_HANDLE; }
+    if (g_mutPipe)  { vkDestroyPipeline(g_device, g_mutPipe, nullptr);  g_mutPipe = VK_NULL_HANDLE; }
+    destroyBuf(g_scand2); destroyBuf(g_sout2); destroyBuf(g_adj2); destroyBuf(g_sel);
+    if (g_cminPipe) { vkDestroyPipeline(g_device, g_cminPipe, nullptr); g_cminPipe = VK_NULL_HANDLE; }
+    if (g_cgatPipe) { vkDestroyPipeline(g_device, g_cgatPipe, nullptr); g_cgatPipe = VK_NULL_HANDLE; }
+    if (g_cminPL)   { vkDestroyPipelineLayout(g_device, g_cminPL, nullptr); g_cminPL = VK_NULL_HANDLE; }
+    if (g_cgatPL)   { vkDestroyPipelineLayout(g_device, g_cgatPL, nullptr); g_cgatPL = VK_NULL_HANDLE; }
+    if (g_cminDSL)  { vkDestroyDescriptorSetLayout(g_device, g_cminDSL, nullptr); g_cminDSL = VK_NULL_HANDLE; }
+    if (g_cgatDSL)  { vkDestroyDescriptorSetLayout(g_device, g_cgatDSL, nullptr); g_cgatDSL = VK_NULL_HANDLE; }
+    g_coarseOn = 0; g_coarseBudget = 4000; g_kpart = 2048; g_coarseCap = 0;
     if (g_genPL)  { vkDestroyPipelineLayout(g_device, g_genPL, nullptr);  g_genPL = VK_NULL_HANDLE; }
     if (g_prepPL) { vkDestroyPipelineLayout(g_device, g_prepPL, nullptr); g_prepPL = VK_NULL_HANDLE; }
     if (g_argPL)  { vkDestroyPipelineLayout(g_device, g_argPL, nullptr);  g_argPL = VK_NULL_HANDLE; }
+    if (g_mutPL)  { vkDestroyPipelineLayout(g_device, g_mutPL, nullptr);  g_mutPL = VK_NULL_HANDLE; }
     if (g_genDSL)  { vkDestroyDescriptorSetLayout(g_device, g_genDSL, nullptr);  g_genDSL = VK_NULL_HANDLE; }
     if (g_prepDSL) { vkDestroyDescriptorSetLayout(g_device, g_prepDSL, nullptr); g_prepDSL = VK_NULL_HANDLE; }
     if (g_argDSL)  { vkDestroyDescriptorSetLayout(g_device, g_argDSL, nullptr);  g_argDSL = VK_NULL_HANDLE; }
+    if (g_mutDSL)  { vkDestroyDescriptorSetLayout(g_device, g_mutDSL, nullptr);  g_mutDSL = VK_NULL_HANDLE; }
     destroyBuf(g_seeds);
     if (g_msPipe) { vkDestroyPipeline(g_device, g_msPipe, nullptr); g_msPipe = VK_NULL_HANDLE; }
     if (g_gmPipe) { vkDestroyPipeline(g_device, g_gmPipe, nullptr); g_gmPipe = VK_NULL_HANDLE; }
@@ -481,10 +654,39 @@ bool buildContext() {
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = g_qfam; qci.queueCount = 1; qci.pQueuePriorities = &prio;
+    // fp64 is preferred, not required. Requesting shaderFloat64 unconditionally made
+    // vkCreateDevice fail outright on iGPUs that do not expose it — the app would not start at
+    // all. Every REAL-typed shader now compiles in an fp32 variant too; a device without fp64
+    // gets those pipelines and slightly different rounding instead of a startup error.
+    // FH6VK_FORCE_FP32=1 selects the fp32 pipelines on capable hardware for testing.
+    VkPhysicalDeviceFeatures have{};
+    vkGetPhysicalDeviceFeatures(g_phys, &have);
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(g_phys, &props);
+    g_maxGroupsX = props.limits.maxComputeWorkGroupCount[0];
+    g_fp64 = have.shaderFloat64 == VK_TRUE ? 1 : 0;
+    const char* ffp = getenv("FH6VK_FORCE_FP32");
+    if (ffp && *ffp == '1') g_fp64 = 0;
+    g_rs = g_fp64 ? 8 : 4;
     VkPhysicalDeviceFeatures feats{};
-    feats.shaderFloat64 = VK_TRUE; // eval.comp does the final ΔSSE math in double
+    feats.shaderFloat64 = g_fp64 ? VK_TRUE : VK_FALSE;
+    // VK_EXT_memory_budget (when the driver has it) powers fp_mem_info: live per-heap budget and
+    // usage, which the engine's polish VRAM ladder reads before committing ~1.5GB of allocations.
+    g_memBudgetExt = 0;
+    const char* devExts[1]; uint32_t devExtN = 0;
+    uint32_t extn = 0; vkEnumerateDeviceExtensionProperties(g_phys, nullptr, &extn, nullptr);
+    if (extn) {
+        std::vector<VkExtensionProperties> eps(extn);
+        vkEnumerateDeviceExtensionProperties(g_phys, nullptr, &extn, eps.data());
+        for (uint32_t i = 0; i < extn; i++) {
+            if (!strcmp(eps[i].extensionName, "VK_EXT_memory_budget")) {
+                devExts[devExtN++] = "VK_EXT_memory_budget"; g_memBudgetExt = 1; break;
+            }
+        }
+    }
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci; dci.pEnabledFeatures = &feats;
+    dci.enabledExtensionCount = devExtN; dci.ppEnabledExtensionNames = devExtN ? devExts : nullptr;
     if (vkCreateDevice(g_phys, &dci, nullptr, &g_device) != VK_SUCCESS) { g_lastError = 1005; return false; }
     volkLoadDevice(g_device);
     vkGetDeviceQueue(g_device, g_qfam, 0, &g_queue);
@@ -530,24 +732,29 @@ bool buildContext() {
         vkDestroyShaderModule(g_device, sm, nullptr);
         return r == VK_SUCCESS;
     };
-    if (!makePipe(g_evalPL, eval_spv, sizeof(eval_spv), g_evalPipe) ||
+    if (!makePipe(g_evalPL, RSPV(eval), g_evalPipe) ||
         !makePipe(g_applyPL, apply_spv, sizeof(apply_spv), g_applyPipe)) { g_lastError = 1011; return false; }
     // grid: error-grid reduction (4 storage buffers: target, canvas, weight, grid)
     if (!makeDSL(4, g_gridDSL)) { g_lastError = 1009; return false; }
     if (!makePL(g_gridDSL, sizeof(GridPC), g_gridPL)) { g_lastError = 1010; return false; }
-    if (!makePipe(g_gridPL, grid_spv, sizeof(grid_spv), g_gridPipe)) { g_lastError = 1011; return false; }
-    // on-device search: gen (8 bindings: +rampGlow), prepadj (3), argmin (4); eval is reused for scoring.
-    if (!makeDSL(11, g_genDSL) || !makeDSL(3, g_prepDSL) || !makeDSL(4, g_argDSL)) { g_lastError = 1009; return false; }
-    if (!makePL(g_genDSL, sizeof(GenPC), g_genPL) || !makePL(g_prepDSL, sizeof(PrepPC), g_prepPL) || !makePL(g_argDSL, sizeof(ArgPC), g_argPL)) { g_lastError = 1010; return false; }
-    if (!makePipe(g_genPL, gen_spv, sizeof(gen_spv), g_genPipe) || !makePipe(g_prepPL, prepadj_spv, sizeof(prepadj_spv), g_prepPipe) || !makePipe(g_argPL, argmin_spv, sizeof(argmin_spv), g_argPipe)) { g_lastError = 1011; return false; }
+    if (!makePipe(g_gridPL, RSPV(grid), g_gridPipe)) { g_lastError = 1011; return false; }
+    // on-device search: gen (12 bindings — 11 data + the GenCfg SSBO), prepadj (3), argmin (4),
+    // mutate (2); eval is reused for scoring.
+    if (!makeDSL(12, g_genDSL) || !makeDSL(3, g_prepDSL) || !makeDSL(4, g_argDSL) || !makeDSL(2, g_mutDSL)) { g_lastError = 1009; return false; }
+    if (!makePL(g_genDSL, sizeof(GenPC), g_genPL) || !makePL(g_prepDSL, sizeof(PrepPC), g_prepPL) || !makePL(g_argDSL, sizeof(ArgPC), g_argPL) || !makePL(g_mutDSL, sizeof(MutPC), g_mutPL)) { g_lastError = 1010; return false; }
+    if (!makePipe(g_genPL, gen_spv, sizeof(gen_spv), g_genPipe) || !makePipe(g_prepPL, prepadj_spv, sizeof(prepadj_spv), g_prepPipe) || !makePipe(g_argPL, argmin_spv, sizeof(argmin_spv), g_argPipe) || !makePipe(g_mutPL, mutate_spv, sizeof(mutate_spv), g_mutPipe)) { g_lastError = 1011; return false; }
+    // coarse-to-fine filter: coarse_min (2 bindings), coarse_gather (3); pass 2 reuses eval/prepadj/argmin.
+    if (!makeDSL(2, g_cminDSL) || !makeDSL(3, g_cgatDSL)) { g_lastError = 1009; return false; }
+    if (!makePL(g_cminDSL, sizeof(CminPC), g_cminPL) || !makePL(g_cgatDSL, sizeof(CgatPC), g_cgatPL)) { g_lastError = 1010; return false; }
+    if (!makePipe(g_cminPL, coarse_min_spv, sizeof(coarse_min_spv), g_cminPipe) || !makePipe(g_cgatPL, coarse_gather_spv, sizeof(coarse_gather_spv), g_cgatPipe)) { g_lastError = 1011; return false; }
     // moment search: momentseed (3 bindings), genmoment (6 bindings: +rampGlow); eval/prepadj/argmin reused.
     if (!makeDSL(3, g_msDSL) || !makeDSL(6, g_gmDSL)) { g_lastError = 1009; return false; }
     if (!makePL(g_msDSL, sizeof(MomSeedPC), g_msPL) || !makePL(g_gmDSL, sizeof(GenMomPC), g_gmPL)) { g_lastError = 1010; return false; }
-    if (!makePipe(g_msPL, momentseed_spv, sizeof(momentseed_spv), g_msPipe) || !makePipe(g_gmPL, genmoment_spv, sizeof(genmoment_spv), g_gmPipe)) { g_lastError = 1011; return false; }
+    if (!makePipe(g_msPL, RSPV(momentseed), g_msPipe) || !makePipe(g_gmPL, genmoment_spv, sizeof(genmoment_spv), g_gmPipe)) { g_lastError = 1011; return false; }
 
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64}; // + the two mask-atlas bindings on eval (x2 sets) and apply
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 96}; // + the two mask-atlas bindings on eval (x3 sets) and apply
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpci.maxSets = 9; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    dpci.maxSets = 15; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
     if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_descPool) != VK_SUCCESS) { g_lastError = 1012; return false; }
     VkDescriptorSetAllocateInfo e{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     e.descriptorPool = g_descPool; e.descriptorSetCount = 1; e.pSetLayouts = &g_evalDSL;
@@ -558,10 +765,13 @@ bool buildContext() {
     VkDescriptorSetAllocateInfo gr{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     gr.descriptorPool = g_descPool; gr.descriptorSetCount = 1; gr.pSetLayouts = &g_gridDSL;
     if (vkAllocateDescriptorSets(g_device, &gr, &g_gridSet) != VK_SUCCESS) { g_lastError = 1014; return false; }
-    // search sets: gen, search-eval (reuses the eval DSL), prepadj, argmin, momentseed, genmoment
-    VkDescriptorSetLayout sl[6] = { g_genDSL, g_evalDSL, g_prepDSL, g_argDSL, g_msDSL, g_gmDSL };
-    VkDescriptorSet* sd[6] = { &g_genSet, &g_sevalSet, &g_prepSet, &g_argSet, &g_msSet, &g_gmSet };
-    for (int i = 0; i < 6; i++) {
+    // search sets: gen, search-eval (reuses the eval DSL), prepadj, argmin, momentseed, genmoment,
+    // mutate, plus the coarse filter's five (cmin, cgather, and the pass-2 eval/prep/argmin views).
+    VkDescriptorSetLayout sl[12] = { g_genDSL, g_evalDSL, g_prepDSL, g_argDSL, g_msDSL, g_gmDSL, g_mutDSL,
+                                     g_cminDSL, g_cgatDSL, g_evalDSL, g_prepDSL, g_argDSL };
+    VkDescriptorSet* sd[12] = { &g_genSet, &g_sevalSet, &g_prepSet, &g_argSet, &g_msSet, &g_gmSet, &g_mutSet,
+                                &g_cminSet, &g_cgatSet, &g_seval2Set, &g_prep2Set, &g_arg2Set };
+    for (int i = 0; i < 12; i++) {
         VkDescriptorSetAllocateInfo si{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         si.descriptorPool = g_descPool; si.descriptorSetCount = 1; si.pSetLayouts = &sl[i];
         if (vkAllocateDescriptorSets(g_device, &si, sd[i]) != VK_SUCCESS) { g_lastError = 1014; return false; }
@@ -596,12 +806,22 @@ void writeDescriptors() {
 
 // submitWait records nothing itself — caller fills g_cmd; this submits + waits the fence.
 void submitWait() {
+    // A lost device (TDR/driver reset) never comes back: skip the driver entirely and keep
+    // g_lastError armed so EVERY caller's post-call check reports the fault, not just the first.
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; return; }
+    if (g_profOn < 0) { const char* e = getenv("FH6VK_PROF"); g_profOn = (e && e[0] == '1') ? 1 : 0; }
+    std::chrono::steady_clock::time_point t0;
+    if (g_profOn) t0 = std::chrono::steady_clock::now();
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO}; si.commandBufferCount = 1; si.pCommandBuffers = &g_cmd;
     vkResetFences(g_device, 1, &g_fence);
     // Record submit/fence failure so the device-error check after Evaluate can
     // see a VK_ERROR_DEVICE_LOST — otherwise a stale g_out returns as valid.
-    if (vkQueueSubmit(g_queue, 1, &si, g_fence) != VK_SUCCESS) { g_lastError = 1050; return; }
-    if (vkWaitForFences(g_device, 1, &g_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) { g_lastError = 1051; }
+    if (vkQueueSubmit(g_queue, 1, &si, g_fence) != VK_SUCCESS) { g_lastError = 1050; g_fatal = 1; return; }
+    if (vkWaitForFences(g_device, 1, &g_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) { g_lastError = 1051; g_fatal = 1; }
+    if (g_profOn) {
+        g_profSec[g_profScope] += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        g_profCnt[g_profScope]++;
+    }
 }
 
 // barrier making this dispatch's shader writes available to later shader reads, the
@@ -669,6 +889,23 @@ void copyBufBatch(const StageCopy* c, int n) {
     submitWait();
 }
 
+// cmdStageCopies records staging->device copies plus the transfer->compute barrier into the OPEN
+// command buffer, so an upload rides the same submit as the work that consumes it. copyBufBatch
+// (above) already merged five fences into one; this removes that one too on the per-shape search
+// path — on WDDM a submit+fence is 50-200us, and there were ~5 per placed shape.
+void cmdStageCopies(const StageCopy* c, int n) {
+    for (int i = 0; i < n; i++) {
+        if (c[i].size == 0) continue;
+        VkBufferCopy bc{c[i].srcOff, 0, c[i].size};
+        vkCmdCopyBuffer(g_cmd, g_staging.buf, c[i].dst, 1, &bc);
+    }
+    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(g_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+}
+
 // in-cmd barrier: this dispatch's shader writes available to the next dispatch's reads
 // AND writes (RAW + WAR over render/dC during the sequential per-shape passes).
 void cmdBarrierRW() {
@@ -707,8 +944,8 @@ bool buildPolishPipelines() {
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1; plci.pSetLayouts = &g_pDSL; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pr;
     if (vkCreatePipelineLayout(g_device, &plci, nullptr, &g_pPL) != VK_SUCCESS) return false;
-    if (!makePolishPipe(p_dcinit_spv, sizeof(p_dcinit_spv), g_pDcinit)) return false;
-    if (!makePolishPipe(p_loss_spv, sizeof(p_loss_spv), g_pLoss)) return false;
+    if (!makePolishPipe(RSPV(p_dcinit), g_pDcinit)) return false;
+    if (!makePolishPipe(RSPV(p_loss), g_pLoss)) return false;
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
@@ -762,8 +999,8 @@ bool buildFE() {
         return r == VK_SUCCESS;
     };
     if (!mk(fe_luma_spv, sizeof(fe_luma_spv), g_feLumaP)) return false;
-    if (!mk(fe_dir_spv, sizeof(fe_dir_spv), g_feDirP)) return false;
-    if (!mk(fe_adj_spv, sizeof(fe_adj_spv), g_feAdjP)) return false;
+    if (!mk(RSPV(fe_dir), g_feDirP)) return false;
+    if (!mk(RSPV(fe_adj), g_feAdjP)) return false;
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 2; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
@@ -853,11 +1090,11 @@ bool buildSSIM() {
         return r == VK_SUCCESS;
     };
     if (!mk(fe_luma_spv, sizeof(fe_luma_spv), g_ssLumaP)) return false; // bindings 0/2 line up
-    if (!mk(ssim_h_spv, sizeof(ssim_h_spv), g_ssHP)) return false;
-    if (!mk(ssim_myinit_spv, sizeof(ssim_myinit_spv), g_ssMyP)) return false;
-    if (!mk(ssim_map_spv, sizeof(ssim_map_spv), g_ssMapP)) return false;
-    if (!mk(ssim_gh_spv, sizeof(ssim_gh_spv), g_ssGHP)) return false;
-    if (!mk(ssim_adj_spv, sizeof(ssim_adj_spv), g_ssAdjP)) return false;
+    if (!mk(RSPV(ssim_h), g_ssHP)) return false;
+    if (!mk(RSPV(ssim_myinit), g_ssMyP)) return false;
+    if (!mk(RSPV(ssim_map), g_ssMapP)) return false;
+    if (!mk(RSPV(ssim_gh), g_ssGHP)) return false;
+    if (!mk(RSPV(ssim_adj), g_ssAdjP)) return false;
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 18};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 2; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
@@ -949,16 +1186,16 @@ bool buildEagle() {
         return r == VK_SUCCESS;
     };
     if (!mk(fe_luma_spv, sizeof(fe_luma_spv), g_egLumaP)) return false; // bindings 0/2 line up
-    if (!mk(eagle_scharr_spv, sizeof(eagle_scharr_spv), g_egScharrP)) return false;
-    if (!mk(eagle_var_spv, sizeof(eagle_var_spv), g_egVarP)) return false;
-    if (!mk(eagle_boxx_spv, sizeof(eagle_boxx_spv), g_egBoxXP)) return false;
-    if (!mk(eagle_boxy_spv, sizeof(eagle_boxy_spv), g_egBoxYP)) return false;
-    if (!mk(eagle_hpfin_spv, sizeof(eagle_hpfin_spv), g_egHpP)) return false;
-    if (!mk(eagle_loss_spv, sizeof(eagle_loss_spv), g_egLossP)) return false;
-    if (!mk(eagle_sign_spv, sizeof(eagle_sign_spv), g_egSignP)) return false;
-    if (!mk(eagle_um_spv, sizeof(eagle_um_spv), g_egUmP)) return false;
-    if (!mk(eagle_varadj_spv, sizeof(eagle_varadj_spv), g_egVarAdjP)) return false;
-    if (!mk(eagle_scharradj_spv, sizeof(eagle_scharradj_spv), g_egScharrAdjP)) return false;
+    if (!mk(RSPV(eagle_scharr), g_egScharrP)) return false;
+    if (!mk(RSPV(eagle_var), g_egVarP)) return false;
+    if (!mk(RSPV(eagle_boxx), g_egBoxXP)) return false;
+    if (!mk(RSPV(eagle_boxy), g_egBoxYP)) return false;
+    if (!mk(RSPV(eagle_hpfin), g_egHpP)) return false;
+    if (!mk(RSPV(eagle_loss), g_egLossP)) return false;
+    if (!mk(RSPV(eagle_sign), g_egSignP)) return false;
+    if (!mk(RSPV(eagle_um), g_egUmP)) return false;
+    if (!mk(RSPV(eagle_varadj), g_egVarAdjP)) return false;
+    if (!mk(RSPV(eagle_scharradj), g_egScharrAdjP)) return false;
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 40};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 2; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
@@ -1052,25 +1289,26 @@ void cmdEaglePasses(bool forBackward) {
 // fixed target-side maps. lambda<=0 disables; below the CPU reference 8px floor degrades to 0.
 // Call AFTER fp_polish_setup.
 API void fp_set_polish_eagle(const double* lambdaPtr) {
+    g_profScope = PROF_TERMSET;
     g_peglambda = lambdaPtr[0];
     if (g_peglambda <= 0.0 || !g_device || g_pn < 1) return;
     if (g_w < 8 || g_h < 8) { g_peglambda = 0.0; return; }
     size_t npix = (size_t)g_w * g_h;
-    if (g_egDSL == VK_NULL_HANDLE && !buildEagle()) { g_lastError = 2010; return; }
+    if (g_egDSL == VK_NULL_HANDLE && !buildEagle()) { g_lastError = 2010; g_peglambda = 0.0; return; }
     if (!ensureTermW()) { g_lastError = 2012; return; }
     if (g_egTL.buf == VK_NULL_HANDLE) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         bool ok = createBufEx(npix * 4, S, dl, false, g_egTL) && createBufEx(npix * 4, S, dl, false, g_egRL)
-               && createBufEx(npix * 8, S, dl, false, g_egTHx) && createBufEx(npix * 8, S, dl, false, g_egTHy)
-               && createBufEx(npix * 8, S, dl, false, g_egGx) && createBufEx(npix * 8, S, dl, false, g_egGy)
-               && createBufEx(npix * 8, S, dl, false, g_egVx) && createBufEx(npix * 8, S, dl, false, g_egVy)
-               && createBufEx(npix * 8, S, dl, false, g_egMx) && createBufEx(npix * 8, S, dl, false, g_egMy)
-               && createBufEx(npix * 8, S, dl, false, g_egHx) && createBufEx(npix * 8, S, dl, false, g_egHy)
-               && createBufEx(npix * 8, S, dl, false, g_egT1) && createBufEx(npix * 8, S, dl, false, g_egT2)
-               && createBufEx(npix * 8, S, dl, false, g_egSx) && createBufEx(npix * 8, S, dl, false, g_egSy)
+               && createBufEx(npix * g_rs, S, dl, false, g_egTHx) && createBufEx(npix * g_rs, S, dl, false, g_egTHy)
+               && createBufEx(npix * g_rs, S, dl, false, g_egGx) && createBufEx(npix * g_rs, S, dl, false, g_egGy)
+               && createBufEx(npix * g_rs, S, dl, false, g_egVx) && createBufEx(npix * g_rs, S, dl, false, g_egVy)
+               && createBufEx(npix * g_rs, S, dl, false, g_egMx) && createBufEx(npix * g_rs, S, dl, false, g_egMy)
+               && createBufEx(npix * g_rs, S, dl, false, g_egHx) && createBufEx(npix * g_rs, S, dl, false, g_egHy)
+               && createBufEx(npix * g_rs, S, dl, false, g_egT1) && createBufEx(npix * g_rs, S, dl, false, g_egT2)
+               && createBufEx(npix * g_rs, S, dl, false, g_egSx) && createBufEx(npix * g_rs, S, dl, false, g_egSy)
                && createHost(EG_GROUPS * 8, g_egParts);
-        if (!ok) { g_lastError = 2011; return; }
+        if (!ok) { g_lastError = 2011; g_peglambda = 0.0; return; }
     }
     writeEagleDescriptors();
     vkResetCommandBuffer(g_cmd, 0);
@@ -1161,8 +1399,8 @@ bool buildTiledForward() {
         vkDestroyShaderModule(g_device, sm, nullptr);
         return r == VK_SUCCESS;
     };
-    if (!mk(pt_forward_spv, sizeof(pt_forward_spv), g_ptFwd)) return false;
-    if (!mk(pt_hard_spv, sizeof(pt_hard_spv), g_ptHard)) return false;
+    if (!mk(RSPV(pt_forward), g_ptFwd)) return false;
+    if (!mk(RSPV(pt_hard), g_ptHard)) return false;
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 12};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
@@ -1218,9 +1456,9 @@ bool buildBackwardTiled() {
         vkDestroyShaderModule(g_device, sm, nullptr);
         return r == VK_SUCCESS;
     };
-    if (!mk(pt_dcwalk_spv, sizeof(pt_dcwalk_spv), g_pbWalk)) return false;
-    if (!mk(pt_breduce_spv, sizeof(pt_breduce_spv), g_pbReduce)) return false;
-    if (!mk(pt_bcombine_spv, sizeof(pt_bcombine_spv), g_pbCombine)) return false;
+    if (!mk(RSPV(pt_dcwalk), g_pbWalk)) return false;
+    if (!mk(RSPV(pt_breduce), g_pbReduce)) return false;
+    if (!mk(RSPV(pt_bcombine), g_pbCombine)) return false;
     VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
@@ -1260,6 +1498,14 @@ void ensureStaging(VkDeviceSize need) {
     createHost(need, g_staging);
 }
 
+// stagingReady is the checked front door: a failed staging grow used to leave callers memcpy-ing
+// into a null map — a hard host crash on the exact machines (low RAM/VRAM) that hit it.
+bool stagingReady(VkDeviceSize need) {
+    ensureStaging(need);
+    if (!g_staging.map) { g_lastError = 1060; return false; }
+    return true;
+}
+
 // computeLoss runs the loss reduction over the CURRENT g_prender vs target and sums the
 // host-visible partials. Shared by fp_polish_loss (soft) and fp_polish_hard_loss (hard).
 double computeLoss() {
@@ -1287,28 +1533,30 @@ double computeLoss() {
     flushBarrier();
     vkEndCommandBuffer(g_cmd);
     submitWait();
-    double s = 0.0;
-    const double* pp = (const double*)g_ppartials.map;
-    for (int i = 0; i < PLOSS_GROUPS; i++) s += pp[i];
+    // The partials buffers hold REAL — double on the fp64 pipelines, float on the fp32 fallback —
+    // so the read has to follow g_fp64. The host-side sum stays double either way.
+    auto sumParts = [](const void* map, int n) {
+        double s = 0.0;
+        if (g_fp64) {
+            const double* p = (const double*)map;
+            for (int i = 0; i < n; i++) s += p[i];
+        } else {
+            const float* p = (const float*)map;
+            for (int i = 0; i < n; i++) s += (double)p[i];
+        }
+        return s;
+    };
+    double s = sumParts(g_ppartials.map, PLOSS_GROUPS);
     if (g_pfelambda > 0.0 || g_pldlambda > 0.0) {
         // fe_dir emits the partials ALREADY lambda-weighted (it carries two different lambdas),
         // so this must not scale again.
-        double f = 0.0;
-        const double* fp = (const double*)g_feParts.map;
-        for (int i = 0; i < FE_GROUPS; i++) f += fp[i];
-        s += f;
+        s += sumParts(g_feParts.map, FE_GROUPS);
     }
     if (g_psslambda > 0.0) {
-        double f = 0.0;
-        const double* sp = (const double*)g_ssParts.map;
-        for (int i = 0; i < SS_GROUPS; i++) f += sp[i];
-        s += g_psslambda * f;
+        s += g_psslambda * sumParts(g_ssParts.map, SS_GROUPS);
     }
     if (g_peglambda > 0.0) {
-        double f = 0.0;
-        const double* ep = (const double*)g_egParts.map;
-        for (int i = 0; i < EG_GROUPS; i++) f += ep[i];
-        s += g_peglambda * f;
+        s += g_peglambda * sumParts(g_egParts.map, EG_GROUPS);
     }
     return s;
 }
@@ -1319,7 +1567,7 @@ void writeSearchDescriptors() {
         w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set; w.dstBinding = b; w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
     };
-    VkWriteDescriptorSet w[27]; VkDescriptorBufferInfo bi[27]; int k = 0;
+    VkWriteDescriptorSet w[48]; VkDescriptorBufferInfo bi[48]; int k = 0;
     wr(g_genSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_genSet, 1, g_kindsB.buf, g_kindsB.size, w[k], bi[k]); k++;
     wr(g_genSet, 2, g_kindcdf.buf, g_kindcdf.size, w[k], bi[k]); k++;
@@ -1335,6 +1583,7 @@ void writeSearchDescriptors() {
     wr(g_genSet, 9, g_hasProposer ? g_propKinds.buf : g_kindsB.buf,
        g_hasProposer ? g_propKinds.size : g_kindsB.size, w[k], bi[k]); k++;
     wr(g_genSet, 10, g_coh.buf, g_coh.size, w[k], bi[k]); k++;
+    wr(g_genSet, 11, g_genCfg.buf, g_genCfg.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 1, g_target.buf, g_target.size, w[k], bi[k]); k++;
     wr(g_sevalSet, 2, g_canvas.buf, g_canvas.size, w[k], bi[k]); k++;
@@ -1349,6 +1598,36 @@ void writeSearchDescriptors() {
     wr(g_argSet, 1, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
     wr(g_argSet, 2, g_sout.buf, g_sout.size, w[k], bi[k]); k++;
     wr(g_argSet, 3, g_best.buf, g_best.size, w[k], bi[k]); k++;
+    wr(g_mutSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
+    wr(g_mutSet, 1, g_best.buf, g_best.size, w[k], bi[k]); k++;
+    // Coarse-filter sets. Vulkan requires every binding written even while the filter is off, so
+    // until fp_set_coarse has created the pass-2 buffers they fall back to existing ones — the
+    // shaders behind these sets never dispatch in that state.
+    {
+        const Buf& c2 = g_scand2.buf ? g_scand2 : g_scand;
+        const Buf& o2 = g_sout2.buf ? g_sout2 : g_sout;
+        const Buf& a2 = g_adj2.buf ? g_adj2 : g_adj;
+        const Buf& se = g_sel.buf ? g_sel : g_adj;
+        wr(g_cminSet, 0, g_adj.buf, g_adj.size, w[k], bi[k]); k++;
+        wr(g_cminSet, 1, se.buf, se.size, w[k], bi[k]); k++;
+        wr(g_cgatSet, 0, g_scand.buf, g_scand.size, w[k], bi[k]); k++;
+        wr(g_cgatSet, 1, se.buf, se.size, w[k], bi[k]); k++;
+        wr(g_cgatSet, 2, c2.buf, c2.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 0, c2.buf, c2.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 1, g_target.buf, g_target.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 2, g_canvas.buf, g_canvas.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 3, g_weight.buf, g_weight.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 4, o2.buf, o2.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 5, g_maskAtlas.buf, g_maskAtlas.size, w[k], bi[k]); k++;
+        wr(g_seval2Set, 6, g_maskMeta.buf, g_maskMeta.size, w[k], bi[k]); k++;
+        wr(g_prep2Set, 0, o2.buf, o2.size, w[k], bi[k]); k++;
+        wr(g_prep2Set, 1, c2.buf, c2.size, w[k], bi[k]); k++;
+        wr(g_prep2Set, 2, a2.buf, a2.size, w[k], bi[k]); k++;
+        wr(g_arg2Set, 0, a2.buf, a2.size, w[k], bi[k]); k++;
+        wr(g_arg2Set, 1, c2.buf, c2.size, w[k], bi[k]); k++;
+        wr(g_arg2Set, 2, o2.buf, o2.size, w[k], bi[k]); k++;
+        wr(g_arg2Set, 3, g_best.buf, g_best.size, w[k], bi[k]); k++;
+    }
     vkUpdateDescriptorSets(g_device, (uint32_t)k, w, 0, nullptr);
 }
 
@@ -1361,11 +1640,75 @@ bool ensureSearch(int n) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         if (!createBufEx((size_t)n * 11 * sizeof(float), S, dl, false, g_scand) ||
             !createBufEx((size_t)n * 5 * sizeof(float), S, dl, false, g_sout) ||
-            !createBufEx((size_t)n * sizeof(float), S, dl, false, g_adj)) return false;
+            !createBufEx((size_t)n * sizeof(float), S, dl, false, g_adj)) {
+            // The old buffers are already destroyed: reset the cap or a later smaller call would
+            // skip this block and dispatch against freed buffers.
+            destroyBuf(g_scand); destroyBuf(g_sout); destroyBuf(g_adj);
+            g_searchCap = 0; g_searchSetsDirty = true;
+            return false;
+        }
         g_searchCap = n; g_searchSetsDirty = true;
     }
     if (g_searchSetsDirty) { writeSearchDescriptors(); g_searchSetsDirty = false; }
     return true;
+}
+
+// ensureCoarse grows the pass-2 scratch to k survivors and marks the search sets for rebinding.
+// The buffers are tiny (k <= 8192 -> under half a megabyte total), so growth is rare and cheap.
+bool ensureCoarse(int k) {
+    if (k <= g_coarseCap) return true;
+    destroyBuf(g_scand2); destroyBuf(g_sout2); destroyBuf(g_adj2); destroyBuf(g_sel);
+    const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (!createBufEx((size_t)k * 11 * sizeof(float), S, dl, false, g_scand2) ||
+        !createBufEx((size_t)k * 5 * sizeof(float), S, dl, false, g_sout2) ||
+        !createBufEx((size_t)k * sizeof(float), S, dl, false, g_adj2) ||
+        !createBufEx((size_t)k * sizeof(int32_t), S, dl, false, g_sel)) {
+        // Partial success is worse than none: a surviving g_scand2 makes useCoarse fire while the
+        // descriptor fallback silently aliases the missing buffers onto pass 1's — pass 2 would
+        // then overwrite the full-budget scores. Drop everything and reset the cap.
+        destroyBuf(g_scand2); destroyBuf(g_sout2); destroyBuf(g_adj2); destroyBuf(g_sel);
+        g_coarseCap = 0; g_searchSetsDirty = true;
+        return false;
+    }
+    g_coarseCap = k; g_searchSetsDirty = true;
+    return true;
+}
+
+// cmdCoarseRefine records the fine half of the coarse-to-fine search into g_cmd: partition argmin
+// over the cheap pass's adjusted scores, gather the kpart survivors, re-score them at the FULL
+// sample budget, re-adjust, and argmin into g_best. Caller has already recorded gen + cheap eval +
+// prepadj and stands after a cmdBarrierRW().
+void cmdCoarseRefine(int n, int compact, int shapeCount) {
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_cminPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_cminPL, 0, 1, &g_cminSet, 0, nullptr);
+    CminPC cpc{n, g_kpart};
+    vkCmdPushConstants(g_cmd, g_cminPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(cpc), &cpc);
+    vkCmdDispatch(g_cmd, (uint32_t)g_kpart, 1, 1);
+    cmdBarrierRW();
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_cgatPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_cgatPL, 0, 1, &g_cgatSet, 0, nullptr);
+    CgatPC gpc2{g_kpart};
+    vkCmdPushConstants(g_cmd, g_cgatPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc2), &gpc2);
+    vkCmdDispatch(g_cmd, (uint32_t)((g_kpart + 255) / 256), 1, 1);
+    cmdBarrierRW();
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_seval2Set, 0, nullptr);
+    EvalPC e2{g_kpart, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
+    vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(e2), &e2);
+    vkCmdDispatch(g_cmd, (uint32_t)g_kpart, 1, 1);
+    cmdBarrierRW();
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_prepPL, 0, 1, &g_prep2Set, 0, nullptr);
+    PrepPC p2{g_kpart, compact, shapeCount, g_w, g_h};
+    vkCmdPushConstants(g_cmd, g_prepPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p2), &p2);
+    vkCmdDispatch(g_cmd, (uint32_t)((g_kpart + 255) / 256), 1, 1);
+    cmdBarrierRW();
+    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
+    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_arg2Set, 0, nullptr);
+    ArgPC a2{g_kpart, 0, 0, 0, 0, 0, 0};
+    vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(a2), &a2);
+    vkCmdDispatch(g_cmd, 1, 1, 1);
 }
 
 void writeMomentDescriptors() {
@@ -1392,7 +1735,10 @@ void writeMomentDescriptors() {
 bool ensureMoment(int K) {
     if (K > g_momentCap) {
         destroyBuf(g_seeds);
-        if (!createBufEx((size_t)K * 6 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_seeds)) return false;
+        if (!createBufEx((size_t)K * 6 * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_seeds)) {
+            g_momentCap = 0; // the old buffer is gone; a later smaller K must re-allocate
+            return false;
+        }
         g_momentCap = K;
     }
     writeMomentDescriptors();
@@ -1411,10 +1757,24 @@ bool ensureTermW() {
 } // namespace
 
 API int fp_init(const float* target, const float* weight, int w, int h, int maxCands, int gridSize) {
+    g_profScope = PROF_INIT;
+    memset(g_profSec, 0, sizeof(g_profSec));
+    memset(g_profCnt, 0, sizeof(g_profCnt));
     teardown();
+    g_dirtyFull = true;
+    g_dirtyX0 = g_dirtyY0 = 0; g_dirtyX1 = g_dirtyY1 = -1;
     g_lastError = 0;
+    g_fatal = 0; // buildContext creates a FRESH device below; the previous loss does not carry over
+    // The chunking EMA is per-workload: a run that jumps from 1100px to native 4096px would size
+    // its first submit off the SMALL canvas's round cost and can blow the TDR window it guards.
+    g_mutRoundCost = 0.0;
     g_w = w; g_h = h; g_maxCands = maxCands; g_grid = gridSize;
     if (!buildContext()) { teardown(); return g_lastError ? g_lastError : 1; }
+    // Several per-pixel shaders are thread-per-pixel with 256-wide groups; a canvas whose group
+    // count exceeds the device's 1-D dispatch ceiling (guaranteed floor 65535, i.e. >16.7Mpx on
+    // Intel-class parts) would be undefined behaviour. Refuse honestly until those shaders are
+    // grid-strided; NVIDIA/AMD report ~2^31 so real canvases never trip this there.
+    if (((size_t)w * h + 255) / 256 > g_maxGroupsX) { teardown(); return 1061; }
 
     size_t npix = (size_t)w * h;
     VkDeviceSize tSize = npix * 4 * sizeof(float), wSize = npix * sizeof(float);
@@ -1431,6 +1791,7 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
         !createHost(tSize, g_staging) ||
         !createHost((size_t)gridSize * gridSize * sizeof(float), g_gridBuf) ||
         !createHost(12 * sizeof(float), g_best) ||
+        !createHost(sizeof(GenCfg), g_genCfg) ||
         !createBufEx(8 * sizeof(float), dstStore, devLocal, false, g_kindsB) ||
         !createBufEx(8 * sizeof(float), dstStore, devLocal, false, g_kindcdf) ||
         !createBufEx((size_t)gridSize * gridSize * sizeof(float), dstStore, devLocal, false, g_gridcdf) ||
@@ -1471,7 +1832,7 @@ API int fp_set_masks(const float* atlas, long long totalFloats, const int* meta,
     if (!createBufEx(aSize, use, dl, false, g_maskAtlas) || !createBufEx(mSize, use, dl, false, g_maskMeta)) {
         g_lastError = 1021; return 2;
     }
-    ensureStaging(aSize > mSize ? aSize : mSize);
+    if (!stagingReady(aSize > mSize ? aSize : mSize)) { g_lastError = 1060; return 3; }
     memcpy(g_staging.map, atlas, aSize); copyBuf(g_staging.buf, g_maskAtlas.buf, aSize);
     std::vector<int32_t> m(1 + (size_t)count * 3);
     m[0] = count;
@@ -1488,6 +1849,7 @@ API int fp_set_masks(const float* atlas, long long totalFloats, const int* meta,
 API int fp_masks_on() { return g_masksOn; }
 
 API void fp_eval(const float* cands, int n, float* out) {
+    g_profScope = PROF_EVAL;
     if (n <= 0 || !g_device) return;
     if (n > g_maxCands) n = g_maxCands;
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the guaranteed dispatch limit (Intel iGPUs enforce exactly 65535)
@@ -1510,12 +1872,25 @@ API void fp_eval(const float* cands, int n, float* out) {
 }
 
 API void fp_apply(const float* cand) {
+    g_profScope = PROF_APPLY;
     if (!g_device) return;
     int kind = (int)(cand[0] + 0.5f);
+    applyDirty(kind, cand + 1);
     ApplyPC pc{kind, cand[1], cand[2], cand[3], cand[4], cand[5], cand[6],
                cand[7], cand[8], cand[9], cand[10], g_w, g_h};
+    // The shader grid-strides the shape's OWN bbox pixels, so any dispatch size covers them all —
+    // size it from the conservative host rect instead of the whole frame (a 30px shape on a 2000²
+    // canvas used to launch 4M threads to write 900 pixels), and clamp to the guaranteed 65535
+    // workgroup ceiling that a 4096² canvas would otherwise cross on Intel.
     uint32_t groups = (uint32_t)(((size_t)g_w * g_h + 255) / 256);
+    int rx0, ry0, rx1, ry1;
+    if (shapeRect(kind, cand + 1, rx0, ry0, rx1, ry1) && rx1 >= rx0 && ry1 >= ry0) {
+        size_t area = (size_t)(rx1 - rx0 + 1) * (size_t)(ry1 - ry0 + 1);
+        uint32_t g2 = (uint32_t)((area + 255) / 256);
+        if (g2 < groups) groups = g2;
+    }
     if (groups < 1) groups = 1;
+    if (groups > 65535) groups = 65535;
 
     vkResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1530,7 +1905,52 @@ API void fp_apply(const float* cand) {
     submitWait();
 }
 
+// fp_apply_batch composites n candidates (11-float wire format each) in ORDER with ONE fence per
+// chunk instead of one per shape. A full-stack rerender (LOO rounds, pass gates, best-of restore)
+// used to be ~1000 fenced submits; the profiler counted 12.9k apply fences in one default run.
+// Dispatches, push constants, barriers and order are identical to n fp_apply calls — the compute
+// →compute barrier between shapes carries the same RAW dependency the old per-call fence did.
+API void fp_apply_batch(const float* cands, int n) {
+    g_profScope = PROF_APPLY;
+    if (!g_device || g_fatal || n < 1) return;
+    const int CHUNK = 512; // TDR guard: bbox-sized dispatches are tiny, but never risk one giant submit
+    for (int done = 0; done < n && !g_fatal; done += CHUNK) {
+        int m = n - done; if (m > CHUNK) m = CHUNK;
+        vkResetCommandBuffer(g_cmd, 0);
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(g_cmd, &bi);
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_applyPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_applyPL, 0, 1, &g_applySet, 0, nullptr);
+        for (int i = done; i < done + m; i++) {
+            const float* cand = cands + (size_t)i * 11;
+            int kind = (int)(cand[0] + 0.5f);
+            applyDirty(kind, cand + 1);
+            ApplyPC pc{kind, cand[1], cand[2], cand[3], cand[4], cand[5], cand[6],
+                       cand[7], cand[8], cand[9], cand[10], g_w, g_h};
+            uint32_t groups = (uint32_t)(((size_t)g_w * g_h + 255) / 256);
+            int rx0, ry0, rx1, ry1;
+            if (shapeRect(kind, cand + 1, rx0, ry0, rx1, ry1) && rx1 >= rx0 && ry1 >= ry0) {
+                size_t area = (size_t)(rx1 - rx0 + 1) * (size_t)(ry1 - ry0 + 1);
+                uint32_t g2 = (uint32_t)((area + 255) / 256);
+                if (g2 < groups) groups = g2;
+            }
+            if (groups < 1) groups = 1;
+            if (groups > 65535) groups = 65535;
+            vkCmdPushConstants(g_cmd, g_applyPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(g_cmd, groups, 1, 1);
+            // Each shape composites over the previous one's writes — the same dependency the old
+            // per-call fence enforced, now an in-buffer barrier. Last shape: flushBarrier below.
+            if (i != done + m - 1) cmdBarrierRW();
+        }
+        flushBarrier();
+        vkEndCommandBuffer(g_cmd);
+        submitWait();
+    }
+}
+
 API void fp_read_canvas(float* dst) {
+    g_profScope = PROF_READCANVAS;
     if (!g_device) return;
     VkDeviceSize sz = (size_t)g_w * g_h * 4 * sizeof(float);
     copyBuf(g_canvas.buf, g_staging.buf, sz); // device-local -> staging
@@ -1538,27 +1958,47 @@ API void fp_read_canvas(float* dst) {
 }
 
 API void fp_error_grid(float* out) {
+    g_profScope = PROF_GRID;
     if (!g_device) return;
     int gw = g_grid, gh = g_grid;
+    // Cell range from the dirty pixel rect, widened one cell each side (the pixel->cell floor
+    // mapping straddles boundaries). A clean grid skips the dispatch and hands back the cache.
+    int cx0 = 0, cy0 = 0, cx1 = gw - 1, cy1 = gh - 1;
+    if (!g_dirtyFull) {
+        if (g_dirtyX1 < g_dirtyX0) {
+            memcpy(out, g_gridBuf.map, (size_t)gw * gh * sizeof(float));
+            return;
+        }
+        cx0 = g_dirtyX0 * gw / g_w - 1; if (cx0 < 0) cx0 = 0;
+        cy0 = g_dirtyY0 * gh / g_h - 1; if (cy0 < 0) cy0 = 0;
+        cx1 = g_dirtyX1 * gw / g_w + 1; if (cx1 > gw - 1) cx1 = gw - 1;
+        cy1 = g_dirtyY1 * gh / g_h + 1; if (cy1 > gh - 1) cy1 = gh - 1;
+    }
     vkResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_gridPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_gridPL, 0, 1, &g_gridSet, 0, nullptr);
-    GridPC pc{g_w, g_h, gw, gh};
+    GridPC pc{g_w, g_h, gw, gh, cx0, cy0, cx1, cy1};
     vkCmdPushConstants(g_cmd, g_gridPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(g_cmd, (uint32_t)(gw * gh), 1, 1); // one workgroup per cell
+    vkCmdDispatch(g_cmd, (uint32_t)(gw * gh), 1, 1); // one workgroup per cell; clean cells return at once
     flushBarrier();
     vkEndCommandBuffer(g_cmd);
     submitWait();
+    // The dirty rect is consumed only AFTER a successful submit: clearing it up front meant a
+    // failed dispatch (device loss) silently froze those cells stale forever.
+    if (!g_fatal) {
+        g_dirtyFull = false;
+        g_dirtyX0 = g_dirtyY0 = 0; g_dirtyX1 = g_dirtyY1 = -1;
+    }
     memcpy(out, g_gridBuf.map, (size_t)gw * gh * sizeof(float));
 }
 
 API void fp_set_orient(const float* orient) {
     if (!g_device) return;
     size_t sz = (size_t)g_w * g_h * sizeof(float);
-    ensureStaging(sz);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, orient, sz);
     copyBuf(g_staging.buf, g_orient.buf, sz);
     g_hasOrient = 1;
@@ -1568,7 +2008,7 @@ API void fp_set_boundary_dist(const float* dist) {
     if (!g_device) return;
     if (!dist) { g_hasBound = 0; return; }
     size_t sz = (size_t)g_w * g_h * sizeof(float);
-    ensureStaging(sz);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, dist, sz);
     copyBuf(g_staging.buf, g_bound.buf, sz);
     g_hasBound = 1;
@@ -1889,7 +2329,7 @@ API void fp_set_coherence(const float* coh, const float* params) {
     float aspectCap = params ? params[0] : 0.f;
     if (!coh || aspectCap <= 1.f) { g_hasCoh = 0; g_aspectCap = 0.f; return; }
     size_t sz = (size_t)g_w * g_h * sizeof(float);
-    ensureStaging(sz);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, coh, sz);
     copyBuf(g_staging.buf, g_coh.buf, sz);
     g_hasCoh = 1;
@@ -1900,7 +2340,7 @@ API void fp_set_kind_gate(const float* hard) {
     if (!g_device) return;
     if (!hard) { g_hasGate = 0; return; }
     size_t sz = (size_t)g_w * g_h * sizeof(float);
-    ensureStaging(sz);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, hard, sz);
     copyBuf(g_staging.buf, g_kgate.buf, sz);
     g_hasGate = 1;
@@ -1914,7 +2354,7 @@ API void fp_set_ramp_glow(const float* ramp, const float* params) {
     if (!g_device) return;
     if (!ramp) { g_hasRampGlow = 0; g_rampGlowThresh = g_rampGlowTau = g_rampGlowProb = 0.f; return; }
     size_t sz = (size_t)g_w * g_h * sizeof(float);
-    ensureStaging(sz);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, ramp, sz);
     copyBuf(g_staging.buf, g_rampglow.buf, sz);
     g_hasRampGlow = 1;
@@ -1945,30 +2385,33 @@ API void fp_set_big_glow(const float* params) {
 // coarse-to-fine filter is a later optimisation).
 API void fp_search_random(unsigned long long seed, const int* ip, const float* fp,
                           const float* kinds, const float* kindCDF, const float* gridCDF, float* out_best) {
+    g_profScope = PROF_SEARCH;
     int n = ip[0], nKinds = ip[1], gw = ip[2], gh = ip[3];
     int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6];
-    if (!g_device || n < 1 || nKinds < 1) { out_best[0] = 3.4028235e38f; return; }
+    // g_fatal: after a device loss g_best still holds the LAST GOOD argmin result — returning it
+    // would hand the greedy a plausible stale winner it then places over and over. FLT_MAX = fail.
+    if (!g_device || g_fatal || n < 1 || nKinds < 1) { out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
     if (!ensureSearch(n)) { out_best[0] = 3.4028235e38f; return; }
-    // upload kinds / kindCDF / gridCDF
-    // Three uploads, one submit. This runs once per PLACED SHAPE, and the kind table and its CDF are
+    // upload kinds / kindCDF / gridCDF — recorded at the head of the SEARCH submit rather than
+    // fenced on their own. This runs once per PLACED SHAPE, and the kind table and its CDF are
     // the same handful of floats every time — but the grid CDF is not, so the batch still has to go.
+    size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
+    VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
+    ensureStaging(o3 + szG);
     {
-        size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
-        VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
-        ensureStaging(o3 + szG);
         char* base = (char*)g_staging.map;
         memcpy(base + o1, kinds, szKi);
         memcpy(base + o2, kindCDF, szKi);
         memcpy(base + o3, gridCDF, szG);
-        const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
-        copyBufBatch(ups, 3);
     }
+    const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
 
     vkResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
+    cmdStageCopies(ups, 3);
     // 1. generate
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_genPL, 0, 1, &g_genSet, 0, nullptr);
@@ -1982,22 +2425,29 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // different relative size and every extent it predicts comes out at the wrong scale -- which also
     // costs time, since scoring a candidate is per covered pixel.
     float propPatch = (float)g_propPatchSrc * (float)std::min(g_w, g_h) / (float)g_propTrainDim;
-    GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound, g_hasGate, g_hasRampGlow, g_bigGlowKinds, g_bigGlowKind,
-              g_propOn, g_propW, g_propH, g_propHeads, (g_propPool - 1) / 2,
-              (g_propConfGate && g_propHasConf) ? 1 : 0, g_hasCoh,
-              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb, g_bigGlowTau, g_bigGlowProb,
-              g_propFrac, propPatch, g_propJitter, 8.0f * g_propScale, g_propConfTau, g_aspectCap};
+    // The proposer scalars travel via the GenCfg SSBO (see GenPC's size cap). Refreshed on every
+    // search call — 44 host bytes, and the submit below is what makes them device-visible.
+    GenCfg gcfg{g_propOn, g_propW, g_propH, g_propHeads, (g_propPool - 1) / 2,
+                (g_propConfGate && g_propHasConf) ? 1 : 0,
+                g_propFrac, propPatch, g_propJitter, 8.0f * g_propScale, g_propConfTau};
+    memcpy(g_genCfg.map, &gcfg, sizeof(gcfg));
+    GenPC gpc{(uint32_t)seed, (uint32_t)(seed >> 32), n, nKinds, gw, gh, g_w, g_h, allowAlpha, g_hasOrient, g_hasBound, g_hasGate, g_hasRampGlow, g_bigGlowKinds, g_bigGlowKind, g_hasCoh,
+              fp[0], fp[1], fp[2], fp[3], fp[4], fp[5], g_glowTau, g_glowProb, g_rampGlowThresh, g_rampGlowTau, g_rampGlowProb, g_bigGlowTau, g_bigGlowProb, g_aspectCap};
     vkCmdPushConstants(g_cmd, g_genPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
     cmdBarrierRW();
-    // 2. score (reuse eval pipeline on the search buffers)
+    // 2. score (reuse eval pipeline on the search buffers). With the coarse filter on, this first
+    // pass runs at the CHEAP pixel cap; the partition argmin keeps kpart survivors and only those
+    // pay the full budget below — the winner is always full-budget scored.
+    bool useCoarse = g_coarseOn && g_scand2.buf != VK_NULL_HANDLE && n > 4 * g_kpart;
+    int budget1 = useCoarse ? (g_coarseBudget < g_sampleBudget ? g_coarseBudget : g_sampleBudget) : g_sampleBudget;
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
     // g_gradOn belongs here too. Leaving it off aggregate-initialised it to 0, so fp_set_gradients
     // reached the host Evaluate path and NOT the on-device search — the two halves of one run scored
     // gradients differently, and every A/B ever run with the honest-gradient flag moved only half the
     // system. The shipped default is 0, so this is inert until the flag is set.
-    EvalPC epc{n, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
+    EvalPC epc{n, g_w, g_h, budget1, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
     vkCmdDispatch(g_cmd, (uint32_t)n, 1, 1);
     cmdBarrierRW();
@@ -2008,15 +2458,20 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     vkCmdPushConstants(g_cmd, g_prepPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ppc), &ppc);
     vkCmdDispatch(g_cmd, (uint32_t)((n + 255) / 256), 1, 1);
     cmdBarrierRW();
-    // 4. argmin + gather
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
-    ArgPC apc{n};
-    vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
-    vkCmdDispatch(g_cmd, 1, 1, 1);
+    if (useCoarse) {
+        cmdCoarseRefine(n, compact, shapeCount);
+    } else {
+        // 4. argmin + gather
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
+        ArgPC apc{n, 0, 0, 0, 0, 0, 0};
+        vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
+        vkCmdDispatch(g_cmd, 1, 1, 1);
+    }
     flushBarrier();
     vkEndCommandBuffer(g_cmd);
     submitWait();
+    if (g_fatal) { out_best[0] = 3.4028235e38f; return; } // the submit died: g_best is stale
     memcpy(out_best, g_best.map, 12 * sizeof(float));
 }
 
@@ -2025,32 +2480,38 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
 // shim.cu fp_search_moment (simple path; coarse filter is a later optimisation).
 API void fp_search_moment(unsigned long long seed, const int* ip, const float* fp,
                           const float* kinds, const float* kindCDF, const float* gridCDF, float* out_best) {
+    g_profScope = PROF_SEARCH;
     int n = ip[0], nKinds = ip[1], gw = ip[2], gh = ip[3];
     int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6], K = ip[7];
     float maxR = fp[0], alphaMin = fp[1], boundPad = fp[3], boundMix = fp[4], canvasPad = fp[5];
-    if (!g_device || n < 1 || nKinds < 1 || K < 1) { out_best[0] = 3.4028235e38f; return; }
+    if (!g_device || g_fatal || n < 1 || nKinds < 1 || K < 1) { out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535;
-    if (!ensureSearch(n) || !ensureMoment(K)) { out_best[0] = 3.4028235e38f; return; }
+    // K > n (reachable through the expert panel's near-unclamped seed counter) makes nGen == K
+    // exceed n; the buffers must be sized for what the DISPATCHES write, not the requested n —
+    // otherwise genmoment/eval write past scand/sout with robustBufferAccess off. And nGen has to
+    // respect the same 65535 workgroup ceiling the n path does.
+    if (K > 65535) K = 65535;
     int perSeed = n / K; if (perSeed < 1) perSeed = 1;
-    int nGen = perSeed * K;
-    // Three uploads, one submit. This runs once per PLACED SHAPE, and the kind table and its CDF are
-    // the same handful of floats every time — but the grid CDF is not, so the batch still has to go.
+    while (perSeed > 1 && (long long)perSeed * K > 65535) perSeed--;
+    int nGen = perSeed * K; // perSeed==1 leaves nGen == K <= 65535
+    if (!ensureSearch(nGen > n ? nGen : n) || !ensureMoment(K)) { out_best[0] = 3.4028235e38f; return; }
+    // Same one-submit upload as fp_search_random: recorded at the head of the search submit.
+    size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
+    VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
+    if (!stagingReady(o3 + szG)) { out_best[0] = 3.4028235e38f; return; }
     {
-        size_t szKi = (size_t)nKinds * sizeof(float), szG = (size_t)gw * gh * sizeof(float);
-        VkDeviceSize o1 = 0, o2 = stageAlign(szKi), o3 = stageAlign(o2 + szKi);
-        ensureStaging(o3 + szG);
         char* base = (char*)g_staging.map;
         memcpy(base + o1, kinds, szKi);
         memcpy(base + o2, kindCDF, szKi);
         memcpy(base + o3, gridCDF, szG);
-        const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
-        copyBufBatch(ups, 3);
     }
+    const StageCopy ups[3] = {{o1, g_kindsB.buf, szKi}, {o2, g_kindcdf.buf, szKi}, {o3, g_gridcdf.buf, szG}};
 
     vkResetCommandBuffer(g_cmd, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g_cmd, &bi);
+    cmdStageCopies(ups, 3);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_msPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_msPL, 0, 1, &g_msSet, 0, nullptr);
     MomSeedPC mpc{(uint32_t)seed, (uint32_t)(seed >> 32), K, gw, gh, g_w, g_h, g_hasBound, maxR, boundPad, boundMix};
@@ -2063,9 +2524,11 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     vkCmdPushConstants(g_cmd, g_gmPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gpc), &gpc);
     vkCmdDispatch(g_cmd, (uint32_t)((nGen + 255) / 256), 1, 1);
     cmdBarrierRW();
+    bool useCoarse = g_coarseOn && g_scand2.buf != VK_NULL_HANDLE && nGen > 4 * g_kpart;
+    int budget1 = useCoarse ? (g_coarseBudget < g_sampleBudget ? g_coarseBudget : g_sampleBudget) : g_sampleBudget;
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
-    EvalPC epc{nGen, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
+    EvalPC epc{nGen, g_w, g_h, budget1, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
     vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
     vkCmdDispatch(g_cmd, (uint32_t)nGen, 1, 1);
     cmdBarrierRW();
@@ -2075,27 +2538,192 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     vkCmdPushConstants(g_cmd, g_prepPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ppc), &ppc);
     vkCmdDispatch(g_cmd, (uint32_t)((nGen + 255) / 256), 1, 1);
     cmdBarrierRW();
-    vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
-    vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
-    ArgPC apc{nGen};
-    vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
-    vkCmdDispatch(g_cmd, 1, 1, 1);
+    if (useCoarse) {
+        cmdCoarseRefine(nGen, compact, shapeCount);
+    } else {
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
+        ArgPC apc{nGen, 0, 0, 0, 0, 0, 0};
+        vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
+        vkCmdDispatch(g_cmd, 1, 1, 1);
+    }
     flushBarrier();
     vkEndCommandBuffer(g_cmd);
     submitWait();
+    if (g_fatal) { out_best[0] = 3.4028235e38f; return; } // the submit died: g_best is stale
     memcpy(out_best, g_best.map, 12 * sizeof(float));
 }
 
+// fp_search_mutate: the WHOLE hill climb for one shape in one submit. io_best carries the incumbent
+// in the best[12] wire format ([score,kind,p0..p5,r,g,b,a]) and returns the final winner in place.
+// Each round is mutate -> eval -> prepadj -> argmin(keep) entirely on-device; the host used to pay
+// one upload + one readback PER ROUND (~39 per shape), which made the mutate phase round-trip-bound
+// rather than compute-bound. The RNG is the device wanghash, not the host math/rand — same
+// neighbourhood, different stream — so this path is validated by paired end-to-end quality.
+// ip = [perRound, rounds, compact, shapeCount, allowAlpha]; fp = [moveStep, radiusStep, alphaMin, canvasPad].
+API void fp_search_mutate(unsigned long long seed, const int* ip, const float* fp, float* io_best) {
+    g_profScope = PROF_MUTATE;
+    int m = ip[0], rounds = ip[1], compact = ip[2], shapeCount = ip[3], allowAlpha = ip[4];
+    if (!g_device || g_fatal || m < 1 || rounds < 1) return;
+    if (m > 65535) m = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
+    if (!ensureSearch(m)) return;
+    memcpy(g_best.map, io_best, 12 * sizeof(float));
+
+    EvalPC epc{m, g_w, g_h, g_sampleBudget, g_alphaGridN, {g_alphaGrid[0], g_alphaGrid[1], g_alphaGrid[2], g_alphaGrid[3], g_alphaGrid[4], g_alphaGrid[5]}, g_gradOn};
+    ArgPC apc{m, 1, 1, compact, shapeCount, g_w, g_h}; // inlineAdj: prepadj folded into the argmin
+    // TDR guard: Windows resets the GPU when ONE submit runs past ~2s, and all the rounds in a
+    // single submit can cross that on a weak or busy card (the exact "freeze then the run dies"
+    // users report). Chunk the rounds so each submit targets ~250ms, sized by a measured
+    // seconds-per-round EMA. Chunk boundaries are only extra fence waits — the recorded commands,
+    // seeds (absolute round index) and device state are IDENTICAL, so the output is byte-equal to
+    // the single-submit version; on a fast card the second chunk covers every remaining round.
+    for (int done = 0; done < rounds && !g_fatal; ) {
+        int chunk = rounds - done;
+        if (g_mutRoundCost > 0.0) {
+            int c = (int)(0.25 / g_mutRoundCost);
+            if (c < 1) c = 1;
+            if (c < chunk) chunk = c;
+        } else if (chunk > 4) {
+            chunk = 4; // first-ever call: conservative probe until a round cost is known
+        }
+        auto t0 = std::chrono::steady_clock::now();
+        vkResetCommandBuffer(g_cmd, 0);
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(g_cmd, &bi);
+        for (int rd = done; rd < done + chunk; rd++) {
+            // A fresh seed per round on the host side keeps the shader's counter scheme untouched.
+            unsigned long long rs = seed + (unsigned long long)(rd + 1) * 0x9E3779B97F4A7C15ull;
+            MutPC mpc{(uint32_t)rs, (uint32_t)(rs >> 32), m, g_w, g_h, allowAlpha, fp[0], fp[1], fp[2], fp[3]};
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_mutPipe);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_mutPL, 0, 1, &g_mutSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_mutPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mpc), &mpc);
+            vkCmdDispatch(g_cmd, (uint32_t)((m + 255) / 256), 1, 1);
+            cmdBarrierRW();
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPipe);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_evalPL, 0, 1, &g_sevalSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_evalPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(epc), &epc);
+            vkCmdDispatch(g_cmd, (uint32_t)m, 1, 1);
+            cmdBarrierRW();
+            // prepadj is folded into the argmin here (ArgPC.inlineAdj): same expressions, same
+            // winner, one dispatch + one barrier fewer per round (~39 rounds per shape).
+            vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPipe);
+            vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_argPL, 0, 1, &g_argSet, 0, nullptr);
+            vkCmdPushConstants(g_cmd, g_argPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(apc), &apc);
+            vkCmdDispatch(g_cmd, 1, 1, 1);
+            // The next round's mutate reads g_best that this argmin may have just written; the
+            // barrier is queue-scoped, so it also orders the first round of the NEXT chunk. On
+            // the chunk's LAST round flushBarrier below is a superset — skip the duplicate.
+            if (rd != done + chunk - 1) cmdBarrierRW();
+        }
+        flushBarrier();
+        vkEndCommandBuffer(g_cmd);
+        submitWait();
+        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (dt > 0 && !g_fatal) {
+            double per = dt / chunk;
+            g_mutRoundCost = g_mutRoundCost > 0.0 ? 0.7 * g_mutRoundCost + 0.3 * per : per;
+        }
+        done += chunk;
+    }
+    if (g_fatal) return; // leave the caller's incumbent untouched; fp_last_error reports the fault
+    memcpy(io_best, g_best.map, 12 * sizeof(float));
+}
+
 API void fp_reset(const float* canvas) {
+    g_profScope = PROF_RESET;
     if (!g_device) return;
+    g_dirtyFull = true; // the whole canvas changed; the next grid read recomputes every cell
     VkDeviceSize sz = (size_t)g_w * g_h * 4 * sizeof(float);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, canvas, sz);
     copyBuf(g_staging.buf, g_canvas.buf, sz); // staging -> device-local
 }
 
 API void fp_set_sample_budget(int n) { g_sampleBudget = (n < 1) ? 4000 : n; }
 
+// fp_set_coarse configures the coarse-to-fine filter for both on-device searches. kpart is the
+// survivor count (one per partition); the searches gate themselves on n > 4*kpart, so small pools
+// fall through to the single full-budget pass unchanged.
+API void fp_set_coarse(int enable, int budget, int kpart) {
+    if (!g_device) return;
+    g_coarseOn = enable ? 1 : 0;
+    g_coarseBudget = (budget < 1) ? 4000 : budget;
+    if (kpart < 1) kpart = 2048;
+    if (kpart > 8192) kpart = 8192; // coarse_min.comp's int32 index math relies on this clamp
+    g_kpart = kpart;
+    if (g_coarseOn && !ensureCoarse(kpart)) g_coarseOn = 0;
+}
+
 API int fp_last_error() { int e = g_lastError; g_lastError = 0; return e; }
+
+// fp_prof_dump writes the FH6VK_PROF=1 profiler table into buf (truncated to cap): per-scope GPU
+// seconds (fence-synchronous submits, so submitWait's wall IS the submit's GPU time) and submit
+// COUNTS — the round-trip census that host-side profiling can only estimate. Returns the number
+// of characters it wanted to write; 0 when the profiler never armed. Counters reset at fp_init.
+API int fp_prof_dump(char* buf, int cap) {
+    if (g_profOn != 1 || !buf || cap < 1) { if (buf && cap > 0) buf[0] = 0; return 0; }
+    int off = 0;
+    double tot = 0;
+    for (int i = 0; i < PROF_N; i++) tot += g_profSec[i];
+    off += snprintf(buf + off, (size_t)((cap - off) > 0 ? cap - off : 0),
+                    "gpu-prof (fence-synchronous submit time, total %.2fs):", tot);
+    for (int i = 0; i < PROF_N; i++) {
+        if (g_profCnt[i] == 0) continue;
+        off += snprintf(buf + off, (size_t)((cap - off) > 0 ? cap - off : 0),
+                        " %s=%.2fs/%lld", g_profNames[i], g_profSec[i], g_profCnt[i]);
+    }
+    if (off >= cap) buf[cap - 1] = 0;
+    return off;
+}
+
+// fp_device_lost reports the STICKY device-loss flag (unlike fp_last_error it is not consumed):
+// 1 after any submit/fence failure — TDR, driver reset, or an OOM-killed context. The engine
+// polls it to abort a run with an honest message instead of spinning on a dead device.
+API int fp_device_lost() { return g_fatal; }
+
+// fp_mem_info fills out[3] = {budgetBytes, usageBytes, heapSizeBytes} for the largest
+// DEVICE_LOCAL heap. budget/usage are live driver numbers via VK_EXT_memory_budget and stay 0
+// when the extension is absent — the caller then falls back to a fraction of heapSize.
+API void fp_mem_info(long long* out) {
+    out[0] = out[1] = out[2] = 0;
+    if (!g_phys) return;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT mb{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 mp2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    if (g_memBudgetExt) mp2.pNext = &mb;
+    vkGetPhysicalDeviceMemoryProperties2(g_phys, &mp2);
+    int best = -1; VkDeviceSize bestSz = 0;
+    for (uint32_t i = 0; i < mp2.memoryProperties.memoryHeapCount; i++) {
+        const VkMemoryHeap& hp = mp2.memoryProperties.memoryHeaps[i];
+        if ((hp.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && hp.size > bestSz) { best = (int)i; bestSz = hp.size; }
+    }
+    if (best < 0) return;
+    out[2] = (long long)bestSz;
+    if (g_memBudgetExt) { out[0] = (long long)mb.heapBudget[best]; out[1] = (long long)mb.heapUsage[best]; }
+}
+
+// fp_polish_mem_need estimates the DEVICE_LOCAL bytes the polish would allocate for n shapes:
+// fp_polish_setup's buffers, the first upload's below/dcsnap snapshots (belowTotal = Σ expanded
+// bbox pixels, the caller computes it at the widest tau), the tile-bin list, and the optional
+// term planes (terms bit 0 = false-edge/lost-detail, 1 = SSIM, 2 = EAGLE). The formulas mirror
+// the actual createBufEx calls — keep them in sync when the allocations change. Host-visible
+// buffers (grad readback, loss partials, staging) are excluded: they live in system memory.
+API void fp_polish_mem_need(int n, long long belowTotal, int terms, long long* out) {
+    long long npix = (long long)g_w * g_h;
+    long long rs = g_rs ? g_rs : 8;
+    long long nTiles = (long long)((g_w + PTILE - 1) / PTILE) * ((g_h + PTILE - 1) / PTILE);
+    long long need = npix * 16 * 3                    // base, render, dC
+                   + npix * rs * 3                    // feAdj/ssAdj/egAdj (always bound by dcinit)
+                   + (long long)n * 64                // P, col, kinds, bbx, boff
+                   + (long long)n * PBSLICES * 10 * rs // backward reduce partials
+                   + nTiles * 8 + belowTotal / 256    // tile counts+offsets, ~list
+                   + belowTotal * 4 * 2;              // below + dcsnap composite snapshots
+    if (terms & 1) need += npix * (8 + 2 * rs);       // FE/LD: TL, RL, Dir
+    if (terms & 2) need += npix * (8 + 11 * rs);      // SSIM: TL, RL, H(3), MY(2), G(3), HG(3)
+    if (terms & 4) need += npix * (8 + 14 * rs);      // EAGLE: TL, RL + 14 REAL planes
+    if (terms) need += npix * 4;                      // term-weight map
+    *out = need;
+}
 
 // fp_set_gradients is accepted for interface parity but does not gate anything here: the eval
 // shader always scores the native gradient kinds (KindGlow/KindDisk) with their per-pixel alpha,
@@ -2106,9 +2734,11 @@ API void fp_set_gradients(int on) { g_gradOn = on ? 1 : 0; }
 // ===================== joint-polish API (mirrors shim.cu fp_polish_*) =====================
 
 API void fp_polish_setup(const float* base, int n) {
+    g_profScope = PROF_PSETUP;
     polishTeardown();
     if (!g_device || n < 1) { g_lastError = 2001; return; }
     g_pn = n;
+    g_pkindsUp = false;
     if (!buildPolishPipelines()) { g_lastError = 2002; polishTeardown(); return; }
     if (!buildTileBinner()) { g_lastError = 2013; polishTeardown(); return; }
     if (!buildTiledForward()) { g_lastError = 2004; polishTeardown(); return; }
@@ -2122,18 +2752,18 @@ API void fp_polish_setup(const float* base, int n) {
            && createBufEx(npix * 16, SDS, dl, false, g_prender)
            && createBufEx(npix * 16, S, dl, false, g_pdC)
            && createBufEx((size_t)n * 6 * 4, SD, dl, false, g_pP) // float32: see fp_polish_upload
-           && createBufEx((size_t)n * 4 * 8, SD, dl, false, g_pcol)
+           && createBufEx((size_t)n * 4 * 4, SD, dl, false, g_pcol)
            && createBufEx((size_t)n * 4, SD, dl, false, g_pkinds)
            && createBufEx((size_t)n * 16, SD, dl, false, g_pbbxBuf)
            && createBufEx((size_t)n * 4, SD, dl, false, g_pboffBuf)
-           && createHost((size_t)n * 10 * 8, g_ppgrad)
-           && createBufEx((size_t)n * PBSLICES * 10 * 8, S, dl, false, g_pbwPart)
+           && createHost((size_t)n * 10 * g_rs, g_ppgrad)
+           && createBufEx((size_t)n * PBSLICES * 10 * g_rs, S, dl, false, g_pbwPart)
            && createHost(PLOSS_GROUPS * 8, g_ppartials)
            && createBufEx(16, S, dl, false, g_pbelow)
            && createBufEx(16, S, dl, false, g_pdcsnap)
-           && createBufEx(npix * 8, S, dl, false, g_feAdj)  // dcinit binding 10 must be valid even with feLambda=0
-           && createBufEx(npix * 8, S, dl, false, g_ssAdj)  // dcinit binding 11, same contract
-           && createBufEx(npix * 8, S, dl, false, g_egAdj); // dcinit binding 12 (EAGLE), same contract
+           && createBufEx(npix * g_rs, S, dl, false, g_feAdj)  // dcinit binding 10 must be valid even with feLambda=0
+           && createBufEx(npix * g_rs, S, dl, false, g_ssAdj)  // dcinit binding 11, same contract
+           && createBufEx(npix * g_rs, S, dl, false, g_egAdj); // dcinit binding 12 (EAGLE), same contract
     g_tilesX = (g_w + PTILE - 1) / PTILE;
     g_tilesY = (g_h + PTILE - 1) / PTILE;
     g_nTiles = g_tilesX * g_tilesY;
@@ -2144,10 +2774,10 @@ API void fp_polish_setup(const float* base, int n) {
             && createBufEx(16, S, dl, false, g_tileList); // grown on demand by buildTileBins
     if (!ok) { g_lastError = 2003; polishTeardown(); return; }
     g_belowCap = 16;
-    ensureStaging(npix * 16);
+    if (!stagingReady(npix * 16)) { g_lastError = 2003; polishTeardown(); return; }
     memcpy(g_staging.map, base, npix * 16);
     copyBuf(g_staging.buf, g_pbase.buf, npix * 16);
-    memset(g_ppgrad.map, 0, (size_t)n * 10 * 8);
+    memset(g_ppgrad.map, 0, (size_t)n * 10 * g_rs);
     writePolishDescriptors();
     writeTileBinnerDescriptors();
     writeTiledForwardDescriptors();
@@ -2168,7 +2798,7 @@ API void fp_set_term_weight(const float* hostW) {
     if (!hostW) { g_hasTermW = 0; return; }
     if (!ensureTermW()) { g_lastError = 2012; return; }
     size_t sz = (size_t)g_w * g_h * sizeof(float);
-    ensureStaging(sz);
+    if (!stagingReady(sz)) return;
     memcpy(g_staging.map, hostW, sz);
     copyBuf(g_staging.buf, g_termW.buf, sz);
     g_hasTermW = 1;
@@ -2181,17 +2811,18 @@ API void fp_set_term_weight(const float* hostW) {
 // target-luma plane. Both terms ride the same passes (see fe_dir.comp), so either setter can be
 // the one that brings the resources up — and the second must not rebuild them.
 static void ensureFEPlanes() {
+    g_profScope = PROF_TERMSET;
     if (!g_device || g_pn < 1) return;
     size_t npix = (size_t)g_w * g_h;
-    if (g_feDSL == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; return; }
+    if (g_feDSL == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; g_pfelambda = 0.0; g_pldlambda = 0.0; return; } // lambda MUST die with the failed build: a live lambda with NULL pipelines is a device fault
     if (!ensureTermW()) { g_lastError = 2012; return; }
     if (g_feTL.buf == VK_NULL_HANDLE) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         if (!createBufEx(npix * 4, S, dl, false, g_feTL) ||
             !createBufEx(npix * 4, S, dl, false, g_feRL) ||
-            !createBufEx(npix * 16, S, dl, false, g_feDir) ||
-            !createHost(FE_GROUPS * 8, g_feParts)) { g_lastError = 2007; return; }
+            !createBufEx(npix * 2 * g_rs, S, dl, false, g_feDir) ||
+            !createHost(FE_GROUPS * 8, g_feParts)) { g_lastError = 2007; g_pfelambda = 0.0; g_pldlambda = 0.0; return; }
     }
     writeFEDescriptors();
     // One-off: target luma plane via the luma pipe on setT (binding 0 = target, 2 = g_feTL).
@@ -2228,22 +2859,23 @@ API void fp_set_polish_lostdetail(const double* lambdaPtr) {
 // target-side window moments. λ<=0 disables; a canvas smaller than one window degrades to
 // λ=0 (the CPU reference's nil-state contract). Call AFTER fp_polish_setup.
 API void fp_set_polish_ssim(const double* lambdaPtr) {
+    g_profScope = PROF_TERMSET;
     g_psslambda = lambdaPtr[0];
     if (g_psslambda <= 0.0 || !g_device || g_pn < 1) return;
     int mw = g_w - SSWIN + 1, mh = g_h - SSWIN + 1;
     if (mw < 1 || mh < 1) { g_psslambda = 0.0; return; }
     size_t npix = (size_t)g_w * g_h;
-    if (g_ssDSL == VK_NULL_HANDLE && !buildSSIM()) { g_lastError = 2008; return; }
+    if (g_ssDSL == VK_NULL_HANDLE && !buildSSIM()) { g_lastError = 2008; g_psslambda = 0.0; return; }
     if (g_ssTL.buf == VK_NULL_HANDLE) {
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         if (!createBufEx(npix * 4, S, dl, false, g_ssTL) ||
             !createBufEx(npix * 4, S, dl, false, g_ssRL) ||
-            !createBufEx((size_t)mw * g_h * 3 * 8, S, dl, false, g_ssH) ||
-            !createBufEx((size_t)mw * mh * 2 * 8, S, dl, false, g_ssMY) ||
-            !createBufEx((size_t)mw * mh * 3 * 8, S, dl, false, g_ssG) ||
-            !createBufEx((size_t)g_w * mh * 3 * 8, S, dl, false, g_ssHG) ||
-            !createHost(SS_GROUPS * 8, g_ssParts)) { g_lastError = 2009; return; }
+            !createBufEx((size_t)mw * g_h * 3 * g_rs, S, dl, false, g_ssH) ||
+            !createBufEx((size_t)mw * mh * 2 * g_rs, S, dl, false, g_ssMY) ||
+            !createBufEx((size_t)mw * mh * 3 * g_rs, S, dl, false, g_ssG) ||
+            !createBufEx((size_t)g_w * mh * 3 * g_rs, S, dl, false, g_ssHG) ||
+            !createHost(SS_GROUPS * 8, g_ssParts)) { g_lastError = 2009; g_psslambda = 0.0; return; }
     }
     writeSSIMDescriptors();
     // One-off: target luma + h-pass + window moments via setT (binding 0 = target, 2 = g_ssTL).
@@ -2273,10 +2905,15 @@ API void fp_set_polish_ssim(const double* lambdaPtr) {
 // count per tile -> prefix sum -> fill. The total comes back through the staging buffer so the
 // list can be grown; if it would exceed the cap, binned stays 0 and the polish shaders fall back
 // to scanning the whole stack, so correctness never depends on the bin.
-void buildTileBins() {
+// buildTileBins also carries the caller's staging copies in its FIRST submit (one fence instead
+// of two per polish iteration). Returns false when it bailed before submitting anything — the
+// caller must then flush the copies itself.
+bool buildTileBins(const StageCopy* ups, int nups) {
     g_binned = 0;
-    if (!g_device || g_pn < 1 || g_nTiles < 1) return;
-    if (const char* off = getenv("FH6_NO_TILEBIN")) { if (off[0] == '1') return; } // kill switch: full scan
+    if (!g_device || g_pn < 1 || g_nTiles < 1) return false;
+    static int noBin = -1; // cached: this runs once per polish iteration, getenv is not free
+    if (noBin < 0) { const char* off = getenv("FH6_NO_TILEBIN"); noBin = (off && off[0] == '1') ? 1 : 0; }
+    if (noBin) return false; // kill switch: full scan
     uint32_t groups = (uint32_t)((g_nTiles + 255) / 256);
     ensureStaging(((size_t)g_nTiles + 1) * 4);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -2291,6 +2928,11 @@ void buildTileBins() {
         TilePC pc{ g_pn, g_tilesX, g_nTiles, PTILE, (int32_t)(g_tileListCap / 4) };
         vkResetCommandBuffer(g_cmd, 0);
         vkBeginCommandBuffer(g_cmd, &bi);
+        // The caller's param uploads ride this submit (one fence, not two, per polish iteration).
+        // The trailing tileOff->staging readback writes over the same staging bytes, but only
+        // AFTER the upload copies were consumed: copies -> barrier -> dispatches -> flushBarrier
+        // -> readback is a transitive execution chain, which is all a write-after-read needs.
+        if (withFill && ups) cmdStageCopies(ups, nups);
         vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_tbPL, 0, 1, &g_tbSet, 0, nullptr);
         vkCmdPushConstants(g_cmd, g_tbPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         if (withFill) {
@@ -2314,14 +2956,14 @@ void buildTileBins() {
         submitWait();
     };
 
-    record(true);
+    record(true); // from here on the caller's copies are submitted: every path returns true
     int total = ((const int*)g_staging.map)[g_nTiles];
     const long long cap = 48LL << 20; // 192 MB of indices, far past any real stack
-    if (total <= 0 || (long long)total > cap) return;
+    if (total <= 0 || (long long)total > cap) return true;
     if ((VkDeviceSize)total * 4 > g_tileListCap) {
         destroyBuf(g_tileList);
         if (!createBufEx((VkDeviceSize)total * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_tileList)) { g_tileListCap = 0; return; }
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_tileList)) { g_tileListCap = 0; return true; }
         g_tileListCap = (VkDeviceSize)total * 4;
         writeTileBinnerDescriptors();
         writeTiledForwardDescriptors();
@@ -2329,18 +2971,29 @@ void buildTileBins() {
         record(false); // offsets are already correct; only the truncated fill has to be redone
     }
     g_binned = 1;
+    return true;
 }
 
 API void fp_polish_upload(const double* P, const double* col, const int* kinds,
                           const int* bbx, const long long* boff, long long belowTotal) {
-    if (!g_device || g_pn < 1) return;
+    g_profScope = PROF_PUPLOAD;
+    if (!g_device || g_pn < 1 || g_fatal) return;
     VkDeviceSize need = (VkDeviceSize)belowTotal * 4;
     if (need < 4) need = 4;
     if (need > g_belowCap) {
+        // This is the single largest allocation of the whole program (belowTotal*4, twice). It is
+        // CHECKED: a silent failure here used to write null buffers with non-zero ranges into live
+        // descriptor sets — a driver fault instead of the skipped-polish contract.
         destroyBuf(g_pbelow);
-        createBufEx(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_pbelow);
         destroyBuf(g_pdcsnap);
-        createBufEx(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_pdcsnap);
+        bool ok = createBufEx(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_pbelow)
+               && createBufEx(need, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, g_pdcsnap);
+        if (!ok) {
+            g_belowCap = 0;
+            g_lastError = 2014;
+            g_pn = 0; // polish state is unusable: degrade every later fp_polish_* to a no-op
+            return;
+        }
         g_belowCap = need;
         writePolishDescriptors();
         writeTiledForwardDescriptors(); // g_pbelow handle changed -> rebind binding 4
@@ -2350,7 +3003,7 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
     // the moment it loaded it, so the doubles bought nothing on device and cost twice the traffic —
     // and this loop is re-read per pixel per shape. Converting here is the same IEEE round-to-nearest
     // the shaders were applying, so the values they see are bit-for-bit what they saw before.
-    size_t szP = (size_t)g_pn * 6 * 4, szC = (size_t)g_pn * 4 * 8, szK = (size_t)g_pn * 4;
+    size_t szP = (size_t)g_pn * 6 * 4, szC = (size_t)g_pn * 4 * 4, szK = (size_t)g_pn * 4;
     size_t szB = (size_t)g_pn * 16, szO = (size_t)g_pn * 4;
     // One staging layout, one submit. This runs once per polish ITERATION, so five fence waits here
     // were five per iteration for transfers measured in microseconds.
@@ -2359,30 +3012,47 @@ API void fp_polish_upload(const double* P, const double* col, const int* kinds,
     VkDeviceSize oK = stageAlign(oC + szC);
     VkDeviceSize oB = stageAlign(oK + szK);
     VkDeviceSize oO = stageAlign(oB + szB);
-    ensureStaging(oO + szO);
+    // Sized to cover BOTH this upload's layout and buildTileBins' tileOff readback, because the
+    // bins ride the same staging buffer in the same submit — growing it later would destroy the
+    // params just written.
+    VkDeviceSize stNeed = oO + szO;
+    if (VkDeviceSize tb = ((VkDeviceSize)g_nTiles + 1) * 4; tb > stNeed) stNeed = tb;
+    ensureStaging(stNeed);
+    if (!g_staging.map) { g_lastError = 1060; g_pn = 0; return; } // host-visible OOM: degrade, don't null-deref
     char* base = (char*)g_staging.map;
     {
         float* dst = (float*)(base + oP);
         for (size_t i = 0; i < (size_t)g_pn * 6; i++) dst[i] = (float)P[i];
     }
-    memcpy(base + oC, col, szC);
-    memcpy(base + oK, kinds, szK);
+    {
+        // Colours go as FLOAT32 too, same argument as P above: every consumer narrowed on load, so
+        // converting host-side is the identical rounding minus the per-pixel fp64 fetch+convert.
+        float* dst = (float*)(base + oC);
+        for (size_t i = 0; i < (size_t)g_pn * 4; i++) dst[i] = (float)col[i];
+    }
     memcpy(base + oB, bbx, szB); // bbx + boff(int32) feed the tiled forward/hard passes
     {
         int32_t* dst = (int32_t*)(base + oO);
         for (int i = 0; i < g_pn; i++) dst[i] = (int32_t)boff[i];
     }
-    const StageCopy ups[5] = {
-        {oP, g_pP.buf, szP}, {oC, g_pcol.buf, szC}, {oK, g_pkinds.buf, szK},
-        {oB, g_pbbxBuf.buf, szB}, {oO, g_pboffBuf.buf, szO},
+    // kinds never change between setup and free — upload them once, not once per iteration.
+    StageCopy ups[5] = {
+        {oP, g_pP.buf, szP}, {oC, g_pcol.buf, szC},
+        {oB, g_pbbxBuf.buf, szB}, {oO, g_pboffBuf.buf, szO}, {0, VK_NULL_HANDLE, 0},
     };
-    copyBufBatch(ups, 5);
-    buildTileBins();
+    int nups = 4;
+    if (!g_pkindsUp) {
+        memcpy(base + oK, kinds, szK);
+        ups[nups++] = {oK, g_pkinds.buf, szK};
+        g_pkindsUp = true;
+    }
+    if (!buildTileBins(ups, nups)) copyBufBatch(ups, nups);
 }
 
 // fp_polish_forward — ONE tiled dispatch (thread-per-pixel walks all shapes in order). No
 // base->render copy (the shader inits render=base per pixel) and no per-shape barriers.
 API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
+    g_profScope = PROF_PFWD;
     if (!g_device || g_pn < 1) return;
     (void)bbxHost; // bbx now lives on-device (g_pbbxBuf)
     vkResetCommandBuffer(g_cmd, 0);
@@ -2400,6 +3070,7 @@ API void fp_polish_forward(const int* bbxHost, const double* tauPtr) {
 }
 
 API void fp_polish_loss(double* out) {
+    g_profScope = PROF_PLOSS;
     if (!g_device || g_pn < 1) { *out = 0; return; }
     *out = computeLoss();
 }
@@ -2407,6 +3078,7 @@ API void fp_polish_loss(double* out) {
 // fp_polish_hard_loss — ONE tiled hard dispatch (render=base, all shapes binary-inside in
 // order) then the loss reduction. No base->render copy, no per-shape barriers.
 API void fp_polish_hard_loss(const int* bbxHost, double* out) {
+    g_profScope = PROF_PHARD;
     if (!g_device || g_pn < 1) { *out = 0; return; }
     (void)bbxHost; // bbx lives on-device (g_pbbxBuf)
     vkResetCommandBuffer(g_cmd, 0);
@@ -2429,6 +3101,7 @@ API void fp_polish_hard_loss(const int* bbxHost, double* out) {
 // barriers total — replacing the per-shape 1 + N-dispatch / N-barrier path. Bit-identical
 // gradient (same fixed-order tree reduction); the barrier count drops from ~N to 2.
 API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
+    g_profScope = PROF_PBWD;
     if (!g_device || g_pn < 1) return;
     (void)bbxHost; // bbx lives on-device (g_pbbxBuf)
     double tau = *tauPtr;
@@ -2506,13 +3179,29 @@ API void fp_polish_backward(const int* bbxHost, const double* tauPtr) {
                 bwCalls, tTerms, tWalk, tReduce);
 }
 
+API void fp_polish_read_grad_impl_fp64(double* dst);
 API void fp_polish_read_grad(double* dst) {
-    if (!g_device || g_pn < 1) return;
+    if (!g_fp64) {
+        // The fp32 pipelines wrote float grads; the Go side speaks float64, so widen on the way out.
+        if (!g_device || g_pn < 1 || g_fatal) return;
+        const float* src = (const float*)g_ppgrad.map;
+        for (size_t i = 0; i < (size_t)g_pn * 10; i++) dst[i] = (double)src[i];
+        return;
+    }
+    fp_polish_read_grad_impl_fp64(dst);
+}
+API void fp_polish_read_grad_impl_fp64(double* dst) {
+    // g_fatal: a dead device leaves g_ppgrad holding the PREVIOUS iteration's gradients — Adam
+    // would keep stepping on them until the engine's DeviceLost poll fires.
+    if (!g_device || g_pn < 1 || g_fatal) return;
     memcpy(dst, g_ppgrad.map, (size_t)g_pn * 10 * 8);
 }
 
 API void fp_polish_read_render(float* dst) {
-    if (!g_device) return;
+    g_profScope = PROF_PREADRENDER;
+    // g_pn guard: after a FAILED setup (OOM teardown) g_prender does not exist — a copy from the
+    // null buffer would fault the driver instead of no-opping like the other polish entries.
+    if (!g_device || g_pn < 1 || g_fatal) return;
     size_t sz = (size_t)g_w * g_h * 16;
     ensureStaging(sz);
     copyBuf(g_prender.buf, g_staging.buf, sz);

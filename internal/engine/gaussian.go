@@ -46,6 +46,7 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 	if po.Iters <= 0 {
 		po = DefaultPolishOptions()
 	}
+	po.Cancel = opt.Cancel // Stop must interrupt the training loop (it IS the whole run here)
 	po.EarlyStopMargin = 0 // from-scratch training: run the full iteration budget (no plateau cut)
 	po.LRPos *= gaussLRScale
 	po.LRRad *= gaussLRScale
@@ -71,12 +72,16 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 	}
 
 	finalErr := gaussRenderErr(be, shapes, w, h)
-	return Result{
+	res := Result{
 		Shapes:       shapes,
 		InitialError: initErr,
 		FinalError:   finalErr,
 		Timings:      Timings{Total: time.Since(t0), Polish: time.Since(t0), PolishIters: po.Iters, PolishPre: initErr, PolishPost: finalErr},
 	}
+	if dl, ok := be.(interface{ DeviceLost() bool }); ok && dl.DeviceLost() {
+		res.DevErr = errDeviceLost
+	}
+	return res
 }
 
 // gaussInitGlows tiles ~n glows on a square grid, each coloured by its cell's mean target colour and

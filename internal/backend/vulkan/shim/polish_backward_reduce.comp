@@ -1,5 +1,12 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 #extension GL_GOOGLE_include_directive : require
 // polish_backward_reduce.comp — TILED backward Pass B: gradient reduce, SLICED for load balance.
 // The original one-workgroup-per-shape layout made the dispatch wait on its largest shape: the
@@ -7,7 +14,7 @@
 // canvas-sized shape ran a 100k+ iteration loop in one workgroup while thousands of others sat
 // finished (measured: capping the loop cut the pass 26×; fp64 vs fp32 accumulation moved it 9%).
 // Now the dispatch is (n, S): workgroup (si, s) reduces one contiguous CHUNK of shape si's bbox
-// — same 128-thread stride, same fixed-order tree, in double — and writes a per-slice partial.
+// — same 128-thread stride, same fixed-order tree, in REAL — and writes a per-slice partial.
 // polish_backward_combine.comp then sums the slice partials in ascending slice order into pgrad.
 // Deterministic (no atomics, fixed orders throughout); the summation GROUPING differs from the
 // single-workgroup original, so gradients moved at fp64 rounding level — validated by the FD test
@@ -17,7 +24,7 @@
 
 layout(local_size_x = 128) in;
 layout(std430, binding = 0) readonly  buffer Pb { float Pbuf[]; };
-layout(std430, binding = 1) readonly  buffer Cb { double Cbuf[]; };
+layout(std430, binding = 1) readonly  buffer Cb { float Cbuf[]; };
 layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
 layout(std430, binding = 4) readonly  buffer Bb { float  belowb[]; };
 layout(std430, binding = 5) readonly  buffer Sb { float  dcsnap[]; };
@@ -25,14 +32,16 @@ layout(std430, binding = 7) readonly  buffer Xb { int    bbx[]; };
 layout(std430, binding = 8) readonly  buffer Ob { int    boff[]; };
 layout(std430, binding = 11) readonly buffer MA { float maskAtlas[]; };
 layout(std430, binding = 12) readonly buffer MM { int   maskMeta[]; };
-layout(std430, binding = 13) writeonly buffer Wb { double partialb[]; };
+layout(std430, binding = 13) writeonly buffer Wb { REAL partialb[]; };
 layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices; } pc;
 #include "mask_common.glsl"
 #include "polish_common.glsl"
 
 const int NG = 10;
 const int SLICE_PX = 4096; // target chunk per workgroup (128 threads x 32 strided iterations)
-shared double sh[128 * NG];
+// Half-size on purpose: the first reduction level runs through registers (see eval.comp) — same
+// pairing and order, half the shared memory, which is what caps occupancy on small GPUs.
+shared REAL sh[64 * NG];
 
 // sliceCount for a shape's bbox: enough slices to keep chunks near SLICE_PX, capped by the
 // dispatch height. MUST match polish_backward_combine.comp exactly.
@@ -54,18 +63,24 @@ void main() {
 
     int kind = Kbuf[si];
     float P[6]; for (int k = 0; k < 6; k++) P[k] = Pbuf[si * 6 + k];
-    float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]), A = float(Cbuf[si * 4 + 3]);
+    float R = Cbuf[si * 4 + 0], G = Cbuf[si * 4 + 1], B = Cbuf[si * 4 + 2], A = Cbuf[si * 4 + 3];
     bool opt = optGeoKind(kind);
 
-    double acc[NG];
-    for (int k = 0; k < NG; k++) acc[k] = 0.0LF;
+    REAL acc[NG];
+    for (int k = 0; k < NG; k++) acc[k] = REAL(0.0);
 
     int chunk = (total + sliceCount(total) - 1) / sliceCount(total);
     int lo = sl * chunk;
     int hi = lo + chunk; if (hi > total) hi = total;
     int bo = boff[si];
+    // Strength-reduced (x,y): identical per-thread pixel sequence, without two emulated integer
+    // divisions per pixel in the polish's hottest loop (see eval.comp).
+    int cxi = (lo + int(lid)) % bw, cyi = (lo + int(lid)) / bw;
+    int dq = 128 / bw, dr = 128 % bw;
     for (int tid = lo + int(lid); tid < hi; tid += 128) {
-        int x = xMin + tid % bw, y = yMin + tid / bw;
+        int x = xMin + cxi, y = yMin + cyi;
+        cxi += dr; cyi += dq;
+        if (cxi >= bw) { cxi -= bw; cyi++; }
         int bi = bo + tid * 4;
 
         float covEff = 0.0, dcovdsdf = 0.0;
@@ -99,20 +114,26 @@ void main() {
         float da = d0 * (R - cb0) + d1 * (G - cb1) + d2 * (B - cb2) + d3 * (1.0 - cb3);
         if (colorActive) {
             float a = A * covEff;
-            acc[6] += double(d0 * a);
-            acc[7] += double(d1 * a);
-            acc[8] += double(d2 * a);
-            acc[9] += double(da * covEff);
+            acc[6] += REAL(d0 * a);
+            acc[7] += REAL(d1 * a);
+            acc[8] += REAL(d2 * a);
+            acc[9] += REAL(da * covEff);
         }
         if (geoActive) {
             float dsdf = (da * A) * dcovdsdf;
-            for (int k = 0; k < 6; k++) acc[k] += double(dsdf * sdfg[k]);
+            for (int k = 0; k < 6; k++) acc[k] += REAL(dsdf * sdfg[k]);
         }
     }
 
-    for (int k = 0; k < NG; k++) sh[lid * uint(NG) + uint(k)] = acc[k];
+    if (lid >= 64u) {
+        for (int k = 0; k < NG; k++) sh[(lid - 64u) * uint(NG) + uint(k)] = acc[k];
+    }
     barrier();
-    for (uint s = 64u; s > 0u; s >>= 1) {
+    if (lid < 64u) {
+        for (int k = 0; k < NG; k++) { acc[k] += sh[lid * uint(NG) + uint(k)]; sh[lid * uint(NG) + uint(k)] = acc[k]; }
+    }
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
         if (lid < s)
             for (int k = 0; k < NG; k++) sh[lid * uint(NG) + uint(k)] += sh[(lid + s) * uint(NG) + uint(k)];
         barrier();

@@ -29,14 +29,20 @@ var (
 func Init(name string) string {
 	dir := logDir()
 	path := filepath.Join(dir, name)
+	// O_APPEND for the life of the install grows without bound; a >20MB log is nobody's evidence.
+	// Start fresh past that — the interesting lines are always the current session's.
+	if st, err := os.Stat(path); err == nil && st.Size() > 20<<20 {
+		_ = os.Remove(path)
+	}
 	var w io.Writer = os.Stderr
-	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
-		file = f
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err == nil {
 		w = io.MultiWriter(os.Stderr, f)
 	} else {
 		fmt.Fprintf(os.Stderr, "applog: could not open %s: %v (logging to stderr only)\n", path, err)
 	}
 	mu.Lock()
+	file = f // under mu, as the doc comment promises (Close reads it under the same lock)
 	logger = log.New(w, "", log.LstdFlags|log.Lmicroseconds)
 	mu.Unlock()
 	Printf("==== session start %s (pid %d) ====", time.Now().Format(time.RFC3339), os.Getpid())

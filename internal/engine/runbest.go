@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
 )
 
@@ -30,6 +31,17 @@ func RunBest(be backend.Backend, opt Options, n int) Result {
 		if i == 0 || res.FinalError < best.FinalError {
 			best = res
 		}
+		if res.DevErr != nil {
+			// The device is gone for every remaining attempt too — stop looping. But a COMPLETE
+			// best from an earlier attempt is a valid deliverable: hand it over clean rather than
+			// discarding finished work; only fail the whole call when no attempt survived.
+			if best.DevErr == nil && i > 0 {
+				applog.Printf("best-of: attempt %d/%d lost the GPU device — keeping the completed best (error %.1f)", i+1, n, best.FinalError)
+				return best
+			}
+			best.DevErr = res.DevErr
+			return best
+		}
 	}
 	// Leave the backend holding the winner (callers read the canvas / error grid after Run).
 	bg := make([]float32, len(be.Target()))
@@ -42,8 +54,6 @@ func RunBest(be backend.Backend, opt Options, n int) Result {
 		}
 	}
 	_ = be.Reset(bg)
-	for _, s := range best.Shapes[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, best.Shapes[1:])
 	return best
 }
