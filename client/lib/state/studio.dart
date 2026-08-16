@@ -152,14 +152,22 @@ class Studio extends ChangeNotifier {
   EngineClient? get engine => _engine;
 
   bool get isRunning => phase == Phase.running || phase == Phase.loading;
-  /// Fraction of the WHOLE run. The shape counter only describes placement, so
-  /// a bar driven by it reached 100% and then sat there for the polish and the
-  /// post-passes — close to half the run. The engine reports its own overall
-  /// progress across every phase; the shape ratio stays as the fallback for an
-  /// older engine and for the moment before the first phase event lands.
-  double get progress => overall > 0
-      ? overall.clamp(0.0, 1.0)
-      : (total == 0 ? 0 : (shapes / total).clamp(0.0, 1.0));
+  /// Fraction of the WHOLE run, and never decreasing within one.
+  ///
+  /// The shape ratio only describes placement, so it reached 100% and sat there
+  /// for the polish; the engine's overall figure covers every phase. Taking the
+  /// max of the two stops the readout from falling back when `overall` arrives
+  /// a beat late, which is what made the percentage appear to freeze and then
+  /// jump.
+  double get progress {
+    final byShape = total == 0 ? 0.0 : (shapes / total).clamp(0.0, 1.0);
+    final byPhase = overall.clamp(0.0, 1.0);
+    final v = overall > 0 ? byPhase : byShape;
+    if (v > _progressSeen) _progressSeen = v;
+    return _progressSeen;
+  }
+
+  double _progressSeen = 0;
 
   /// Connects to the engine service and loads what a first screen needs.
   Future<void> connect(String executable) async {
@@ -342,6 +350,8 @@ class Studio extends ChangeNotifier {
     phaseName = '';
     overall = 0;
     engineEta = null;
+    _sawPhase = false;
+    _progressSeen = 0;
     elapsed = Duration.zero;
     ssim = null;
     deltaE = null;
@@ -408,6 +418,8 @@ class Studio extends ChangeNotifier {
     phaseName = '';
     overall = 0;
     engineEta = null;
+    _sawPhase = false;
+    _progressSeen = 0;
     ssim = null;
     deltaE = null;
     failure = null;
@@ -560,6 +572,7 @@ class Studio extends ChangeNotifier {
         stage = u.line ?? '';
       case 'phase':
         final d = u.data ?? const {};
+        _sawPhase = true;
         phaseName = (d['phase'] as String?) ?? phaseName;
         overall = (d['overall'] as num?)?.toDouble() ?? overall;
         final ms = (d['etaMs'] as num?)?.toInt() ?? 0;
@@ -1255,11 +1268,26 @@ class Studio extends ChangeNotifier {
   String phaseName = '';
   double overall = 0;
 
-  /// A rough time remaining. Prefers the engine's estimate; the shape-rate
-  /// fallback keeps an older engine build working, and covers the window
-  /// before the first phase event arrives.
+  /// Set the first time this run reports a phase. From then on the engine owns
+  /// the estimate outright.
+  bool _sawPhase = false;
+
+  /// Time remaining — ONE estimate for the whole run.
+  ///
+  /// There used to be two, and they handed over mid-run: the shape-rate
+  /// fallback below describes placement only, so it ran down to zero the moment
+  /// the last shape landed and the engine's phase estimate — which covers the
+  /// polish and the post-passes, close to half the run — then started a second
+  /// countdown from a fresh number. Two timers in a row, the first of them
+  /// finishing while the work plainly had not.
+  ///
+  /// The fallback now only serves an engine too old to send phase events at
+  /// all. Once this run has reported even one phase, a null estimate reads as
+  /// "estimating" rather than being replaced by a number about a different
+  /// question.
   Duration? get eta {
     if (!isRunning) return null;
+    if (_sawPhase) return engineEta;
     if (engineEta != null) return engineEta;
     if (shapes < 20 || total <= shapes) return null;
     final rate = shapes / elapsed.inMilliseconds.clamp(1, 1 << 30);
