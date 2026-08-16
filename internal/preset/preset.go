@@ -835,6 +835,18 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// Wall pays about +27%. FH6_LOO_ROUNDS overrides for A/Bs.
 		// LOO refit (see the anime case below for the measured rationale) — photo shares it.
 		d.LooRefit = looRounds(4)
+		// Merge consolidation inside those rounds (mergerefit.go): near-duplicate pairs — same kind,
+		// near-same colour, high overlap — collapse into one moment-fitted shape, and the round's own
+		// regrow + re-polish + end-to-end gate re-spends the freed slot. Anime has had this since
+		// 2026-07-20 (see the anime arm); photo never did, and photo is where the translucent-stack
+		// convergence it consolidates is thickest.
+		//
+		// Measured 2026-08-17, paired A/B at 1000 shapes / 2000px, 4 photo images x 3 seeds:
+		// mean -1.260% SSE, 10 of 12 better. The wins run to -2.98% (img_10 s3, img_32 s2 -2.49%,
+		// img_12 s3 -2.32%); the two losses are +0.11% and +0.80%. Wall +2.8%.
+		// The same run's 15 anime pairs came back bit-identical, which is NOT evidence about anime —
+		// both arms already had the flag on there. FH6_MERGEREFIT=0 pins it off.
+		d.MergeRefit = os.Getenv("FH6_MERGEREFIT") != "0"
 		// Global joint colour re-solve (2026-08-05): after the LOO refit, every layer's RGB is
 		// re-solved AT ONCE for the frozen geometry, instead of each shape keeping the colour the
 		// greedy fitted against a canvas that later shapes have since overwritten. Compositing is
