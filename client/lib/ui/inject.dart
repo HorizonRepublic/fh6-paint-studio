@@ -55,6 +55,7 @@ class _InjectPopoverState extends State<InjectPopover> {
     final short = layers > 0 && layers < shapes;
 
     return Glass(
+      live: false,
       child: SizedBox(
         width: 300,
         child: Column(
@@ -63,7 +64,7 @@ class _InjectPopoverState extends State<InjectPopover> {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(13, 11, 13, 6),
-              child: Text('INJECT INTO FH6', style: T.label),
+              child: Text(context.s('injectTitle'), style: T.label),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(13, 0, 13, 4),
@@ -76,8 +77,18 @@ class _InjectPopoverState extends State<InjectPopover> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'the exact layer count of the group open in the editor',
+                    context.s('templateLayersHelp'),
                     style: T.text(10.5, color: T.hint),
+                  ),
+                  const SizedBox(height: 7),
+                  // The number the question is really about. It was computed
+                  // right here and used ONLY to decide whether to scold the
+                  // user afterwards — so the panel asked how many layers the
+                  // template has without ever saying how many this design
+                  // needs. Stated up front, the warning below becomes rare.
+                  Text(
+                    '$shapes',
+                    style: T.monoText(12.5, color: T.dim),
                   ),
                   const SizedBox(height: 7),
                   _Field(
@@ -91,8 +102,10 @@ class _InjectPopoverState extends State<InjectPopover> {
                   if (short) ...[
                     const SizedBox(height: 7),
                     _Warning(
-                      'Only $layers of $shapes shapes fit — the rest will be '
-                      'dropped in-game. Use a larger template.',
+                      context
+                          .s('injectShort')
+                          .replaceFirst('{n}', '$layers')
+                          .replaceFirst('{m}', '$shapes'),
                     ),
                   ],
                   const SizedBox(height: 13),
@@ -174,6 +187,32 @@ class _InjectPopoverState extends State<InjectPopover> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: T.monoText(10, color: T.hint),
+                                ),
+                              ),
+                            ],
+                          )
+                        : studio.injectError != null
+                        // A failed write used to fall through to the idle hint —
+                        // the SAME "save and reload" text as success — so a write
+                        // that never landed read as if it had. The most
+                        // consequential action in the app cannot fail silently.
+                        ? Row(
+                            children: [
+                              Text(
+                                '!',
+                                style: T.text(
+                                  13,
+                                  color: T.danger,
+                                  weight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(width: 7),
+                              Expanded(
+                                child: Text(
+                                  studio.injectError!,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: T.text(10.5, color: T.danger),
                                 ),
                               ),
                             ],

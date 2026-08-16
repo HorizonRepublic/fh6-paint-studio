@@ -63,6 +63,21 @@ class WindowState extends ChangeNotifier {
   /// background — the runner checks, so a finished run cannot flash at someone
   /// who is watching it finish.
   static Future<void> flash() => _channel.invokeMethod('flash');
+
+  /// Fills the taskbar button as the fit advances. A run takes minutes and the
+  /// user is usually in the game by then, so the taskbar is the only place the
+  /// progress can actually reach them.
+  ///
+  /// [value] is 0..1. Errors are swallowed: a shell that will not give out its
+  /// taskbar object must not take the run down with it.
+  static Future<void> progress(double value) =>
+      _channel.invokeMethod('progress', value).catchError((Object _) {});
+
+  static Future<void> progressDone() =>
+      _channel.invokeMethod('progress', -1.0).catchError((Object _) {});
+
+  static Future<void> progressFailed() =>
+      _channel.invokeMethod('progress', -2.0).catchError((Object _) {});
 }
 
 /// Wraps everything at the right of the title bar and keeps the runner told how
@@ -168,24 +183,40 @@ class _CaptionButtonState extends State<_CaptionButton> {
         ? const Color(0xFFFFFFFF)
         : (_hover || _down ? T.title : T.soft);
 
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() {
-        _hover = false;
-        _down = false;
-      }),
-      child: Listener(
-        onPointerDown: (_) => setState(() => _down = true),
-        onPointerUp: (_) => setState(() => _down = false),
-        child: GestureDetector(
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 90),
-            width: captionButtonWidth,
-            height: captionButtonHeight,
-            color: bg,
-            child: CustomPaint(painter: _GlyphPainter(widget.glyph, fg)),
+    // The window buttons are painted glyphs with no text anywhere, so without a
+    // label a screen reader announces nothing at all for Close. Not run through
+    // the app's own translations: these are the OS's own controls conceptually,
+    // and the assistive layer reads them alongside other window chrome.
+    final label = switch (widget.glyph) {
+      _Glyph.minimize => 'Minimize',
+      _Glyph.maximize => 'Maximize',
+      _Glyph.restore => 'Restore',
+      _Glyph.close => 'Close',
+    };
+
+    return Semantics(
+      label: label,
+      button: true,
+      container: true,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() {
+          _hover = false;
+          _down = false;
+        }),
+        child: Listener(
+          onPointerDown: (_) => setState(() => _down = true),
+          onPointerUp: (_) => setState(() => _down = false),
+          child: GestureDetector(
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 90),
+              width: captionButtonWidth,
+              height: captionButtonHeight,
+              color: bg,
+              child: CustomPaint(painter: _GlyphPainter(widget.glyph, fg)),
+            ),
           ),
         ),
       ),
@@ -224,13 +255,13 @@ class _GlyphPainter extends CustomPainter {
       case _Glyph.maximize:
         canvas.drawRect(Rect.fromLTWH(left, top, s, s), p);
       case _Glyph.restore:
-        // The back sheet is drawn first and clipped by the front one, which is
-        // what makes it read as two stacked windows rather than a grid.
-        canvas.drawRect(Rect.fromLTWH(left + 2, top, s - 2, s - 2), p);
-        canvas.drawRect(
-          Rect.fromLTWH(left, top + 2, s - 2, s - 2),
-          Paint()..color = color.withValues(alpha: 0),
-        );
+        // The back sheet, drawn as just the two edges that peek out behind the
+        // front one (top and right) — its other two edges are occluded, so
+        // drawing the full square left internal lines crossing the front and it
+        // read as a grid. The alpha-0 "eraser" rect that was meant to hide them
+        // painted nothing. The front sheet is then a clean full square on top.
+        canvas.drawLine(Offset(left + 2, top), Offset(left + s, top), p);
+        canvas.drawLine(Offset(left + s, top), Offset(left + s, top + s - 2), p);
         canvas.drawRect(Rect.fromLTWH(left, top + 2, s - 2, s - 2), p);
       case _Glyph.close:
         canvas.drawLine(Offset(left, top), Offset(left + s, top + s), p);

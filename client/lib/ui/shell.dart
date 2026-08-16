@@ -8,6 +8,8 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data' show Float32List;
+import 'dart:ui' show PointMode;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -83,6 +85,26 @@ class _ShellState extends State<Shell> {
 
   void _ask(Confirm c) => setState(() => _confirm = c);
 
+  /// Stop throws the partial stack away — minutes of GPU time, unrecoverable —
+  /// and the button sits one click from the progress readout. Past half a minute
+  /// that is worth a question; below it the user is correcting a run they only
+  /// just started, and a dialog would be in the way.
+  void _askStop() {
+    if (studio.elapsed.inSeconds < 30) {
+      studio.cancel();
+      return;
+    }
+    _ask(
+      Confirm(
+        title: context.s('stopRunTitle'),
+        body: context.s('stopRunBody'),
+        action: context.s('stopRun'),
+        destructive: true,
+        onConfirm: studio.cancel,
+      ),
+    );
+  }
+
   /// Opening a run replaces what is on the canvas, and there is no undo for
   /// that, so it asks first — with the run's own picture in the question,
   /// because the rail is a set of pictures and a name means nothing here.
@@ -107,7 +129,9 @@ class _ShellState extends State<Shell> {
     final g = studio.geometry;
     final engine = studio.engine;
     if (g == null || engine == null) return;
-    final ed = Editor(engine)..load(g, studio.resultW, studio.resultH);
+    // Resolve the client on each use, not now: a reconnect swaps it and the
+    // editor must follow to the live one rather than freeze on the dead handle.
+    final ed = Editor(() => studio.engine)..load(g, studio.resultW, studio.resultH);
     setState(() {
       _editor = ed;
       _pop = _Pop.none;
@@ -120,7 +144,7 @@ class _ShellState extends State<Shell> {
   void _editBlank() {
     final engine = studio.engine;
     if (engine == null) return;
-    final ed = Editor(engine)..loadBlank(1000, 1000);
+    final ed = Editor(() => studio.engine)..loadBlank(1000, 1000);
     setState(() {
       _editor = ed;
       _pop = _Pop.none;
@@ -133,13 +157,53 @@ class _ShellState extends State<Shell> {
     ed?.dispose();
   }
 
+  /// Closing the editor throws away every hand edit — potentially an hour of
+  /// work — and did it in silence, while the app asks before the far cheaper
+  /// act of opening a saved run. Same rule as Stop: ask only when there is
+  /// something to lose.
+  void _askCloseEditor() {
+    final ed = _editor;
+    if (ed == null || !ed.canUndo) {
+      _closeEditor();
+      return;
+    }
+    _ask(
+      Confirm(
+        title: context.s('discardEditsTitle'),
+        body: context.s('discardEditsBody'),
+        action: context.s('delete'),
+        destructive: true,
+        onConfirm: _closeEditor,
+      ),
+    );
+  }
+
   Studio get studio => widget.studio;
 
   void _toggle(_Pop p) => setState(() => _pop = _pop == p ? _Pop.none : p);
 
   Future<void> _open() async {
     final path = await pickImage();
-    if (path != null) studio.setSource(path);
+    if (path != null) _askReplaceSource(path);
+  }
+
+  /// Dropping a file (or picking one) mid-run silently killed the run, while the
+  /// Stop button asks about exactly the same loss. Same threshold, same dialog —
+  /// the expensive act was only guarded from one of its two doors.
+  void _askReplaceSource(String path) {
+    if (!studio.isRunning || studio.elapsed.inSeconds < 30) {
+      studio.setSource(path);
+      return;
+    }
+    _ask(
+      Confirm(
+        title: context.s('stopRunTitle'),
+        body: context.s('stopRunBody'),
+        action: context.s('stopRun'),
+        destructive: true,
+        onConfirm: () => studio.setSource(path),
+      ),
+    );
   }
 
   Future<void> _export() async {
@@ -167,7 +231,9 @@ class _ShellState extends State<Shell> {
             child: EditorView(
               editor: ed,
               studio: studio,
-              onClose: _closeEditor,
+              onClose: _askCloseEditor,
+              // Saving already kept the work, so leaving needs no question.
+              onSaved: _closeEditor,
             ),
           ),
           Positioned(
@@ -183,17 +249,30 @@ class _ShellState extends State<Shell> {
                 pop: _pop,
                 // Nothing app-level is offered here: a language menu that opens
                 // behind the editor would be a control that does nothing.
+                // compact drops all of these buttons, so the callbacks below are
+                // unreachable — routed through the guard anyway so they cannot
+                // become a way to lose an hour of edits if that ever changes.
                 compact: true,
-                onAbout: _closeEditor,
-                onHelp: _closeEditor,
-                onPickLanguage: _closeEditor,
-                onSettings: _closeEditor,
-                onLog: _closeEditor,
-                onCreate: _closeEditor,
+                onAbout: _askCloseEditor,
+                onHelp: _askCloseEditor,
+                onPickLanguage: _askCloseEditor,
+                onSettings: _askCloseEditor,
+                onLog: _askCloseEditor,
+                onCreate: _askCloseEditor,
                 logOpen: false,
               ),
             ),
           ),
+          // The confirm layer belongs here too: without it the editor could ask
+          // a question that had nowhere to appear.
+          if (_confirm != null)
+            Positioned.fill(
+              key: const ValueKey('confirm-editor'),
+              child: ConfirmDialog(
+                confirm: _confirm!,
+                onDismiss: () => setState(() => _confirm = null),
+              ),
+            ),
         ],
       );
     }
@@ -204,6 +283,10 @@ class _ShellState extends State<Shell> {
         const SingleActivator(LogicalKeyboardKey.enter, control: true): () {
           if (!studio.isRunning) studio.generate();
         },
+        // F1 is where every Windows user looks for help, and it is the only way
+        // the shortcut list below is discoverable at all.
+        const SingleActivator(LogicalKeyboardKey.f1): () =>
+            setState(() => _pop = _pop == _Pop.help ? _Pop.none : _Pop.help),
         const SingleActivator(LogicalKeyboardKey.escape): () => setState(() {
           // A question outranks everything else on screen, so Escape answers
           // that first and leaves the rest of the state alone.
@@ -222,7 +305,8 @@ class _ShellState extends State<Shell> {
         child: AnimatedBuilder(
           animation: studio,
           builder: (context, _) => DropCatcher(
-            onFile: studio.setSource,
+            onFile: _askReplaceSource,
+            onReject: studio.noteRejectedDrop,
             child: Stack(
               fit: StackFit.expand,
               children: [
@@ -241,13 +325,17 @@ class _ShellState extends State<Shell> {
                     switchOutCurve: Motion.curveIn,
                     child: studio.sourceImage == null && studio.preview == null
                         ? _Empty(studio: studio, onCreate: _editBlank)
-                        : CanvasView(
-                            studio: studio,
-                            // A crop rectangle over a running fit would be a
-                            // selection you cannot apply, so the mode drops out
-                            // for the duration rather than sitting there dead.
-                            cropping: _cropping && !studio.isRunning,
-                            onCropDone: () => setState(() => _cropping = false),
+                        // RepaintBoundary: the canvas repaints ~20×/s during a fit; without the
+                        // boundary that repaint escaped into the whole shell layer.
+                        : RepaintBoundary(
+                            child: CanvasView(
+                              studio: studio,
+                              // A crop rectangle over a running fit would be a
+                              // selection you cannot apply, so the mode drops out
+                              // for the duration rather than sitting there dead.
+                              cropping: _cropping && !studio.isRunning,
+                              onCropDone: () => setState(() => _cropping = false),
+                            ),
                           ),
                   ),
                 ),
@@ -255,7 +343,11 @@ class _ShellState extends State<Shell> {
                   left: 0,
                   top: 0,
                   right: 0,
-                  child: AnimatedBuilder(
+                  // Isolated: the header's meta line ticks 4x/s for the whole
+                  // run, and as a bare Stack sibling that re-record replayed the
+                  // rail's thumbnails through their held Opacity layer with it.
+                  child: RepaintBoundary(
+                    child: AnimatedBuilder(
                     animation: _window,
                     builder: (context, _) => _Header(
                       studio: studio,
@@ -271,12 +363,16 @@ class _ShellState extends State<Shell> {
                       logOpen: _logOpen,
                     ),
                   ),
+                  ),
                 ),
                 Positioned(
                   left: 0,
                   top: 52,
                   bottom: 0,
-                  child: AnimatedOpacity(
+                  // Isolated too: it holds a fractional opacity for the whole
+                  // run, so any neighbour's repaint re-composited the strip.
+                  child: RepaintBoundary(
+                    child: AnimatedOpacity(
                     duration: Motion.base,
                     opacity: studio.isRunning ? 0.4 : 1,
                     child: _Rail(
@@ -285,17 +381,23 @@ class _ShellState extends State<Shell> {
                       onOpen: _askOpenRun,
                     ),
                   ),
+                  ),
                 ),
                 Positioned(
                   right: 18,
                   bottom: 86,
-                  child: ActivityCard(
-                    studio: studio,
-                    logOpen: _logOpen,
-                    onToggleLog: () => setState(() => _logOpen = !_logOpen),
-                    onEdit: _edit,
-                    onExport: _export,
-                    onInject: () => _toggle(_Pop.inject),
+                  // Isolated like the command bar: the verdict card carries the
+                  // ETA ticker and metrics that tick through a run, and as a bare
+                  // sibling that repaint re-rastered the Stack's other children.
+                  child: RepaintBoundary(
+                    child: ActivityCard(
+                      studio: studio,
+                      logOpen: _logOpen,
+                      onToggleLog: () => setState(() => _logOpen = !_logOpen),
+                      onEdit: _edit,
+                      onExport: _export,
+                      onInject: () => _toggle(_Pop.inject),
+                    ),
                   ),
                 ),
                 if (_logOpen)
@@ -387,8 +489,12 @@ class _ShellState extends State<Shell> {
                     ),
                   ),
                 Positioned(
-                  left: 10,
-                  width: _Rail.width - 20,
+                  // Exactly the thumbs' box, derived from the same constant
+                  // rather than guessed: at left 10 / width 72 it overhung the
+                  // 68-wide thumbs by 2px on each side, so the rail's vertical
+                  // line broke at its own button.
+                  left: (_Rail.width - _Rail.thumbW) / 2,
+                  width: _Rail.thumbW,
                   height: commandBarHeight,
                   bottom: 16,
                   child: _AllRuns(
@@ -402,15 +508,22 @@ class _ShellState extends State<Shell> {
                   left: _Rail.width + 16,
                   right: 18,
                   bottom: 16,
-                  child: _CommandBar(
-                    studio: studio,
-                    pop: _pop,
+                  // Isolated: the progress %, ETA and bar redraw ~20×/s for the
+                  // whole fit. As a bare Positioned sibling that repaint dirtied
+                  // the Stack's shared layer, re-rastering the rail and header
+                  // too; the boundary keeps it to just the bar.
+                  child: RepaintBoundary(
+                    child: _CommandBar(
+                      studio: studio,
+                      pop: _pop,
                     onStyle: () => _toggle(_Pop.style),
                     onDetail: () => _toggle(_Pop.detail),
                     onInject: () => _toggle(_Pop.inject),
                     onExport: _export,
                     onEdit: _edit,
                     onOpen: _open,
+                    onStop: _askStop,
+                    ),
                   ),
                 ),
                 if (_pop == _Pop.sheet)
@@ -564,15 +677,27 @@ class _DeskPainter extends CustomPainter {
         ).createShader(rect),
     );
 
-    final dot = Paint()..color = const Color(0x06FFFFFF);
+    // One drawPoints instead of ~77k individual drawRects (a 1920² window steps
+    // 3px on both axes). shouldRepaint is false, so in steady state this runs
+    // once — but the desk re-rasters on every interactive-resize frame, where the
+    // per-rect display-list was a visible stutter. The PRNG is deterministic, so
+    // the point set is identical to the old grid.
+    final dot = Paint()
+      ..color = const Color(0x06FFFFFF)
+      ..strokeWidth = 1
+      ..strokeCap = StrokeCap.square;
     var seed = 0x2545F491;
+    final pts = <double>[];
     for (var y = 0.0; y < size.height; y += 3) {
       for (var x = 0.0; x < size.width; x += 3) {
         seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF;
         if (seed % 3 != 0) continue;
-        canvas.drawRect(Rect.fromLTWH(x, y, 1, 1), dot);
+        pts
+          ..add(x + 0.5)
+          ..add(y + 0.5);
       }
     }
+    canvas.drawRawPoints(PointMode.points, Float32List.fromList(pts), dot);
   }
 
   @override
@@ -617,11 +742,17 @@ class _Header extends StatelessWidget {
   Widget build(BuildContext context) {
     final name = studio.sourceName ?? context.s('noImage');
     final meta = switch (studio.phase) {
-      Phase.empty => 'drop something in',
-      Phase.loading => 'preparing…',
-      Phase.running => '${studio.shapes} of ${studio.total} shapes',
-      Phase.done => '${studio.shapes} shapes · ${studio.backend}',
-      Phase.failed => studio.failure ?? 'failed',
+      Phase.empty => context.s('metaDropIn'),
+      Phase.loading => context.s('metaPreparing'),
+      Phase.running => context
+          .s('metaShapesOf')
+          .replaceFirst('{n}', '${studio.shapes}')
+          .replaceFirst('{m}', '${studio.total}'),
+      Phase.done => context
+          .s('metaShapesDone')
+          .replaceFirst('{n}', '${studio.shapes}')
+          .replaceFirst('{b}', studio.backend),
+      Phase.failed => studio.failure ?? context.s('failed'),
     };
     return SizedBox(
       height: 52,
@@ -630,17 +761,31 @@ class _Header extends StatelessWidget {
           const SizedBox(width: 14),
           const HalftoneMark(size: 26),
           const SizedBox(width: 10),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                name,
-                style: T.text(13, color: T.title, weight: FontWeight.w600),
-              ),
-              const SizedBox(height: 1),
-              Text(meta, style: T.text(11, color: T.hint)),
-            ],
+          // Flexible with ellipses: the file name is user data of unbounded
+          // length and the meta line is a translated sentence, so at a narrow
+          // window this pair simply overran the header — pushing the window
+          // buttons off the right edge, where they could not be clicked. The
+          // identity gives way; the controls do not.
+          Flexible(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: T.text(13, color: T.title, weight: FontWeight.w600),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  meta,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: T.text(11, color: T.hint),
+                ),
+              ],
+            ),
           ),
           const Spacer(),
           // Everything from here on is a control, and the runner is told how
@@ -667,6 +812,7 @@ class _Header extends StatelessWidget {
                   '⚙',
                   onTap: onSettings,
                   active: pop == _Pop.settings,
+                  tip: context.s('settings'),
                 ),
                 const SizedBox(width: 5),
                 _TopAction(
@@ -681,7 +827,12 @@ class _Header extends StatelessWidget {
                   active: pop == _Pop.help,
                 ),
                 const SizedBox(width: 5),
-                _TopAction('?', onTap: onAbout, active: pop == _Pop.about),
+                _TopAction(
+                  '?',
+                  onTap: onAbout,
+                  active: pop == _Pop.about,
+                  tip: context.s('tagline'),
+                ),
                 const SizedBox(width: 12),
               ],
               WindowButtons(state: window),
@@ -702,6 +853,7 @@ class _LanguageMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Glass(
+    live: false,
     child: SizedBox(
       width: 190,
       child: Column(
@@ -743,7 +895,12 @@ class _LanguageMenu extends StatelessWidget {
 }
 
 class _TopAction extends StatelessWidget {
-  const _TopAction(this.label, {required this.onTap, this.active = false});
+  const _TopAction(
+    this.label, {
+    required this.onTap,
+    this.active = false,
+    this.tip,
+  });
   final String label;
   final VoidCallback onTap;
 
@@ -751,9 +908,24 @@ class _TopAction extends StatelessWidget {
   /// state instead of the panel appearing from nowhere.
   final bool active;
 
+  /// What a glyph-only button is. '⚙' and '?' say nothing on their own — not to
+  /// a new user hunting for settings, and not to a screen reader.
+  final String? tip;
+
   @override
-  Widget build(BuildContext context) => Pressable(
+  Widget build(BuildContext context) {
+    final button = _button(context);
+    if (tip == null) return button;
+    return Tooltip(
+      message: tip!,
+      waitDuration: const Duration(milliseconds: 400),
+      child: button,
+    );
+  }
+
+  Widget _button(BuildContext context) => Pressable(
     onTap: onTap,
+    semanticLabel: tip,
     builder: (context, hover, down) => AnimatedContainer(
       duration: Motion.fast,
       height: 27,
@@ -797,7 +969,7 @@ class _Rail extends StatelessWidget {
   final bool enabled;
 
   static const width = 92.0;
-  static const _thumbW = 68.0;
+  static const thumbW = 68.0;
   static const _thumbH = 90.0;
   static const _gap = 8.0;
 
@@ -827,10 +999,16 @@ class _Rail extends StatelessWidget {
                 Padding(
                   padding: const EdgeInsets.only(bottom: _gap),
                   child: _RunThumb(
+                    // Same reason the gallery cards are keyed: without it a run
+                    // landing at the top makes every thumb below reuse its
+                    // neighbour's element, so each FutureBuilder drops back to
+                    // waiting and the whole rail blanks and ripples — at the
+                    // exact moment a finished fit should look composed.
+                    key: ValueKey(e['id']),
                     studio: studio,
                     entry: e,
                     selected: studio.selectedRunId == e['id'],
-                    size: const Size(_thumbW, _thumbH),
+                    size: const Size(thumbW, _thumbH),
                     onTap: enabled ? () => onOpen(e) : null,
                   ),
                 ),
@@ -909,6 +1087,7 @@ class _AllRuns extends StatelessWidget {
 
 class _RunThumb extends StatelessWidget {
   const _RunThumb({
+    super.key,
     required this.studio,
     required this.entry,
     required this.selected,
@@ -924,7 +1103,28 @@ class _RunThumb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Pressable(
+    // Two fits of the same picture at different budgets make two nearly
+    // identical thumbnails sitting next to each other, and the rail says
+    // nothing about either. Everything needed is already in the entry; under
+    // the pointer only, so the strip stays a strip of pictures.
+    final name = entry['name'] as String? ?? '';
+    final n = (entry['shapes'] as num?)?.toInt() ?? 0;
+    final preset = entry['preset'] as String? ?? '';
+    final tip = [
+      if (name.isNotEmpty) name,
+      if (preset.isNotEmpty) preset,
+      '$n',
+    ].join(' · ');
+
+    return Tooltip(
+      message: tip,
+      waitDuration: const Duration(milliseconds: 400),
+      child: Pressable(
+      // The rail already fades to 0.4 as a whole while a fit runs; a second
+      // 0.4 here made it 0.16 under its own dark overlay — nearly black for the
+      // entire run. And a strip of pictures is a pointer target, not a Tab stop.
+      dimWhenDisabled: false,
+      focusable: false,
       onTap: onTap,
       builder: (context, hover, down) => AnimatedContainer(
         duration: Motion.fast,
@@ -950,20 +1150,31 @@ class _RunThumb extends StatelessWidget {
           children: [
             FutureBuilder(
               future: studio.thumb(entry['id'] as String),
-              builder: (context, snap) => snap.hasData && snap.data!.isNotEmpty
-                  ? Image.memory(snap.data!, fit: BoxFit.cover)
-                  : const SizedBox.shrink(),
+              // Fades in rather than appearing in the frame its future
+              // completes: a column of thumbs otherwise pops one by one.
+              builder: (context, snap) => AnimatedSwitcher(
+                duration: Motion.base,
+                child: snap.hasData && snap.data!.isNotEmpty
+                    ? Image.memory(
+                        snap.data!,
+                        key: const ValueKey(true),
+                        fit: BoxFit.cover,
+                      )
+                    : const SizedBox.shrink(),
+              ),
             ),
             // Dimming the ones you are not pointing at is what turns a column of
             // pictures into a list you can pick from.
             AnimatedContainer(
               duration: Motion.fast,
+              curve: Motion.curve,
               color: hover || selected
                   ? const Color(0x00000000)
                   : const Color(0x38000000),
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -981,6 +1192,7 @@ class _CommandBar extends StatelessWidget {
     required this.onExport,
     required this.onEdit,
     required this.onOpen,
+    required this.onStop,
   });
 
   final Studio studio;
@@ -992,6 +1204,9 @@ class _CommandBar extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onOpen;
 
+  /// Asks first when the run has been going long enough for the loss to matter.
+  final VoidCallback onStop;
+
   @override
   Widget build(BuildContext context) {
     final budget = studio.budget;
@@ -1000,8 +1215,14 @@ class _CommandBar extends StatelessWidget {
     // in progress. Only the progress readout and Stop stay live.
     final busy = studio.isRunning;
 
+    // live:false — the bar floats over the STATIC desk (the canvas plate stops
+    // 84px above it), so its backdrop is a smooth gradient a blur cannot change.
+    // A live BackdropFilter can never be raster-cached, so leaving it on re-ran a
+    // full-width σ22 blur on every progress tick and every compare drag — ~20×/s
+    // for a whole multi-minute fit, the "heavy" feel on Skia (Impeller off).
     return Glass(
       radius: 15,
+      live: false,
       child: SizedBox(
         height: commandBarHeight,
         child: Row(
@@ -1035,8 +1256,36 @@ class _CommandBar extends StatelessWidget {
               const SizedBox(width: 8),
               Flexible(child: Btn(context.s('export'), onTap: onExport)),
             ],
-            const Spacer(),
-            if (studio.isRunning) ...[
+            // The two right-hand clusters cross-fade instead of teleporting.
+            // Clicking Generate commits minutes of GPU time, and the app's whole
+            // answer used to arrive in a single frame — the confirmation IS the
+            // transition, so no extra effect is needed anywhere else.
+            //
+            // Expanded + Align, NOT Spacer + Flexible: a Spacer is itself a flex
+            // child, so pairing it with a Flexible split the free space between
+            // them and left the cluster floating in the middle of the bar — and
+            // on a narrow window with a wide locale the two competing flex
+            // children manufactured an overflow that put Stop outside its box,
+            // where it could not be tapped at all. One flex child takes the
+            // room, the Align puts the cluster at its right edge.
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: AnimatedSwitcher(
+                duration: Motion.base,
+                switchInCurve: Motion.curve,
+                switchOutCurve: Motion.curveIn,
+                // Right-aligned: during the swap both clusters exist and their
+                // widths differ, and the bar's contents must not slide sideways.
+                layoutBuilder: (current, previous) => Stack(
+                  alignment: Alignment.centerRight,
+                  children: [...previous, ?current],
+                ),
+                child: studio.isRunning
+                    ? Row(
+                        key: const ValueKey(true),
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -1051,7 +1300,10 @@ class _CommandBar extends StatelessWidget {
                   ),
                   Text(
                     _remaining(context, studio),
-                    style: T.text(10.5, color: T.hint),
+                    // Mono: it counts down every second under a mono '%', and in
+                    // a proportional face the two lines shifted against each
+                    // other for the whole run.
+                    style: T.monoText(10.5, color: T.hint),
                   ),
                 ],
               ),
@@ -1060,11 +1312,22 @@ class _CommandBar extends StatelessWidget {
                 width: 140,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(3),
-                  child: LinearProgressIndicator(
-                    value: studio.progress,
-                    minHeight: 5,
-                    backgroundColor: T.fill,
-                    valueColor: const AlwaysStoppedAnimation(T.teal),
+                  // Interpolated because the underlying quantity really is
+                  // continuous and only the SAMPLING is 4 Hz — the bar used to
+                  // tick like a clock hand for the whole multi-minute fit. The
+                  // '%' above it is deliberately NOT tweened: a number easing
+                  // through values the engine never reported is a fabricated
+                  // measurement.
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(end: studio.progress),
+                    duration: const Duration(milliseconds: 280),
+                    curve: Curves.easeOut,
+                    builder: (context, v, _) => LinearProgressIndicator(
+                      value: v,
+                      minHeight: 5,
+                      backgroundColor: T.fill,
+                      valueColor: const AlwaysStoppedAnimation(T.teal),
+                    ),
                   ),
                 ),
               ),
@@ -1074,14 +1337,12 @@ class _CommandBar extends StatelessWidget {
               Btn(
                 context.s('stopRun'),
                 kind: BtnKind.danger,
-                onTap: studio.cancel,
+                onTap: onStop,
               ),
-            ] else
-              // Flexible so the cluster gives way instead of overrunning the
-              // bar: in a narrow window with a wide language these labels are
-              // wider than the space left after the chips.
-              Flexible(
-                child: Row(
+                        ],
+                      )
+                    : Row(
+                        key: const ValueKey(false),
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (studio.geometry != null) ...[
@@ -1120,6 +1381,8 @@ class _CommandBar extends StatelessWidget {
                   ],
                 ),
               ),
+              ),
+            ),
             const SizedBox(width: 13),
           ],
         ),
@@ -1349,6 +1612,8 @@ class _ModeSwitch extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Glass(
     radius: 11,
+    // Over the static desk, and on screen through every compare drag.
+    live: false,
     child: Padding(
       padding: const EdgeInsets.all(3),
       child: Row(

@@ -1,7 +1,7 @@
 /// FH6 Paint Studio — the Flutter client.
 ///
-/// The engine is a separate process this app talks to over a loopback socket,
-/// so nothing here touches the GPU, decodes an image, or writes to the game's
+/// The engine is a separate process this app talks to over its stdio pipes, so
+/// nothing here touches the GPU, decodes an image, or writes to the game's
 /// memory. That is what keeps the client free of FFI: every capability lives
 /// behind `internal/ipc` on the Go side.
 library;
@@ -79,9 +79,18 @@ class _StudioAppState extends State<StudioApp> {
     // Connecting is the app's first act, and its failure is the one the user
     // most needs explained: without the engine there is nothing this window can
     // do, so the reason has to reach the screen rather than a log file.
-    studio.connect(engineExecutable()).catchError((Object e) {
-      AppLog.write('error', 'engine did not start: $e');
-      if (mounted) setState(() => connectError = '$e');
+    _connect();
+  }
+
+  void _connect() {
+    final exe = engineExecutable();
+    setState(() => connectError = null);
+    studio.connect(exe).catchError((Object e) {
+      AppLog.write('error', 'engine did not start ($exe): $e');
+      // The path is part of the diagnosis: engineExecutable() has three
+      // fallbacks, and "which one did it pick" is most of the answer when the
+      // engine is missing or has been quarantined by an antivirus.
+      if (mounted) setState(() => connectError = '$e\n\n$exe');
     });
   }
 
@@ -110,7 +119,7 @@ class _StudioAppState extends State<StudioApp> {
           backgroundColor: T.desk,
           body: connectError == null
               ? Shell(studio: studio, lang: lang, onLanguage: _setLanguage)
-              : _NoEngine(message: connectError!),
+              : _NoEngine(message: connectError!, onRetry: _connect),
         ),
       ),
     );
@@ -118,8 +127,13 @@ class _StudioAppState extends State<StudioApp> {
 }
 
 class _NoEngine extends StatelessWidget {
-  const _NoEngine({required this.message});
+  const _NoEngine({required this.message, required this.onRetry});
   final String message;
+
+  /// Without this the screen is a dead end: the usual cause is an antivirus
+  /// holding the engine on first launch, which the user fixes in another window
+  /// and then has no way to act on but restarting the app.
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -139,6 +153,19 @@ class _NoEngine extends StatelessWidget {
             message,
             textAlign: TextAlign.center,
             style: T.monoText(11.5, color: T.hint),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Btn(
+                context.s('retry'),
+                kind: BtnKind.primary,
+                onTap: onRetry,
+              ),
+              const SizedBox(width: 8),
+              Btn(context.s('openLogFolder'), onTap: AppLog.reveal),
+            ],
           ),
         ],
       ),

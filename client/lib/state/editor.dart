@@ -474,11 +474,22 @@ class CanvasTick extends ChangeNotifier {
 }
 
 class Editor extends ChangeNotifier {
-  Editor(this._engine);
+  Editor(this._engineFn);
 
   final canvasTick = CanvasTick();
 
-  final EngineClient _engine;
+  /// Resolved fresh on every use, never captured: a reconnect (a driver reset
+  /// while the editor is open) swaps Studio's client, and a captured reference
+  /// would be the dead, closed instance for the rest of the editor's life —
+  /// every render then throwing 'connection is closed' with a frozen canvas.
+  final EngineClient? Function() _engineFn;
+  EngineClient get _engine {
+    final e = _engineFn();
+    if (e == null) throw EngineException('the engine is restarting');
+    return e;
+  }
+
+  bool _disposed = false;
 
   final shapes = <EditShape>[];
   final layers = <EditLayer>[];
@@ -510,10 +521,14 @@ class Editor extends ChangeNotifier {
   Future<void> loadCatalog() async {
     if (catalog.isNotEmpty) return;
     try {
-      catalog.addAll(await _engine.shapeCatalog());
+      final kinds = await _engine.shapeCatalog();
+      if (_disposed) return;
+      catalog.addAll(kinds);
       notifyListeners();
     } catch (e) {
+      if (_disposed) return;
       error = '$e';
+      notifyListeners(); // was silent — the failure hid until an unrelated repaint
     }
   }
 
@@ -522,7 +537,12 @@ class Editor extends ChangeNotifier {
   final _previews = <int, Future<ui.Image>>{};
 
   Future<ui.Image> preview(int kind, {int size = 64}) =>
-      _previews[kind] ??= _renderPreview(kind, size);
+      // A failed render must not be remembered, or one engine hiccup leaves that
+      // palette tile broken for the whole session; evict so the next build retries.
+      _previews[kind] ??= _renderPreview(kind, size).catchError((Object e) {
+        _previews.remove(kind);
+        throw e;
+      });
 
   Future<ui.Image> _renderPreview(int kind, int size) async {
     final pad = size * 0.14;
@@ -656,12 +676,18 @@ class Editor extends ChangeNotifier {
   /// Lays a reference picture under the work. On a still-blank canvas the
   /// dimensions follow the reference so tracing lines up one-to-one; once there
   /// is work to keep, the canvas holds its size and the reference just overlays.
+  int _refSeq = 0;
   Future<void> setReference(String path) async {
+    final seq = ++_refSeq;
     try {
       final bytes = await File(path).readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       final img = frame.image;
+      if (_disposed || seq != _refSeq) {
+        img.dispose(); // superseded by a newer reference, or the editor closed
+        return;
+      }
       reference?.dispose();
       reference = img;
       referenceName = path.split(RegExp(r'[\\/]')).last;
@@ -923,7 +949,7 @@ class Editor extends ChangeNotifier {
         below = await _decodeFrame(await fb);
         sprite = await _decodeFrame(await fs);
       }
-      if (_interFor != i) {
+      if (_interFor != i || _disposed) {
         below.dispose();
         sprite.dispose();
         above?.dispose();
@@ -1306,11 +1332,16 @@ class Editor extends ChangeNotifier {
       // still paints the old image — disposing it first was a use-after-free
       // for however long the decode took.
       final fresh = await completer.future;
+      if (_disposed) {
+        fresh.dispose(); // editor closed mid-render: don't leak it or notify
+        return;
+      }
       final old = render;
       render = fresh;
       old?.dispose();
       error = null;
     } catch (e) {
+      if (_disposed) return;
       error = '$e';
     }
     if (_settleWaits > 0 && --_settleWaits == 0) settling = null;
@@ -1337,8 +1368,21 @@ class Editor extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     render?.dispose();
     reference?.dispose();
+    // The gesture composite, if the editor is torn down mid-grab — endInteraction
+    // delays its disposal 300 ms for in-flight repaints, but on teardown there is
+    // nothing left to repaint, so free it now.
+    interBelow?.dispose();
+    interSprite?.dispose();
+    interAbove?.dispose();
+    // Cached palette tiles: futures may still be decoding, so dispose on arrival.
+    for (final f in _previews.values) {
+      f.then((img) => img.dispose()).catchError((Object _) {});
+    }
+    _previews.clear();
+    canvasTick.dispose();
     super.dispose();
   }
 }

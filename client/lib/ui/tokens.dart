@@ -39,7 +39,13 @@ class T {
   static const dim = Color(0xFFC3C8CF);
   static const soft = Color(0xFF8C929A);
   static const hint = Color(0xFF7C828A);
-  static const faint = Color(0xFF6E747C);
+  // Was #6E747C, which measured 3.87:1 against the panel over the desk — under
+  // the readable minimum. Raising it to clear 4.5:1 put it 3/255 from `hint`,
+  // i.e. the same paint under two names: a ramp stop that exists in the variable
+  // list and not on screen. So `faint` IS `hint` now, honestly. The ramp's real
+  // steps are title/body → dim → soft → hint; anything dimmer than hint is not
+  // a step, it is unreadable.
+  static const faint = hint;
 
   static const mono = 'Consolas';
 
@@ -80,6 +86,12 @@ class T {
   // control the user has never seen still reacts the way the last one did.
   static const hoverTint = Color(0x14FFFFFF);
   static const pressTint = Color(0x24FFFFFF);
+
+  /// One number for "this cannot be used right now". Btn had 0.38, the rail
+  /// 0.4, the expert rows 0.4, and the command bar's chips had nothing at all —
+  /// so during a fit the three chips that drive the run looked exactly as
+  /// clickable as they do at rest.
+  static const disabledOpacity = 0.4;
 }
 
 /// How long anything is allowed to take.
@@ -95,6 +107,16 @@ class Motion {
 
   /// Popovers, panels, things appearing and disappearing.
   static const base = Duration(milliseconds: 150);
+
+  /// The few changes that are genuinely large: a whole canvas being repointed,
+  /// the verdict card growing once a multi-minute fit is finally done. `base` is
+  /// a hover-tint budget applied to a panel; using it for a full-surface change
+  /// makes the change read as a jump that happened to take 150ms.
+  static const slow = Duration(milliseconds: 220);
+
+  /// Leaving is quicker than arriving: the entrance has to explain where the
+  /// thing came from, the exit only has to not be in the way.
+  static const exit = Duration(milliseconds: 110);
 
   static const curve = Curves.easeOutCubic;
   static const curveIn = Curves.easeInCubic;
@@ -113,6 +135,9 @@ class Pressable extends StatefulWidget {
     this.onSecondaryTap,
     this.cursor = SystemMouseCursors.click,
     this.behavior = HitTestBehavior.opaque,
+    this.semanticLabel,
+    this.focusable = true,
+    this.dimWhenDisabled = true,
   });
 
   /// Receives hover and pressed so the child can tint itself. Both are false
@@ -124,6 +149,18 @@ class Pressable extends StatefulWidget {
   final MouseCursor cursor;
   final HitTestBehavior behavior;
 
+  /// What a screen reader should call this. Most controls carry their own text
+  /// and need none; the glyph-only ones (⚙, ?, ✕) announce nothing without it.
+  final String? semanticLabel;
+
+  /// False for controls that would only add noise to the Tab order — a tile in
+  /// a long grid whose real affordance is the pointer.
+  final bool focusable;
+
+  /// Fades the control when it has no action. Off for the few that already draw
+  /// their own disabled state (Btn) and would otherwise dim twice.
+  final bool dimWhenDisabled;
+
   @override
   State<Pressable> createState() => _PressableState();
 }
@@ -131,11 +168,12 @@ class Pressable extends StatefulWidget {
 class _PressableState extends State<Pressable> {
   bool _hover = false;
   bool _down = false;
+  bool _focused = false;
 
   @override
   Widget build(BuildContext context) {
     final enabled = widget.onTap != null || widget.onSecondaryTap != null;
-    return MouseRegion(
+    final core = MouseRegion(
       cursor: enabled ? widget.cursor : SystemMouseCursors.basic,
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() {
@@ -150,9 +188,50 @@ class _PressableState extends State<Pressable> {
           behavior: widget.behavior,
           onTap: widget.onTap,
           onSecondaryTap: widget.onSecondaryTap,
-          child: widget.builder(context, enabled && _hover, enabled && _down),
+          // Keyboard focus reuses the HOVER visual rather than inventing a
+          // second lit state: the control already has a "the pointer is here"
+          // look, and focus means the same thing for the keyboard.
+          child: widget.builder(
+            context,
+            enabled && (_hover || _focused),
+            enabled && _down,
+          ),
         ),
       ),
+    );
+
+    // Every control in the app goes through here, so this is the one place that
+    // can give the whole UI a Tab order and Enter/Space activation. Without it
+    // nothing but a TextField or a Slider could take focus at all — the app was
+    // pointer-only end to end.
+    final Widget body = !enabled || !widget.focusable
+        ? core
+        : FocusableActionDetector(
+            mouseCursor: MouseCursor.defer,
+            onShowFocusHighlight: (v) => setState(() => _focused = v),
+            actions: <Type, Action<Intent>>{
+              ActivateIntent: CallbackAction<ActivateIntent>(
+                onInvoke: (_) {
+                  widget.onTap?.call();
+                  return null;
+                },
+              ),
+            },
+            child: core,
+          );
+
+    // One place decides what "unavailable" looks like, so a control class that
+    // never got its own disabled state still gets one.
+    final shown = !enabled && widget.dimWhenDisabled
+        ? Opacity(opacity: T.disabledOpacity, child: body)
+        : body;
+
+    if (widget.semanticLabel == null) return shown;
+    return Semantics(
+      label: widget.semanticLabel,
+      button: true,
+      enabled: enabled,
+      child: shown,
     );
   }
 }
@@ -238,6 +317,31 @@ class Glass extends StatelessWidget {
         color: T.panel,
         borderRadius: BorderRadius.circular(radius),
         border: Border.all(color: T.border),
+      ),
+      child: child,
+    );
+    // The clip is NOT part of the blur: a panel still has to cut its children to
+    // its own corners whether or not the backdrop is being filtered. It used to
+    // sit on the live path only, so every `live: false` panel — the inspector,
+    // the editor bar, the tools, the command bar — let a selected row's teal fill
+    // square off the panel's 13px corner. Only the FILTER is conditional.
+    final clipped = ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: live
+          ? BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+              child: body,
+            )
+          : body,
+    );
+    // The shadow is drawn OUTSIDE the clip. It used to live in the body's own
+    // decoration, which — once the clip became unconditional — meant every panel
+    // clipped away its own shadow: a shadow is by definition painted outside the
+    // rounded rect it belongs to. The panels went flat, losing the depth cue the
+    // whole glass recipe exists for.
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
         boxShadow: const [
           BoxShadow(
             color: Color(0x80000000),
@@ -246,15 +350,7 @@ class Glass extends StatelessWidget {
           ),
         ],
       ),
-      child: child,
-    );
-    if (!live) return body;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-        child: body,
-      ),
+      child: clipped,
     );
   }
 }
@@ -336,6 +432,151 @@ class _HalftonePainter extends CustomPainter {
       old.color != color || old.tile != tile;
 }
 
+/// The icons that were text glyphs.
+///
+/// The window buttons already make this argument and act on it: a font
+/// character depends on which Segoe is installed and lands a pixel or two off
+/// centre. Emoji are worse still — `👁 🔒 🚫 🔓` resolve through Segoe UI Emoji,
+/// paint in full colour inside a monochrome dark panel, and IGNORE the `color`
+/// they are given, so the tint that every other icon uses to show on/off did
+/// nothing to them. Drawn strokes obey the colour, keep one weight, and are the
+/// same on every machine and in every locale.
+enum Ico { eye, eyeOff, lock, unlock, group, moveTo, close, plus }
+
+class Icon2 extends StatelessWidget {
+  const Icon2(this.icon, {super.key, required this.color, this.size = 13});
+
+  final Ico icon;
+  final Color color;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: size,
+    height: size,
+    child: CustomPaint(painter: _IcoPainter(icon, color)),
+  );
+}
+
+class _IcoPainter extends CustomPainter {
+  _IcoPainter(this.icon, this.color);
+  final Ico icon;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final w = size.width;
+    final h = size.height;
+    final cx = w / 2;
+    final cy = h / 2;
+
+    switch (icon) {
+      // An almond on its side: two arcs meeting at the corners, pupil in the
+      // middle. Drawn rather than a font eye so it keeps the 1.2px weight.
+      case Ico.eye || Ico.eyeOff:
+        // Lens opened to 0.04/0.96 and the pupil cut to 0.09r: at 13px the old
+        // 0.16/0.84 lens spanned ~4.4px around a ~3.9px pupil, so the two 1.2px
+        // strokes merged into a blob and the icon read as a filled dot.
+        final path = Path()
+          ..moveTo(w * 0.06, cy)
+          ..quadraticBezierTo(cx, h * 0.04, w * 0.94, cy)
+          ..quadraticBezierTo(cx, h * 0.96, w * 0.06, cy);
+        canvas.drawPath(path, p);
+        canvas.drawCircle(Offset(cx, cy), w * 0.09, p);
+        if (icon == Ico.eyeOff) {
+          canvas.drawLine(
+            Offset(w * 0.14, h * 0.86),
+            Offset(w * 0.86, h * 0.14),
+            p,
+          );
+        }
+      // Body plus shackle; the open one lifts its shackle off the right side.
+      case Ico.lock || Ico.unlock:
+        final body = Rect.fromLTWH(w * 0.18, h * 0.46, w * 0.64, h * 0.40);
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(body, Radius.circular(w * 0.1)),
+          p,
+        );
+        final shackle = Path();
+        if (icon == Ico.lock) {
+          shackle
+            ..moveTo(w * 0.32, h * 0.46)
+            ..lineTo(w * 0.32, h * 0.30)
+            ..arcToPoint(
+              Offset(w * 0.68, h * 0.30),
+              radius: Radius.circular(w * 0.18),
+            )
+            ..lineTo(w * 0.68, h * 0.46);
+        } else {
+          shackle
+            ..moveTo(w * 0.32, h * 0.46)
+            ..lineTo(w * 0.32, h * 0.30)
+            ..arcToPoint(
+              Offset(w * 0.68, h * 0.30),
+              radius: Radius.circular(w * 0.18),
+            );
+        }
+        canvas.drawPath(shackle, p);
+      // Two overlapping frames: "these move as one body".
+      case Ico.group:
+        canvas.drawRect(
+          Rect.fromLTWH(w * 0.10, h * 0.28, w * 0.52, h * 0.52),
+          p,
+        );
+        canvas.drawRect(
+          Rect.fromLTWH(w * 0.38, h * 0.14, w * 0.52, h * 0.52),
+          p,
+        );
+      // An arrow turning down into the row: "put the selection here".
+      case Ico.moveTo:
+        canvas.drawLine(
+          Offset(w * 0.20, h * 0.20),
+          Offset(w * 0.72, h * 0.20),
+          p,
+        );
+        canvas.drawLine(
+          Offset(w * 0.72, h * 0.20),
+          Offset(w * 0.72, h * 0.72),
+          p,
+        );
+        canvas.drawLine(
+          Offset(w * 0.72, h * 0.72),
+          Offset(w * 0.52, h * 0.52),
+          p,
+        );
+        canvas.drawLine(
+          Offset(w * 0.72, h * 0.72),
+          Offset(w * 0.92, h * 0.52),
+          p,
+        );
+      case Ico.close:
+        canvas.drawLine(
+          Offset(w * 0.22, h * 0.22),
+          Offset(w * 0.78, h * 0.78),
+          p,
+        );
+        canvas.drawLine(
+          Offset(w * 0.78, h * 0.22),
+          Offset(w * 0.22, h * 0.78),
+          p,
+        );
+      case Ico.plus:
+        canvas.drawLine(Offset(w * 0.5, h * 0.18), Offset(w * 0.5, h * 0.82), p);
+        canvas.drawLine(Offset(w * 0.18, h * 0.5), Offset(w * 0.82, h * 0.5), p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_IcoPainter old) =>
+      old.icon != icon || old.color != color;
+}
+
 /// A button in one of the design's three weights.
 enum BtnKind { primary, ghost, danger }
 
@@ -368,6 +609,9 @@ class _BtnState extends State<Btn> {
     };
     return Pressable(
       onTap: widget.onTap,
+      // Btn fades itself below; letting Pressable do it too would square the
+      // opacity and make a disabled button nearly invisible.
+      dimWhenDisabled: false,
       builder: (context, hover, down) {
         // The primary button is already bright, so it brightens FURTHER on
         // hover and darkens on press; a white wash over teal would just look
@@ -380,7 +624,7 @@ class _BtnState extends State<Btn> {
         }
         return AnimatedOpacity(
           duration: Motion.fast,
-          opacity: enabled ? 1 : 0.38,
+          opacity: enabled ? 1 : T.disabledOpacity,
           child: AnimatedContainer(
             duration: Motion.fast,
             height: 29,
@@ -391,11 +635,18 @@ class _BtnState extends State<Btn> {
               border: widget.kind == BtnKind.ghost
                   ? Border.all(color: hover ? T.border : T.hairline)
                   : null,
+              // A neutral shadow, not a teal glow. The old one was coloured
+              // light emitted BY the control, which nothing in the scene could
+              // cast — the one effect in the app that decorated rather than
+              // described. The affordance was never carried by it anyway: the
+              // fill is already the brightest thing on screen, and hover
+              // brightens it while press darkens it. Revert = put the
+              // 0x4254CBB8 shadow back here.
               boxShadow: widget.kind == BtnKind.primary
                   ? [
                       BoxShadow(
-                        color: const Color(0x4254CBB8),
-                        blurRadius: hover ? 16 : 10,
+                        color: const Color(0x59000000),
+                        blurRadius: hover ? 10 : 6,
                         offset: const Offset(0, 2),
                       ),
                     ]

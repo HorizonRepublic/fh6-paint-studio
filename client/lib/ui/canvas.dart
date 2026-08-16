@@ -158,13 +158,19 @@ class CanvasView extends StatelessWidget {
           // box — so the reveal and the line it is supposed to follow could sit
           // a few percent apart, and the new picture bled past the handle.
           // One paint, one boundary, no way for them to disagree.
-          CustomPaint(
-            painter: _ComparePainter(
-              result: result,
-              source: source,
-              srcView: srcView,
-              fraction: result == null ? 1 : 1 - studio.compare,
-              dpr: MediaQuery.devicePixelRatioOf(context),
+          // Isolated: only THIS painter changes on a new preview frame or a
+          // compare drag. Without the boundary each of those (~20×/s during a
+          // fit) re-rasters the shared layer — the 46px plate shadow and the
+          // full-canvas checker below — both of which are entirely static.
+          RepaintBoundary(
+            child: CustomPaint(
+              painter: _ComparePainter(
+                result: result,
+                source: source,
+                srcView: srcView,
+                fraction: result == null ? 1 : 1 - studio.compare,
+                dpr: MediaQuery.devicePixelRatioOf(context),
+              ),
             ),
           ),
           if (result != null && source != null)
@@ -200,20 +206,46 @@ class _CheckerPainter extends CustomPainter {
   static const _dark = Color(0xFF111213);
   static const _light = Color(0xFF17191A);
 
+  static ui.Image? _tile;
+
+  /// One 2×2-cell tile, tiled by a repeating shader — the same treatment the
+  /// editor's checker already had, while this one still emitted a drawRect per
+  /// cell (~10k on a large canvas). It matters most during a crossfade, when the
+  /// whole subtree is being rasterised into a layer.
+  static ui.Image _buildTile() {
+    final rec = ui.PictureRecorder();
+    final c = Canvas(rec);
+    c.drawRect(
+      const Rect.fromLTWH(0, 0, _cell * 2, _cell * 2),
+      Paint()..color = _dark,
+    );
+    final light = Paint()..color = _light;
+    c.drawRect(const Rect.fromLTWH(0, 0, _cell, _cell), light);
+    c.drawRect(const Rect.fromLTWH(_cell, _cell, _cell, _cell), light);
+    return rec.endRecording().toImageSync(
+      (_cell * 2).toInt(),
+      (_cell * 2).toInt(),
+    );
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(Offset.zero & size, Paint()..color = _dark);
-    final paint = Paint()..color = _light;
-    final cols = (size.width / _cell).ceil();
-    final rows = (size.height / _cell).ceil();
-    for (var r = 0; r < rows; r++) {
-      for (var c = r.isEven ? 0 : 1; c < cols; c += 2) {
-        canvas.drawRect(
-          Rect.fromLTWH(c * _cell, r * _cell, _cell, _cell),
-          paint,
-        );
-      }
-    }
+    final tile = _tile ??= _buildTile();
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()
+        // filterQuality none: the tile is an exact pixel grid, and at 125%/150%
+        // scaling the default bilinear resample turned a crisp checker into a
+        // soft moire. Nearest keeps the cells as hard as the old per-cell rects.
+        ..filterQuality = FilterQuality.none
+        ..shader = ui.ImageShader(
+          tile,
+          TileMode.repeated,
+          TileMode.repeated,
+          Matrix4.identity().storage,
+          filterQuality: FilterQuality.none,
+        ),
+    );
   }
 
   @override

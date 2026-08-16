@@ -5,9 +5,10 @@
 /// decoding, the on-disk library and the memory injector all stay on the Go
 /// side, and nothing here needs FFI.
 ///
-/// The service is spawned as a child and announces itself on its first line of
-/// stdout as `{"addr":"127.0.0.1:PORT","token":"..."}`. There is no fixed port
-/// to configure and no race on one, so several copies can run side by side.
+/// The service is spawned as a child and speaks a framed JSON+binary protocol
+/// over its own stdin/stdout pipes — no socket, no port, no token. The OS gives
+/// parent and child a private channel nothing else can reach, so several copies
+/// can run side by side with nothing to configure.
 library;
 
 import 'dart:async';
@@ -90,6 +91,11 @@ class EngineClient {
 
     final client = EngineClient._(process);
     client._listen();
+    // A write to a broken pipe surfaces its error here, not on the read side.
+    // Nothing awaits stdin, so without this the error is unhandled (console
+    // noise) in the window between the engine dying and stdout EOF/exitCode
+    // flipping _closed.
+    unawaited(process.stdin.done.catchError((Object _) {}));
     unawaited(
       process.exitCode.then(
         (code) => client._failAll(
@@ -103,8 +109,17 @@ class EngineClient {
   void _listen() {
     _process.stdout.listen(
       (chunk) {
-        for (final msg in _reader.add(chunk)) {
-          _dispatch(msg);
+        // Guarded: a framing desync makes _reader.add throw on EVERY later
+        // chunk (the bad bytes are never consumed), which used to leave the
+        // client permanently deaf with the UI stuck mid-run and no error.
+        // The protocol's own contract says the only safe response is to close.
+        try {
+          for (final msg in _reader.add(chunk)) {
+            _dispatch(msg);
+          }
+        } catch (e) {
+          _failAll('the engine service disconnected (stream error: $e)');
+          unawaited(close());
         }
       },
       onError: (Object e) => _failAll('connection error: $e'),
@@ -158,7 +173,13 @@ class EngineClient {
   static Map<String, dynamic>? _asMap(Object? v) =>
       v is Map<String, dynamic> ? v : null;
 
-  void _failAll(String reason) {
+  /// Called once when the engine dies for a reason that is NOT a deliberate
+  /// client close — a crash, a driver reset, stdout EOF. This is the ONLY signal
+  /// an idle death produces (no run stream is listening to carry a 'failed'
+  /// through), so it is what lets the owner restart after a post-run TDR.
+  void Function(String reason)? onDeath;
+
+  void _failAll(String reason, {bool death = true}) {
     if (_closed) return;
     _closed = true;
     final handlers = List.of(_handlers.values);
@@ -166,6 +187,7 @@ class EngineClient {
     for (final h in handlers) {
       h(Update('failed', error: reason));
     }
+    if (death) onDeath?.call(reason);
   }
 
   int _claim(void Function(Update) handler) {
@@ -355,6 +377,23 @@ class EngineClient {
 
   Future<void> presetDelete(String id) => call('presets.delete', {'id': id});
 
+  /// The concrete values behind "default" for the expert panel: what this mode
+  /// resolves to, classified against the image at [path] when one is open (a
+  /// flat image's polish depth and kind mix depend on its palette, and a cutout
+  /// drops the alpha floor).
+  Future<Map<String, dynamic>> knobDefaults(
+    String mode,
+    String? path, {
+    String quality = '',
+  }) async {
+    final res = await call('presets.knobDefaults', {
+      'mode': mode,
+      'path': path ?? '',
+      'quality': quality,
+    });
+    return _asMap(res?['choices']) ?? {};
+  }
+
   /// Every kind the manual editor may place: the primitives plus the whole
   /// in-game bank, as the engine knows it.
   Future<List<Map<String, dynamic>>> shapeCatalog() async {
@@ -369,13 +408,34 @@ class EngineClient {
         .cast<Map<String, dynamic>>();
   }
 
+  /// The wire-contract revision this client was built against (mirrors Go's ipc.ProtocolVersion).
+  static const protocolVersion = 1;
+
+  /// Asks the service which protocol revision it speaks. 0 = an engined predating the handshake.
+  Future<int> hello() async {
+    try {
+      final r = await call('hello');
+      return (r?['protocol'] as num?)?.toInt() ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   Future<void> close() async {
-    _failAll('closed by the client');
+    // death:false — WE are closing it, so onDeath must not fire a reconnect that
+    // would race the caller (reconnect() closes the old client on purpose).
+    _failAll('closed by the client', death: false);
     // Closing stdin is the polite ask: the service's next read fails, it
-    // returns and exits on its own. The kill is the backstop for one that does
-    // not.
+    // returns and exits on its own — and its exit path WAITS for an in-flight
+    // injection to finish, so killing instantly could truncate a write into
+    // the live game's layer table (a half-overwritten vinyl). Give the
+    // graceful path a bounded head start before the kill backstop.
     try {
       await _process.stdin.close();
+    } catch (_) {}
+    try {
+      await _process.exitCode.timeout(const Duration(seconds: 10));
+      return; // exited on its own; nothing to kill
     } catch (_) {}
     _process.kill();
   }

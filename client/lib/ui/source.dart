@@ -24,11 +24,14 @@ const _imageExtensions = <String>[
   'tiff',
 ];
 
-/// Opens the system picker. Returns null when the user cancels.
+/// Opens the system picker. Returns null when the user cancels. Geometry
+/// exports are offered alongside images because both enter through the same
+/// door: a picture starts a fit, a .forza.json comes back as a result.
 Future<String?> pickImage() async {
   final file = await openFile(
     acceptedTypeGroups: const [
       XTypeGroup(label: 'Images', extensions: _imageExtensions),
+      XTypeGroup(label: 'Forza geometry', extensions: ['json']),
       XTypeGroup(label: 'All files', extensions: ['*']),
     ],
   );
@@ -38,7 +41,8 @@ Future<String?> pickImage() async {
 bool _isImage(String path) {
   final dot = path.lastIndexOf('.');
   if (dot < 0) return false;
-  return _imageExtensions.contains(path.substring(dot + 1).toLowerCase());
+  final ext = path.substring(dot + 1).toLowerCase();
+  return _imageExtensions.contains(ext) || ext == 'json';
 }
 
 /// Asks where to write the geometry. Returns null when the user cancels. The
@@ -60,10 +64,19 @@ Future<String?> saveGeometryTo(String suggested) async {
 /// Wraps the whole window as a drop target. Anything droppable lands here, so a
 /// user never has to find the one rectangle that accepts a file.
 class DropCatcher extends StatefulWidget {
-  const DropCatcher({super.key, required this.child, required this.onFile});
+  const DropCatcher({
+    super.key,
+    required this.child,
+    required this.onFile,
+    this.onReject,
+  });
 
   final Widget child;
   final void Function(String path) onFile;
+
+  /// Called when a drop contained nothing this app can open, so the caller can
+  /// say so rather than let the overlay fade with no trace.
+  final void Function()? onReject;
 
   @override
   State<DropCatcher> createState() => _DropCatcherState();
@@ -87,6 +100,8 @@ class _DropCatcherState extends State<DropCatcher> {
             return;
           }
         }
+        // Nothing droppable was an image or a .forza.json — say so.
+        widget.onReject?.call();
       },
       child: Stack(
         fit: StackFit.expand,

@@ -144,6 +144,7 @@ class Studio extends ChangeNotifier {
     choices = Map<String, dynamic>.of(choices)..[keyMode] = m;
     _prefs?.set('mode', m);
     notifyListeners();
+    refreshKnobDefaults();
   }
 
   /// The connection, for the parts of the app that talk to the engine directly —
@@ -165,7 +166,18 @@ class Studio extends ChangeNotifier {
     _executable = executable;
     _prefs = await Prefs.load();
     _engine = await EngineClient.spawn(executable);
+    // Any death of THIS client — mid-run or idle — restarts the engine. Keying
+    // on the run stream's 'failed' only ever saw mid-run deaths; a driver reset
+    // while the app sat idle left every later request throwing 'connection is
+    // closed' with no way back short of relaunching.
+    _engine!.onDeath = (_) => unawaited(reconnect());
+    final v = await _engine!.hello();
+    if (v != EngineClient.protocolVersion) {
+      _note('warn',
+          'engine speaks protocol v$v, this client expects v${EngineClient.protocolVersion} — mixed versions? replace both files together');
+    }
     choices = await _engine!.defaults();
+    _defaults = Map<String, dynamic>.of(choices);
     _restore();
     injectAvailable = Platform.isWindows;
     await refreshLibrary();
@@ -208,7 +220,15 @@ class Studio extends ChangeNotifier {
     _reconnecting = true;
     _note('warn', 'the engine went away — starting it again');
     try {
+      // Close the dead client first: a hung-but-alive process would otherwise
+      // keep its GPU/VRAM allocation next to the fresh one forever.
+      final old = _engine;
       _engine = null;
+      if (old != null) {
+        try {
+          await old.close();
+        } catch (_) {}
+      }
       await connect(_executable!);
       _note('info', 'engine back');
     } catch (err) {
@@ -253,9 +273,17 @@ class Studio extends ChangeNotifier {
     // Never dereferences a null engine: the gallery is buildable without one in
     // tests, and a thumbnail is not worth crashing a frame over.
     if (e == null) return Future.value(Uint8List(0));
+    // A rejected future must not be remembered: one transient engine hiccup used
+    // to leave that tile blank for the rest of the session. The catch must be
+    // CHAINED, not cascaded: `..catchError` returns the pre-catch future, so the
+    // caller still got the rejection (a broken tile) and only the cache healed.
     return _thumbs[id] ??= e
         .libraryImage(id, 'thumb')
-        .then((b) => _thumbBytes[id] = b);
+        .then((b) => _thumbBytes[id] = b)
+        .catchError((Object err) {
+          _thumbs.remove(id);
+          return Uint8List(0);
+        });
   }
 
   /// The same picture as [thumb], for somewhere that cannot await — the
@@ -276,6 +304,21 @@ class Studio extends ChangeNotifier {
   /// running everywhere else, and leaving it there would replace the Generate
   /// button with a Stop button for a run that never started.
   void setSource(String path) {
+    // A drop mid-run used to silently abandon the run (UI empty, engine still
+    // fitting the OLD image, Generate re-armed → two concurrent fits). Stop the
+    // run first — for EVERY entry, .json included: the JSON branch used to return
+    // above this, so a .forza.json dropped mid-fit left the run alive to clobber
+    // the imported result (and inject the wrong geometry). Its retired sequence
+    // keeps its late events out.
+    if (isRunning) cancel();
+    _retarget();
+    // A geometry export is not a picture to fit — it IS a result. Routing it
+    // here means every way a file enters the app (drop, picker, source chip)
+    // can also bring a shared .forza.json back to life.
+    if (path.toLowerCase().endsWith('.json')) {
+      unawaited(importGeometry(path));
+      return;
+    }
     sourcePath = path;
     sourceName = path.split(RegExp(r'[\\/]')).last;
     phase = Phase.empty;
@@ -307,6 +350,7 @@ class Studio extends ChangeNotifier {
     _note('info', 'source: $sourceName');
     notifyListeners();
     _loadSource(path);
+    refreshKnobDefaults();
   }
 
   Future<void> _loadSource(String path) async {
@@ -318,6 +362,7 @@ class Studio extends ChangeNotifier {
         frame.image.dispose(); // the user moved on while this was decoding
         return;
       }
+      sourceImage?.dispose(); // two in-flight decodes of the SAME path: don't leak the first
       sourceImage = frame.image;
       sourceW = frame.image.width;
       sourceH = frame.image.height;
@@ -380,14 +425,26 @@ class Studio extends ChangeNotifier {
     // the flag before the old run had said its last word.
     final seq = ++_runSeq;
     _startClock();
-    _run = e.generate(
-      path: path,
-      choices: ch,
-      displayRes: 1100,
-      region: region,
-      sourceRes: sourceRes,
-      keepInside: keepInside,
-    );
+    // Guarded: a dead engine client throws out of generate(), and before this
+    // guard that exception escaped the tap callback AFTER phase was set to
+    // running — the UI wedged at 0% forever with Stop unable to clear it.
+    try {
+      _run = e.generate(
+        path: path,
+        choices: ch,
+        displayRes: 1100,
+        region: region,
+        sourceRes: sourceRes,
+        keepInside: keepInside,
+      );
+    } catch (err) {
+      _stopClock();
+      phase = Phase.failed;
+      failure = '$err';
+      _note('error', '$err');
+      notifyListeners();
+      return;
+    }
     _run!.updates.listen((u) {
       if (seq != _runSeq) return;
       _onUpdate(u);
@@ -395,6 +452,26 @@ class Studio extends ChangeNotifier {
   }
 
   int _runSeq = 0;
+
+  /// Bumped whenever the canvas is repointed at something new (a source, a saved
+  /// run, an imported JSON). The async openers capture it before their first
+  /// await and abort if it moved — otherwise a slow open landing after the user
+  /// moved on would overwrite the newer result and dispose its freshly-loaded
+  /// image out from under the UI.
+  int _openEpoch = 0;
+
+  /// Everything that must happen when the canvas is pointed somewhere new.
+  ///
+  /// Kept in one place because the three openers kept drifting apart: a pending
+  /// auto-save belonging to the previous fit would fire against the new target,
+  /// and the taskbar's red error state — deliberately left standing after a
+  /// failed run — survived loading a fresh picture, so the button stayed red
+  /// through editing and exporting until some later run happened to clear it.
+  void _retarget() {
+    _openEpoch++;
+    _persistPending = false;
+    if (phase == Phase.failed) WindowState.progressDone();
+  }
 
   /// The run's clock, kept HERE rather than taken from the engine's events.
   ///
@@ -414,6 +491,9 @@ class Studio extends ChangeNotifier {
     _ticker = Timer.periodic(const Duration(milliseconds: 250), (_) {
       if (!isRunning) return;
       elapsed = _watch.elapsed;
+      // Driven from the clock rather than from frame events: 4 Hz is plenty for
+      // a taskbar bar, and it keeps the shell call off the per-shape path.
+      WindowState.progress(progress);
       notifyListeners();
     });
   }
@@ -423,6 +503,9 @@ class Studio extends ChangeNotifier {
     _ticker?.cancel();
     _ticker = null;
     elapsed = _watch.elapsed;
+    // Whatever ended the run, the taskbar must not keep showing it as working.
+    // The failure case overrides this immediately after.
+    WindowState.progressDone();
   }
 
   /// Stops the run and throws the partial result away.
@@ -438,7 +521,9 @@ class Studio extends ChangeNotifier {
     // Retire the sequence too: everything this run says from here on belongs to
     // a run the user has already dismissed.
     _runSeq++;
-    _run?.cancel();
+    // State is reset BEFORE the cancel call: a dead engine makes _run.cancel()
+    // throw, and throwing first used to leave the UI wedged in "running" with
+    // a Stop button that could never work.
     phase = Phase.empty;
     stage = '';
     preview?.dispose();
@@ -447,6 +532,11 @@ class Studio extends ChangeNotifier {
     shapes = 0;
     _note('info', 'stopped');
     notifyListeners();
+    try {
+      _run?.cancel();
+    } catch (_) {
+      // The engine is gone; the run died with it. The reconnect path handles it.
+    }
   }
 
   bool _cancelled = false;
@@ -480,6 +570,10 @@ class Studio extends ChangeNotifier {
         total = (d['total'] as num?)?.toInt() ?? total;
         error = (d['err'] as num?)?.toDouble() ?? error;
         if (error0 == 0 && error > 0) error0 = error;
+        // NO notify: progress fires once per placed shape (up to hundreds/s) and every notify
+        // rebuilt the whole shell. The 4Hz run ticker repaints these counters; frames and
+        // phase/terminal events still notify immediately, so nothing visible lags.
+        return;
       // The clock is local — see _startClock. The engine reports its own
       // elapsed, but only when it happens to send a progress event, so it
       // stands still through the whole polish.
@@ -506,17 +600,23 @@ class Studio extends ChangeNotifier {
         // now. Both of these are off in one tick from the settings panel.
         if (soundOnFinish) WindowState.chime();
         if (flashOnFinish) WindowState.flash();
-        refreshLibrary();
+        // Keep it. Until now a finished fit lived only on the canvas and was
+        // lost the instant the next picture arrived.
+        _persistPending = true;
+        _persistFinishedRun();
       case 'failed':
         _stopClock();
+        // Red on the taskbar, so a run that died while the user was in the game
+        // says so from the taskbar rather than only inside the window.
+        WindowState.progressFailed();
         phase = Phase.failed;
         stage = '';
         failure = u.error;
         _note('error', u.error ?? 'failed');
-        // A dropped socket is not a failed fit, it is a dead engine — and every
-        // later request would fail the same way with no way back short of
-        // restarting the app. Reconnecting is the only useful response.
-        if ((u.error ?? '').contains('disconnected')) unawaited(reconnect());
+        // A dead engine reconnects through EngineClient.onDeath now (wired in
+        // connect), which fires for idle deaths too — not just the ones that
+        // happen to arrive on a live run's stream, which is all this string
+        // match ever caught.
     }
     notifyListeners();
   }
@@ -537,20 +637,41 @@ class Studio extends ChangeNotifier {
       return;
     }
     _decoding = true;
+    // The run's sequence is captured NOW: a decode that lands after Stop (or
+    // after dispose) must not resurrect the abandoned picture onto the canvas.
+    //
+    // The OPEN epoch too. After 'done' the phase is no longer running, so
+    // setSource/openRun skip their `if (isRunning) cancel()` and never bump
+    // _runSeq — only _openEpoch. A file dropped while the run's last frame was
+    // still decoding therefore passed the sequence check and painted the old
+    // fit over the freshly opened picture, with the header naming the new one.
+    final seq = _runSeq;
+    final epoch = _openEpoch;
     ui.decodeImageFromPixels(
       f.pixels,
       f.width,
       f.height,
       ui.PixelFormat.rgba8888,
       (img) {
-        preview?.dispose();
-        preview = img;
         _decoding = false;
-        notifyListeners();
+        if (seq == _runSeq && epoch == _openEpoch && !_disposed) {
+          preview?.dispose();
+          preview = img;
+          notifyListeners();
+        } else {
+          img.dispose(); // stale THIS decode — but the pending one may be current
+        }
+        // Always drain the stash and let _decode's own seq capture judge it: a
+        // frame stashed for the NEW run was being nulled here just because the
+        // decode it was waiting behind turned out to be stale.
         final next = _pendingFrame;
-        if (next != null) {
-          _pendingFrame = null;
+        _pendingFrame = null;
+        if (next != null && !_disposed) {
           _decode(next);
+        } else {
+          // The last frame of the run has landed: the picture the library
+          // should store is finally the finished one.
+          _persistFinishedRun();
         }
       },
     );
@@ -562,17 +683,26 @@ class Studio extends ChangeNotifier {
   Future<void> openRun(Map<String, dynamic> entry) async {
     final e = _engine;
     if (e == null) return;
+    // Opening a saved run mid-fit used to leave the run alive: its late frames
+    // (whose sequence was never retired) then overwrote the opened preview and
+    // geometry — an inject in that window wrote the wrong shapes into the game.
+    if (isRunning) cancel();
+    _retarget();
+    final epoch = _openEpoch;
     final id = entry['id'] as String;
     try {
       final geo = await e.libraryGeometry(id);
       final png = await e.libraryImage(id, 'preview');
       final decoded = await ui.instantiateImageCodec(png);
       final frame = await decoded.getNextFrame();
+      if (epoch != _openEpoch || _disposed) {
+        frame.image.dispose(); // the user opened something else meanwhile
+        return;
+      }
 
-      // A library run carries no source: it was fitted from a file that may not
-      // even be on this machine any more. Clearing it is what stops the compare
-      // wipe from pairing this result with the PREVIOUS image, which is the
-      // nonsense of half an old picture beside half a new one.
+      // Clear the previous source first: pairing this result with the picture
+      // that happened to be open is the nonsense of half an old picture beside
+      // half a new one.
       sourceImage?.dispose();
       sourceImage = null;
       sourcePath = null;
@@ -580,6 +710,17 @@ class Studio extends ChangeNotifier {
       sourceH = 0;
       region = null;
       compare = 1;
+
+      // Then put the run's OWN source back if it is still on this machine. The
+      // compare wipe — the app's main way of judging a result — was dead for
+      // every saved run, because a run carried no record of what it was fitted
+      // from. Runs saved before this simply have no `source` and behave as they
+      // did; a file that has since moved is not an error, just no wipe.
+      final src = entry['source'] as String?;
+      if (src != null && src.isNotEmpty && File(src).existsSync()) {
+        sourcePath = src;
+        unawaited(_loadSource(src));
+      }
 
       geometry = geo;
       resultW = (entry['width'] as num?)?.toInt() ?? frame.image.width;
@@ -596,6 +737,93 @@ class Studio extends ChangeNotifier {
       _note('info', 'opened $sourceName from the library');
     } catch (err) {
       _note('error', 'could not open the run: $err');
+    }
+    notifyListeners();
+  }
+
+  /// Loads a previously exported geometry JSON as the current result — the
+  /// answer to "can I load the file Export wrote". The engine renders it (one
+  /// renderer, one definition of a livery), so what lands on the canvas is what
+  /// an inject will produce, not this client's guess. The canvas size comes
+  /// from the background rectangle every generated document carries.
+  Future<void> importGeometry(String path) async {
+    final e = _engine;
+    if (e == null) return;
+    // setSource already cancelled any run and bumped the epoch before routing
+    // here; capture it so a newer open landing first aborts this import.
+    final epoch = _openEpoch;
+    try {
+      final doc = jsonDecode(await File(path).readAsString());
+      final shapesList = doc is Map<String, dynamic> ? doc['shapes'] : null;
+      if (shapesList is! List || shapesList.isEmpty) {
+        _note('error', 'not a shapes JSON: no "shapes" list in $path');
+        notifyListeners();
+        return;
+      }
+      final first = shapesList.first;
+      final data = first is Map ? first['data'] as List? : null;
+      final w = data != null && data.length >= 4 ? (data[2] as num).round() : 0;
+      final h = data != null && data.length >= 4 ? (data[3] as num).round() : 0;
+      if ((first is Map ? (first['type'] as num?)?.toInt() : null) != 1 ||
+          w <= 0 ||
+          h <= 0) {
+        _note(
+          'error',
+          'unsupported shapes JSON: it must start with the background '
+              'rectangle a generated export carries',
+        );
+        notifyListeners();
+        return;
+      }
+      final bgColor = first is Map ? first['color'] as List? : null;
+      final transparent =
+          bgColor != null && bgColor.length >= 4 && (bgColor[3] as num) == 0;
+      final frame = await e.render(
+        shapes: shapesList,
+        width: w,
+        height: h,
+        transparent: transparent,
+      );
+      final done = Completer<ui.Image>();
+      ui.decodeImageFromPixels(
+        frame.pixels,
+        frame.width,
+        frame.height,
+        ui.PixelFormat.rgba8888,
+        done.complete,
+      );
+      final img = await done.future;
+      if (epoch != _openEpoch || _disposed) {
+        img.dispose(); // the user moved on while this was rendering/decoding
+        return;
+      }
+
+      // Same reset as opening a saved run: an import carries no source image,
+      // and pairing it with the previous picture in the compare wipe would show
+      // half of one design beside half of another.
+      sourceImage?.dispose();
+      sourceImage = null;
+      sourcePath = null;
+      sourceW = 0;
+      sourceH = 0;
+      region = null;
+      compare = 1;
+
+      geometry = Map<String, dynamic>.of(doc as Map<String, dynamic>);
+      resultW = w;
+      resultH = h;
+      shapes = shapesList.length - 1;
+      sourceName = path.split(RegExp(r'[\\/]')).last;
+      selectedRunId = null;
+      preview?.dispose();
+      preview = img;
+      phase = Phase.done;
+      ssim = null;
+      deltaE = null;
+      failure = null;
+      _note('done', 'imported $sourceName: $shapes shapes');
+    } catch (err) {
+      _note('error', 'could not import the JSON: $err');
     }
     notifyListeners();
   }
@@ -630,19 +858,26 @@ class Studio extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Saves the current result to the library so it appears in Runs. This is
-  /// what the editor's "save to runs" calls: a design edited by hand or built
-  /// from scratch has no entry of its own until this writes one — a fit is
-  /// persisted by the engine when it finishes, an edit is not.
+  /// Saves the current result to the library so it appears in Runs.
+  ///
+  /// Called two ways: by the editor's "save to runs", and automatically when a
+  /// fit finishes. NOTHING persisted a finished fit before — the engine's done
+  /// path only writes geometry if the caller asked for an output file, which
+  /// this client never does — so the rail and the gallery only ever held runs
+  /// the user had thought to save from inside the editor. Every other one was
+  /// gone the moment the next picture was dropped.
   ///
   /// Non-destructive: every save is a NEW entry. Editing a run and saving keeps
   /// the original beside it, and two from-scratch designs never overwrite each
   /// other on a shared name.
-  Future<void> saveToLibrary(String name) async {
+  ///
+  /// Returns whether it landed, so a caller that was about to close on the
+  /// strength of it can stay open instead.
+  Future<bool> saveToLibrary(String name, {bool quiet = false}) async {
     final e = _engine;
     final g = geometry;
     final img = preview;
-    if (e == null || g == null || img == null) return;
+    if (e == null || g == null || img == null) return false;
     // The library names a run by its source basename with no extension — "car",
     // not "car.png" — so a from-scratch design named after its reference reads
     // the same as a fitted one.
@@ -653,33 +888,63 @@ class Studio extends ChangeNotifier {
         )
         .trim();
     final safe = display.isEmpty ? 'Untitled' : display;
+    // EVERY field of the entry is captured BEFORE the first await, the way `img`
+    // and `g` already were. Reading them afterwards was survivable while saving
+    // took a deliberate click; now that a finished fit saves itself, the readback
+    // and the upload straddle whatever the user does next — and a file dropped
+    // in that window sets resultW/H to 0 and sourcePath to the new file, so the
+    // run was stored with zero dimensions (which openRun's `?? frame.width`
+    // fallback cannot repair, 0 being non-null) and somebody else's source.
+    final entry = <String, dynamic>{
+      'name': safe,
+      'preset': mode,
+      'width': resultW,
+      'height': resultH,
+      'budget': budget,
+      'injectScale': injectScale,
+      // The picture it was fitted from. Kept so re-opening the run can put the
+      // source back on the canvas, which is what makes the compare wipe work
+      // for a saved run instead of being permanently dead there.
+      if (sourcePath != null) 'source': sourcePath,
+      'created': DateTime.now().toUtc().toIso8601String(),
+    };
+    final shapesSnapshot = (g['shapes'] as List?) ?? const [];
     try {
       final bytes = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-      if (bytes == null) return;
+      if (bytes == null) return false;
       final res = await e.librarySave(
-        shapes: (g['shapes'] as List?) ?? const [],
-        entry: {
-          'name': safe,
-          'preset': mode,
-          'width': resultW,
-          'height': resultH,
-          'budget': budget,
-          'injectScale': injectScale,
-          'created': DateTime.now().toUtc().toIso8601String(),
-        },
+        shapes: shapesSnapshot,
+        entry: entry,
         pixels: bytes.buffer.asUint8List(),
         pixelW: img.width,
         pixelH: img.height,
       );
-      // Point the rail at the run just written, the way opening one does.
+      // Point the rail at the run just written, the way opening one does — but
+      // NOT for an automatic save, which must not move a selection the user has
+      // meanwhile made themselves.
       final id = (res?['entry'] as Map?)?['id'] as String?;
-      if (id != null) selectedRunId = id;
-      _note('done', 'saved "$safe" to runs');
+      if (id != null && !quiet) selectedRunId = id;
+      if (!quiet) _note('done', 'saved "$safe" to runs');
       await refreshLibrary();
+      notifyListeners();
+      return true;
     } catch (err) {
       _note('error', 'save failed: $err');
+      notifyListeners();
+      return false;
     }
-    notifyListeners();
+  }
+
+  /// Persists the fit that just finished. Deferred until the final frame has
+  /// DECODED: the done event overtakes `_decode`'s async callback, so saving
+  /// straight from the handler would store the second-to-last preview.
+  bool _persistPending = false;
+
+  void _persistFinishedRun() {
+    if (!_persistPending) return;
+    if (_decoding || preview == null || geometry == null) return;
+    _persistPending = false;
+    unawaited(saveToLibrary(sourceName ?? 'Untitled', quiet: true));
   }
 
   /// Opens the engine's library directory in the file manager. Meaningful only
@@ -727,9 +992,9 @@ class Studio extends ChangeNotifier {
       await File(
         path,
       ).writeAsString(const JsonEncoder.withIndent('  ').convert(g));
-      _note('done', 'exported to \$path');
+      _note('done', 'exported to $path');
     } catch (err) {
-      _note('error', 'export failed: \$err');
+      _note('error', 'export failed: $err');
     }
     notifyListeners();
   }
@@ -846,6 +1111,69 @@ class Studio extends ChangeNotifier {
 
   final _overrides = <String, dynamic>{};
 
+  /// The engine's pristine DefaultChoices, kept so clearing an override can
+  /// put the SENTINEL back (-1, null, 0 — "follow the preset") rather than a
+  /// concrete number that would freeze this install's copy of a default.
+  Map<String, dynamic> _defaults = const {};
+
+  /// The concrete values the current mode's defaults resolve to, fetched from
+  /// the engine so the expert panel can show real numbers instead of "auto".
+  /// Keyed like [choices]; empty until [refreshKnobDefaults] has run.
+  Map<String, dynamic> knobDefaults = const {};
+
+  int _knobSeq = 0;
+
+  Future<void> refreshKnobDefaults() async {
+    final e = _engine;
+    if (e == null) return;
+    // Sequenced: two quick mode flips can resolve out of order, leaving the
+    // panel showing the EARLIER mode's defaults. Only the newest request lands.
+    final seq = ++_knobSeq;
+    try {
+      // A quality override changes the engine's search counts wholesale, so an
+      // untouched count field must show the number from THAT tier.
+      final q = _overrides['Quality'] as String? ?? '';
+      final d = await e.knobDefaults(mode, sourcePath, quality: q);
+      if (seq != _knobSeq || _disposed) return;
+      knobDefaults = d;
+      notifyListeners();
+    } catch (err) {
+      _note('warn', 'knob defaults: $err');
+    }
+  }
+
+  bool isOverridden(String key) => _overrides.containsKey(key);
+
+  /// What the expert panel should display for [key]: the user's override when
+  /// there is one, else the mode's concrete default.
+  Object? knobValue(String key) =>
+      _overrides.containsKey(key) ? _overrides[key] : knobDefaults[key];
+
+  /// Forgets one override: the stored value returns to the engine's sentinel,
+  /// so the knob follows the preset again — including presets the engine
+  /// retunes in a later release.
+  void clearChoice(String key) {
+    if (!_overrides.containsKey(key)) return;
+    _overrides.remove(key);
+    choices = Map<String, dynamic>.of(choices)..[key] = _defaults[key];
+    _prefs?.set('choices', _overrides);
+    notifyListeners();
+  }
+
+  /// Forgets every override in [keys] at once — the expert panel's reset.
+  void clearChoices(Iterable<String> keys) {
+    var touched = false;
+    for (final key in keys) {
+      if (!_overrides.containsKey(key)) continue;
+      _overrides.remove(key);
+      choices = Map<String, dynamic>.of(choices)..[key] = _defaults[key];
+      touched = true;
+    }
+    if (!touched) return;
+    _prefs?.set('choices', _overrides);
+    notifyListeners();
+  }
+
   // ---- user presets -------------------------------------------------------
 
   /// Configurations the user saved under a name. The engine owns the files, so
@@ -906,6 +1234,10 @@ class Studio extends ChangeNotifier {
     }
     final ki = p['keepInside'];
     if (ki is bool) setKeepInside(ki);
+    // A preset can change Mode/Quality — without a refresh the expert panel
+    // kept showing the PREVIOUS tier's defaults, and the first slider touch
+    // committed that wrong default as a real override.
+    unawaited(refreshKnobDefaults());
     notifyListeners();
   }
 
@@ -935,6 +1267,14 @@ class Studio extends ChangeNotifier {
     return Duration(milliseconds: ((total - shapes) / rate).round());
   }
 
+  /// A dropped file the app cannot open — surfaced in the activity log so a
+  /// drop that does nothing at least says why, instead of the overlay just
+  /// fading with no trace.
+  void noteRejectedDrop() {
+    _note('warn', 'that file is not an image or a .forza.json export');
+    notifyListeners();
+  }
+
   void _note(String level, String text) {
     final now = DateTime.now();
     final t =
@@ -954,9 +1294,15 @@ class Studio extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _ticker?.cancel(); // a live 4Hz timer notifying a disposed notifier throws every 250ms
+    _ticker = null;
+    _runSeq++; // retire in-flight decodes/updates
     _engine?.close();
     preview?.dispose();
     sourceImage?.dispose();
     super.dispose();
   }
+
+  bool _disposed = false;
 }
