@@ -210,6 +210,18 @@ func (r *Run) finish(e runner.Done, onEvent func(runner.Event)) runner.Done {
 	w, h := r.Prep.W, r.Prep.H
 	if r.PadPx > 0 {
 		shapes = imageio.TranslateShapes(shapes, -float64(r.PadPx), -float64(r.PadPx))
+		// The background rectangle is the document's ONLY record of the canvas it was fitted at:
+		// model.Geometry carries shapes and nothing else, so every reader of an exported
+		// .forza.json — the client's import, and anything else that opens one — takes the size
+		// from shapes[0]. TranslateShapes deliberately shifts an origin and never a size, so after
+		// the unpad that rectangle still declared the PADDED dimensions, at (-pad,-pad). Re-opening
+		// an exported keep-inside run — which is the default for every client run — therefore laid
+		// the art into the corner of a canvas 20% too large. Restate it as the view.
+		if len(shapes) > 0 && len(shapes[0].Data) >= 4 {
+			d := shapes[0].Data
+			d[0], d[1] = 0, 0
+			d[2], d[3] = float64(r.ViewW), float64(r.ViewH)
+		}
 		canvas = imageio.UnpadCanvas(canvas, r.PadPx, r.ViewW, r.ViewH)
 		w, h = r.ViewW, r.ViewH
 	}

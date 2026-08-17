@@ -125,6 +125,18 @@ void evalTrial(float P[6], int job, int need, int nx, int x0, int y0, int step,
         int cb = base + s * CTXW;
         int yy = s / nx, xx = s - yy * nx;
         int x = x0 + xx * step, y = y0 + yy * step;
+        // The bbox skip applies to the setDev pass TOO, and that is a deliberate difference from
+        // the host — do not "fix" it. The host's base pass runs over the whole window, so its
+        // clean-ground reference carries the real miss everywhere; here every sample outside the
+        // shape's own box keeps dev = 0, which reads as "already right" and makes the intrusion
+        // veto refuse any growth into the ring around the shape. Matching the host exactly (drop
+        // the `!setDev`) was built and MEASURED 2026-08-17, n=27 paired at 1000 shapes / 2000px:
+        // mean +0.030% WORSE, 20 of 27 worse, sign test p=0.019 — small but a real direction, not
+        // noise. Same shape as the refineScaleGain result in skewrefine.go: the stricter rule is
+        // accidentally protective, because a move onto ground that is merely wrong still composes
+        // badly against the other accepts in the round. The sum is unaffected either way — outside
+        // the box coverage is exactly zero and the full expression collapses to eZero term for term
+        // — so this changes ONLY which moves the veto allows.
         if (x < bb.x || x > bb.z || y < bb.y || y > bb.w) {
             e += ctx[cb + 11]; // eZero: what the full expression yields at coverage 0
             continue;

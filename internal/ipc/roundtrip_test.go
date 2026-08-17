@@ -200,11 +200,16 @@ func TestRegionAndSurroundSurviveTheWire(t *testing.T) {
 		if d.Geometry == nil || len(d.Geometry.Shapes) == 0 {
 			t.Fatal("done carried no geometry")
 		}
-		// Shape 0 is the base rectangle covering the whole fitted canvas, surround included. Once the
-		// surround is subtracted it starts OUTSIDE the region, at minus the border width; left at zero
-		// it would mean every shape in the document is offset by that border.
-		if x := d.Geometry.Shapes[0].Data[0]; x >= 0 {
-			t.Errorf("base rect starts at x=%.1f, want a negative origin — the surround was not taken back off", x)
+		// Shape 0 is the base rectangle, and it is the document's ONLY record of the canvas the
+		// geometry is expressed in — model.Geometry carries shapes and nothing else, so an importer
+		// takes the size from here. It must therefore describe the REGION, not the padded canvas the
+		// engine happened to fit. (This used to assert the opposite: that the rect kept the padded
+		// size at a negative origin, as a proxy for "the surround was subtracted". The proxy was
+		// wrong about the destination — re-opening an exported keep-inside run then laid the art
+		// into the corner of a canvas 20% too large. The subtraction itself is pinned directly, and
+		// without a GPU, by session's TestFinishUnpadsBackgroundRect.)
+		if b := d.Geometry.Shapes[0].Data; len(b) < 4 || b[0] != 0 || b[1] != 0 || b[2] != 32 || b[3] != 32 {
+			t.Errorf("base rect = %v, want [0 0 32 32] — the document must declare the region it is in", b)
 		}
 	case err := <-failed:
 		if err != nil && strings.Contains(err.Error(), "vulkan init failed") {

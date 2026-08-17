@@ -141,7 +141,9 @@ func (looRefitPass) apply(r *run) {
 			t0 := time.Now()
 			kept, merged = mergePairs(kept, r.w, r.h)
 			r.tm.MergeRefit += time.Since(t0)
-			applog.Printf("loo round %d: pruned %d, merged %d pairs", round, len(r.shapes)-len(kept)+merged, merged)
+			// kept has already lost BOTH the pruned shapes and one shape per merged pair, so the
+			// prune count is the difference minus the merges — adding them counted every merge twice.
+			applog.Printf("loo round %d: pruned %d, merged %d pairs", round, len(r.shapes)-len(kept)-merged, merged)
 		}
 		if len(drop)+merged < looMinRegrow {
 			break

@@ -930,8 +930,19 @@ func (r *run) clampToBudget() {
 		return
 	}
 	over := len(r.shapes) - (r.opt.StopAt + 1)
-	r.shapes = pruneToBudget(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt,
-		r.opt.Background, r.opt.TransparentBG)
+	// The rank has to match the stack. postProcess already refuses pruneToBudget on an alpha run for
+	// a stated reason — its opaque replace-ownership model gives a semi-transparent shape contrib 0,
+	// so it drops exactly the shapes an organic preset is made of — and this clamp was calling it
+	// anyway. With alphaMin 0.30 on anime/photo that is most of the stack, so the one or two shapes
+	// this trims were being picked at random rather than by what they are worth. The alpha-aware
+	// top-2-owner rank is the same measure the blend path already uses.
+	if r.allowAlpha {
+		r.shapes = PruneToBudgetBlend(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt+1,
+			r.opt.Background, r.opt.TransparentBG)
+	} else {
+		r.shapes = pruneToBudget(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt,
+			r.opt.Background, r.opt.TransparentBG)
+	}
 	r.finalErr = rerender(r.be, r.initCanvas, r.shapes)
 	applog.Printf("clamp: %d layers over the budget, pruned to %d", over, len(r.shapes))
 }

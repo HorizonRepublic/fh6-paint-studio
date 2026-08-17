@@ -6,6 +6,7 @@ import (
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -26,6 +27,11 @@ const gaussLRScale = 4.0
 // (engine.Run) is entirely untouched — this is an additive parallel path.
 func GenerateGaussian(be backend.Backend, opt Options) Result {
 	t0 := time.Now()
+	// The other entry point (Run) releases the hard-edge memo on the way out; this one is a run too.
+	// The memo keys on the TARGET SLICE'S ADDRESS, so leaving it armed past the run both pins a
+	// w*h plane for the process's life and lets a later target allocated at the same address with
+	// the same dimensions read a map built for a different picture.
+	defer metric.ReleaseMaps()
 	w, h := opt.Width, opt.Height
 	target, weight := be.Target(), be.Weight()
 	bg := opt.Background

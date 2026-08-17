@@ -641,6 +641,13 @@ func localRefine(dev any, shapes []model.Shape, target, weight []float32, w, h i
 			if devRefine(jb, outP[:cnt*6], outGain[:cnt]) < 0 {
 				srdbg("device refine refused — falling back to the host for the rest of the run")
 				devRefine = nil
+				// Earlier chunks of THIS round may already have written results. The round is about
+				// to be redone entirely on the host, so drop them: leaving them mixes two verdicts
+				// in one round, and a shape the host declines would keep a device move that nothing
+				// re-checked.
+				for _, i := range pending {
+					touched[i], gain[i] = false, 0
+				}
 				return pending
 			}
 			for j := 0; j < cnt; j++ {

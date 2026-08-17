@@ -815,7 +815,7 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// Monotone geometry refine — see the anime case for the mechanism and the numbers. Photo is
 		// 12 of 12 pairs better, mean -3.708%, and it only becomes a win once the pass runs BEFORE the
 		// colour solve: in the later position photo lost 7 of 12.
-		d.GeomRefine = true
+		d.GeomRefine = geomRefine(true)
 		// Region-gated kinds for photo too (2026-07-20): the smooth-glow swap rides the kind gate,
 		// and photo's soft backgrounds (bokeh/sky) are exactly where the translucent-facet
 		// patchwork lives. Measured on img_10 photo @native: ΔE 3.25→3.16, p95 −3%, SSIM +0.008
@@ -974,7 +974,7 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// 27 and lost outright on photo, because a shape moved after the colours are solved keeps a
 		// colour fitted to where it used to be. FH6_REFINE_LATE=1 restores the old order,
 		// FH6_GEOMREFINE=0/1 pins the pass off or on.
-		d.GeomRefine = true
+		d.GeomRefine = geomRefine(true)
 		// LOO refit (2026-07-20, the owner's "shapes are wasted" complaint measured and fixed):
 		// after the polish, 17-25% of shapes are individually harmful-or-neutral in the FINAL
 		// stack (greedy scores at placement; later shapes overpaint). Two exact-LOO prune→regrow→
@@ -1031,7 +1031,10 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// convergence greedy leaves in smooth cel) into one moment-fitted shape; the freed slots
 		// regrow on the residual under the round's e2e gate. Measured: img_10 SSE −1.7/−3.0% with
 		// false-edge −5% and SSIM +0.005 on BOTH seeds; img_5/img_24 parity (few mergeable pairs).
-		d.MergeRefit = true
+		// Behind the SAME pin photo uses: the pin was added with photo's default and left anime
+		// hard-coded, so FH6_MERGEREFIT=0 turned the pass off on half the presets and an A/B from
+		// the studio — which has no flags — silently compared anime-with against anime-with.
+		d.MergeRefit = os.Getenv("FH6_MERGEREFIT") != "0"
 		// Saliency quota (built 2026-06-11, defaulted 2026-07-20 on the owner's "eyes break the
 		// image" complaint): the final 15% of the budget places shapes ONLY inside the top-detail
 		// cells, so eyes/faces can't be outbid by big soft regions. Measured: img_10 iris/pupil
@@ -1374,6 +1377,20 @@ func globalColorIters(def int) int {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
+	}
+	return def
+}
+
+// geomRefine resolves the monotone geometry refine's default. FH6_GEOMREFINE=0/1 pins it either
+// way. The pin was implemented in cmd/fh6paint alone, so it worked for every A/B run through the
+// CLI and did nothing at all in the studio — where the owner has no flags and the pin is the ONLY
+// way to turn the pass off. The preset is the one place both consumers read.
+func geomRefine(def bool) bool {
+	switch os.Getenv("FH6_GEOMREFINE") {
+	case "0":
+		return false
+	case "1":
+		return true
 	}
 	return def
 }
