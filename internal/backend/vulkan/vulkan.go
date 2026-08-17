@@ -76,6 +76,7 @@ type Vulkan struct {
 	procSearchMut  *syscall.Proc
 	procSetCoarse  *syscall.Proc
 	procSetBatch   *syscall.Proc
+	procRefine     *syscall.Proc
 	procSurvivors  *syscall.Proc
 	procSetOrient  *syscall.Proc
 	procSetCoh     *syscall.Proc
@@ -154,6 +155,7 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procSearchMut, _ = dll.FindProc("fp_search_mutate")     // optional: on-device hill climb (host rounds when absent)
 	g.procSetCoarse, _ = dll.FindProc("fp_set_coarse")        // optional: coarse-to-fine search filter
 	g.procSetBatch, _ = dll.FindProc("fp_set_batch")          // optional: batch placement survivor export
+	g.procRefine, _ = dll.FindProc("fp_refine")               // optional: on-device local geometry refine
 	g.procSurvivors, _ = dll.FindProc("fp_search_survivors")  // optional: ditto
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
@@ -1060,6 +1062,85 @@ func (g *Vulkan) SetCoarse(enable bool, budget, kpart int) {
 // SetCoarseFP16 is accepted for interface parity and does nothing: the FP32 coarse filter is the
 // win (the CUDA fp16 half needed a separate eval shader and bought a fraction of it).
 func (g *Vulkan) SetCoarseFP16(bool) {}
+
+// RefineJobs describes one round of the local geometry refine for the device (refine.comp): the
+// frozen stack, the tile index over it, and the shapes to search this round with their windows and
+// axes. Everything is already in the flat layout the shader reads, because the caller builds these
+// once per round and the alternative is a second copy of the same arrays.
+type RefineJobs struct {
+	N                             int // shapes in the stack
+	ShapeP                        []float32
+	ShapeCol                      []float32
+	ShapeKind                     []int32
+	ShapeBox                      []int32
+	TileOff, TileIdx              []int32
+	TW, TH, Tile                  int
+	JobShape, JobWin, JobNAx      []int32
+	JobAxes                       []float32
+	CtxCap, Sweeps                int
+	Unweighted                    bool
+	MinGain, IntrudeMax, CleanDev float32
+	Shrink, MinStepFrac           float32
+}
+
+// RefineJobsFromEngine is the flat form the engine calls: it holds the concrete job struct here so
+// the engine does not have to import this package for a type.
+func (g *Vulkan) RefineJobsFromEngine(n int, shapeP, shapeCol []float32, shapeKind, shapeBox, tileOff, tileIdx []int32,
+	tw, th, tile int, jobShape, jobWin, jobNAx []int32, jobAxes []float32,
+	ctxCap, sweeps int, unweighted bool, minGain, intrudeMax, cleanDev, shrink, minStepFrac float32,
+	outP, outGain []float32) int {
+	return g.Refine(&RefineJobs{
+		N: n, ShapeP: shapeP, ShapeCol: shapeCol, ShapeKind: shapeKind, ShapeBox: shapeBox,
+		TileOff: tileOff, TileIdx: tileIdx, TW: tw, TH: th, Tile: tile,
+		JobShape: jobShape, JobWin: jobWin, JobNAx: jobNAx, JobAxes: jobAxes,
+		CtxCap: ctxCap, Sweeps: sweeps, Unweighted: unweighted,
+		MinGain: minGain, IntrudeMax: intrudeMax, CleanDev: cleanDev,
+		Shrink: shrink, MinStepFrac: minStepFrac,
+	}, outP, outGain)
+}
+
+// Refine runs one round on device and fills outP (njobs*6) and outGain (njobs). It returns how many
+// shapes moved, or -1 when the device cannot run the pass — the caller then keeps its host path
+// rather than silently refining nothing.
+func (g *Vulkan) Refine(j *RefineJobs, outP, outGain []float32) int {
+	if g.procRefine == nil {
+		return -1
+	}
+	njobs := len(j.JobShape)
+	if njobs < 1 || j.N < 1 || len(outGain) < njobs || len(outP) < njobs*6 {
+		return -1
+	}
+	ti := j.TileIdx
+	if len(ti) == 0 {
+		ti = []int32{0} // never take the address of an empty slice; the shader reads none of it
+	}
+	ip := []int32{int32(j.N), int32(njobs), int32(g.w), int32(g.h), int32(j.TW), int32(j.TH),
+		int32(j.Tile), int32(j.CtxCap), int32(j.Sweeps), b2i32(j.Unweighted), int32(len(j.TileIdx))}
+	fp := []float32{j.MinGain, j.IntrudeMax, j.CleanDev, j.Shrink, j.MinStepFrac}
+	r, _, _ := g.procRefine.Call(
+		uintptr(unsafe.Pointer(&ip[0])),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&j.ShapeP[0])),
+		uintptr(unsafe.Pointer(&j.ShapeCol[0])),
+		uintptr(unsafe.Pointer(&j.ShapeKind[0])),
+		uintptr(unsafe.Pointer(&j.ShapeBox[0])),
+		uintptr(unsafe.Pointer(&j.TileOff[0])),
+		uintptr(unsafe.Pointer(&ti[0])),
+		uintptr(unsafe.Pointer(&j.JobShape[0])),
+		uintptr(unsafe.Pointer(&j.JobWin[0])),
+		uintptr(unsafe.Pointer(&j.JobAxes[0])),
+		uintptr(unsafe.Pointer(&j.JobNAx[0])),
+		uintptr(unsafe.Pointer(&outP[0])),
+		uintptr(unsafe.Pointer(&outGain[0])),
+	)
+	runtime.KeepAlive(ip)
+	runtime.KeepAlive(fp)
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(ti)
+	runtime.KeepAlive(outP)
+	runtime.KeepAlive(outGain)
+	return int(int32(r))
+}
 
 // SetBatch arms the survivor export so SearchSurvivors has something to return. Off by default:
 // it appends three buffer copies to every search submit. A DLL without the export leaves the

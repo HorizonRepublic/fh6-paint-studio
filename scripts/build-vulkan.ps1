@@ -37,6 +37,7 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
 # Map each .comp to its C array variable name (the shim #includes <name>.spv.h).
 Write-Host "Compiling shaders -> SPIR-V ..." -ForegroundColor Cyan
 $shaders = [ordered]@{
+    'refine'          = 'refine_spv'
     'eval'            = 'eval_spv'
     'apply'          = 'apply_spv'
     'grid'            = 'grid_spv'

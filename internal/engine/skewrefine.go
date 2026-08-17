@@ -171,7 +171,7 @@ func (p skewRefinePass) enabled(opt Options) bool {
 func (skewRefinePass) apply(r *run) {
 	r.setStatus("Refining geometry…")
 	before := r.finalErr
-	shapes, changed := localRefine(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.GeomRefine)
+	shapes, changed := localRefine(r.be, r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.GeomRefine)
 	if changed == 0 {
 		return
 	}
@@ -274,7 +274,7 @@ func refineAxes(k model.ShapeKind, p [6]float32, geom bool) []refineAxis {
 
 // localRefine searches every shape against the frozen stack and returns the updated shapes plus how
 // many moved.
-func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom bool) ([]model.Shape, int) {
+func localRefine(dev any, shapes []model.Shape, target, weight []float32, w, h int, geom bool) ([]model.Shape, int) {
 	n := len(shapes)
 	if n < 2 {
 		return shapes, 0
@@ -516,10 +516,156 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 	changed := 0
 	firstGain := 0.0
 
+	// The device path. This pass was the largest CPU block of a run — 50% of the samples, 16% of the
+	// wall, already goroutine-parallel — so the answer was never more cores. One workgroup per shape
+	// runs the whole coordinate descent on the GPU (refine.comp); the host keeps the kinds the
+	// shader does not frame (triangles, lines, bank words) and the conflict filter, which is a
+	// sequential decision over the finished gains and belongs here.
+	//
+	// It is NOT bit-identical: the device sums the window through a tree where the host sums it
+	// serially in float64, so a marginal accept can flip. Every accept is still gated on lowering
+	// the shape's exact local error, so the pass can only pick a different subset of improvements.
+	// The stack, flattened once: the shader reads it as plain arrays and it does not change while
+	// the rounds run (only the shapes the filter commits do, and those are re-flattened below).
+	flatP := make([]float32, n*6)
+	flatCol := make([]float32, n*4)
+	flatKind := make([]int32, n)
+	flatBox := make([]int32, n*4)
+	reflatten := func() {
+		for i := range gs {
+			copy(flatP[i*6:], gs[i].p[:])
+			copy(flatCol[i*4:], gs[i].col[:])
+			flatKind[i] = int32(gs[i].kind)
+			for k := 0; k < 4; k++ {
+				flatBox[i*4+k] = int32(gs[i].bbox[k])
+			}
+		}
+	}
+	reflatten()
+	// The tile index as CSR. `tiles` is rebuilt per round as a slice of slices; the shader wants
+	// one offset array and one flat index array.
+	tileOff := make([]int32, len(tiles)+1)
+	var tileIdx []int32
+	flattenTiles := func() {
+		tileIdx = tileIdx[:0]
+		for t, lst := range tiles {
+			tileOff[t] = int32(len(tileIdx))
+			tileIdx = append(tileIdx, lst...)
+		}
+		tileOff[len(tiles)] = int32(len(tileIdx))
+	}
+	flattenTiles()
+
+	devRefine := deviceRefiner(dev)
+	gpuRound := func(pending []int) []int {
+		if devRefine == nil {
+			return pending
+		}
+		reflatten()
+		flattenTiles()
+		jobShape := make([]int32, 0, len(pending))
+		jobWin := make([]int32, 0, len(pending)*6)
+		jobAxes := make([]float32, 0, len(pending)*24)
+		jobNAx := make([]int32, 0, len(pending))
+		slot := make([]int, 0, len(pending)) // job -> shape index, for writing the results back
+		host := pending[:0:0]
+		maxNeed := 0
+		for _, i := range pending {
+			g := &gs[i]
+			axes := refineAxes(g.kind, g.p, geom)
+			b := windows[i]
+			if !refineOnDevice(g.kind) || len(axes) == 0 || len(axes) > 6 || g.col[3] <= 0 ||
+				b[2] < b[0] || b[3] < b[1] {
+				host = append(host, i)
+				continue
+			}
+			area := (b[2] - b[0] + 1) * (b[3] - b[1] + 1)
+			step := 1
+			if area > refineStride {
+				if sN := int(math.Sqrt(float64(area) / float64(refineStride))); sN > 1 {
+					step = sN
+				}
+			}
+			nx := (b[2]-b[0])/step + 1
+			ny := (b[3]-b[1])/step + 1
+			need := nx * ny
+			// Tiny windows stay on the host. A workgroup that cannot fill its own lanes spends more
+			// on the reduction tree than on the arithmetic, and the host loop over a couple of hundred
+			// samples is genuinely quick — measured, offloading everything was 2.3x SLOWER than not.
+			if need < refineDevMinSamples {
+				host = append(host, i)
+				continue
+			}
+			if need > maxNeed {
+				maxNeed = need
+			}
+			slot = append(slot, i)
+			jobShape = append(jobShape, int32(i))
+			jobWin = append(jobWin, int32(b[0]), int32(b[1]), int32(b[2]), int32(b[3]), int32(step), int32(need))
+			jobNAx = append(jobNAx, int32(len(axes)))
+			for k := 0; k < 6; k++ {
+				if k < len(axes) {
+					a := axes[k]
+					jobAxes = append(jobAxes, float32(a.slot), float32(a.step), float32(a.lo), float32(a.hi))
+				} else {
+					jobAxes = append(jobAxes, 0, 0, 0, 0) // step 0 = the shader skips the slot
+				}
+			}
+		}
+		if len(slot) == 0 {
+			return host
+		}
+		// The context slab is njobs * ctxCap * 14 floats and it is the whole memory cost of the
+		// pass, so the round is handed over in chunks small enough that a 4GB card is never asked
+		// for something it does not have.
+		perJob := maxNeed * 14 * 4
+		chunk := len(slot)
+		if perJob > 0 {
+			if c := refineDevBudget / perJob; c < chunk {
+				chunk = maxInt(1, c)
+			}
+		}
+		outP := make([]float32, chunk*6)
+		outGain := make([]float32, chunk)
+		for off := 0; off < len(slot); off += chunk {
+			cnt := minInt(chunk, len(slot)-off)
+			jb := &vulkanRefineJobs{
+				n: len(gs), shapeP: flatP, shapeCol: flatCol, shapeKind: flatKind, shapeBox: flatBox,
+				tileOff: tileOff, tileIdx: tileIdx, tw: tw, th: th, tile: refineTile,
+				jobShape: jobShape[off : off+cnt], jobWin: jobWin[off*6 : (off+cnt)*6],
+				jobAxes: jobAxes[off*24 : (off+cnt)*24], jobNAx: jobNAx[off : off+cnt],
+				ctxCap: maxNeed, sweeps: refineSweepsN, unweighted: refineUnweighted,
+				minGain: refineMinGain, intrudeMax: refineIntrudeMax, cleanDev: refineCleanDev,
+				shrink: refineShrink, minStepFrac: refineMinStep,
+			}
+			if devRefine(jb, outP[:cnt*6], outGain[:cnt]) < 0 {
+				srdbg("device refine refused — falling back to the host for the rest of the run")
+				devRefine = nil
+				return pending
+			}
+			for j := 0; j < cnt; j++ {
+				if outGain[j] <= 0 {
+					continue
+				}
+				i := slot[off+j]
+				var np [6]float32
+				copy(np[:], outP[j*6:j*6+6])
+				sc := 1.0
+				if refineScaleGain {
+					st := float64(jobWin[(off+j)*6+4])
+					sc = st * st
+				}
+				moved[i], touched[i], gain[i] = np, true, float64(outGain[j])*sc
+			}
+		}
+		return host
+	}
+
 	for round := 0; round < refineRoundsOverride && len(pending) > 0; round++ {
 		for _, i := range pending {
 			touched[i], gain[i] = false, 0
 		}
+		hostPending := gpuRound(pending)
 		var wg sync.WaitGroup
 		jobs := make(chan int, runtime.NumCPU()*2)
 		for wk := 0; wk < runtime.NumCPU(); wk++ {
@@ -598,7 +744,7 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 				}
 			}()
 		}
-		for _, i := range pending {
+		for _, i := range hostPending {
 			jobs <- i
 		}
 		close(jobs)

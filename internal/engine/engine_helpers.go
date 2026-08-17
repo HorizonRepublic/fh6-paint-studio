@@ -179,6 +179,17 @@ var rankFixOn = os.Getenv("FH6_RANKFIX") != "0"
 // instead of treating it as opaque. FH6_BFCONTRIB=0 restores the old ranking.
 var blendContribFix = os.Getenv("FH6_BFCONTRIB") != "0"
 
+// paddedAlphaFix would make the generator treat a keep-inside padded run as ORGANIC, matching the
+// alpha floor applyPolish already gives it (engine.go:332) — closing what looks like a plain
+// inconsistency: today the same run is a cutout for generation and organic for polish.
+//
+// MEASURED 2026-08-17 and REJECTED. Paired A/B on the padded path (-pad-transparent 0.1, which is
+// what the client's keep-inside does), n=27: mean +2.321% WORSE on anime and +1.855% on photo,
+// 12 of 27 better, sign test p=0.70. So the "inconsistency" is the better configuration, not a
+// bug to close: opaque candidates against a padded frame beat translucent ones, and it is the
+// polish's floor exception that is the odd one out. Left OFF; FH6_PADALPHA=1 re-opens it.
+var paddedAlphaFix = os.Getenv("FH6_PADALPHA") == "1"
+
 // polishRecolorGate: applyPolish skips recolorVisible when the preset allows translucent shapes,
 // matching the two other call sites. FH6_PRECOLOR=0 restores the unconditional recolor.
 var polishRecolorGate = os.Getenv("FH6_PRECOLOR") != "0"

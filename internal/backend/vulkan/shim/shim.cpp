@@ -63,6 +63,7 @@
 #include "polish_forward_tiled.spv.h" // pt_forward_spv (one-dispatch tiled forward)
 #include "polish_hard_tiled.spv.h"    // pt_hard_spv    (one-dispatch tiled hard)
 #include "polish_dcwalk_tiled.spv.h"    // pt_dcwalk_spv  (tiled backward Pass A: dC reverse walk)
+#include "refine.spv.h"      // refine_spv     (local geometry refine, one workgroup per shape)
 #include "conv3x3.spv.h"    // conv3x3_spv    (one 3x3 layer of the candidate proposer)
 #include "prop_input.spv.h" // prop_input_spv (target+canvas -> the proposer's stored input planes)
 #include "prop_orient.spv.h"// prop_orient_spv(target planes -> the derived orientation planes)
@@ -103,6 +104,7 @@
 // lives inside it, has to see them.
 void freeProposer();
 void proposerTeardown();
+void refineTeardown();
 
 namespace {
 
@@ -597,6 +599,7 @@ void teardown() {
     // bound handles from a dead device.
     freeProposer();
     proposerTeardown();
+    refineTeardown();
     destroyBuf(g_target); destroyBuf(g_weight); destroyBuf(g_canvas); destroyBuf(g_cands); destroyBuf(g_out); destroyBuf(g_staging); destroyBuf(g_gridBuf);
     if (g_evalPipe)  { vkDestroyPipeline(g_device, g_evalPipe, nullptr);  g_evalPipe = VK_NULL_HANDLE; }
     if (g_applyPipe) { vkDestroyPipeline(g_device, g_applyPipe, nullptr); g_applyPipe = VK_NULL_HANDLE; }
@@ -2952,6 +2955,181 @@ API void fp_reset(const float* canvas) {
     if (!stagingReady(sz)) return;
     memcpy(g_staging.map, canvas, sz);
     copyBuf(g_staging.buf, g_canvas.buf, sz); // staging -> device-local
+}
+
+// ---------------------------------------------------------------------------------------------
+// Local geometry refine (refine.comp) — one workgroup per shape, the whole coordinate descent on
+// device. See refine.comp for why it is shaped that way. Everything here is per-call scratch: the
+// pass runs a handful of rounds at the end of a run, so holding tens of megabytes of context
+// between them would cost VRAM the polish wants.
+// ---------------------------------------------------------------------------------------------
+struct RefPC { int32_t W, H, tw, tile, ctxCap, sweeps, unweighted, firstJob;
+               float minGain, intrudeMax, cleanDev, shrink, minStepFrac; };
+VkDescriptorSetLayout g_refDSL = VK_NULL_HANDLE;
+VkPipelineLayout      g_refPL  = VK_NULL_HANDLE;
+VkPipeline            g_refPipe = VK_NULL_HANDLE;
+VkDescriptorPool      g_refPool = VK_NULL_HANDLE;
+VkDescriptorSet       g_refSet  = VK_NULL_HANDLE;
+Buf g_refSP, g_refSC, g_refSK, g_refSB, g_refTO, g_refTI, g_refJS, g_refJW, g_refJA, g_refJN,
+    g_refCTX, g_refOP, g_refOG;
+int g_refReady = 0;
+
+bool buildRefine() {
+    if (g_refPipe) return true;
+    VkDescriptorSetLayoutBinding bs[17];
+    for (uint32_t i = 0; i < 17; i++) {
+        bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bs[i].descriptorCount = 1; bs[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo dci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dci.bindingCount = 17; dci.pBindings = bs;
+    if (vkCreateDescriptorSetLayout(g_device, &dci, nullptr, &g_refDSL) != VK_SUCCESS) return false;
+    VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RefPC)};
+    VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    plci.setLayoutCount = 1; plci.pSetLayouts = &g_refDSL; plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pr;
+    if (vkCreatePipelineLayout(g_device, &plci, nullptr, &g_refPL) != VK_SUCCESS) return false;
+    VkShaderModule sm = loadShader(refine_spv, sizeof(refine_spv));
+    if (!sm) return false;
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; ci.stage.module = sm; ci.stage.pName = "main";
+    ci.layout = g_refPL;
+    VkResult r = vkCreateComputePipelines(g_device, VK_NULL_HANDLE, 1, &ci, nullptr, &g_refPipe);
+    vkDestroyShaderModule(g_device, sm, nullptr);
+    if (r != VK_SUCCESS) return false;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 17};
+    VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(g_device, &dpci, nullptr, &g_refPool) != VK_SUCCESS) return false;
+    VkDescriptorSetAllocateInfo a{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    a.descriptorPool = g_refPool; a.descriptorSetCount = 1; a.pSetLayouts = &g_refDSL;
+    return vkAllocateDescriptorSets(g_device, &a, &g_refSet) == VK_SUCCESS;
+}
+
+void refineTeardown() {
+    if (!g_device) return;
+    destroyBuf(g_refSP); destroyBuf(g_refSC); destroyBuf(g_refSK); destroyBuf(g_refSB);
+    destroyBuf(g_refTO); destroyBuf(g_refTI); destroyBuf(g_refJS); destroyBuf(g_refJW);
+    destroyBuf(g_refJA); destroyBuf(g_refJN); destroyBuf(g_refCTX); destroyBuf(g_refOP);
+    destroyBuf(g_refOG);
+    if (g_refPool) { vkDestroyDescriptorPool(g_device, g_refPool, nullptr); g_refPool = VK_NULL_HANDLE; g_refSet = VK_NULL_HANDLE; }
+    if (g_refPipe) { vkDestroyPipeline(g_device, g_refPipe, nullptr); g_refPipe = VK_NULL_HANDLE; }
+    if (g_refPL)   { vkDestroyPipelineLayout(g_device, g_refPL, nullptr); g_refPL = VK_NULL_HANDLE; }
+    if (g_refDSL)  { vkDestroyDescriptorSetLayout(g_device, g_refDSL, nullptr); g_refDSL = VK_NULL_HANDLE; }
+    g_refReady = 0;
+}
+
+// refUp grows a host-visible buffer to `bytes` and copies `src` into it. Host-visible rather than
+// device-local on purpose: these are written once and read once per round, so a staging hop would
+// cost a copy for nothing.
+bool refUp(Buf& b, const void* src, size_t bytes) {
+    if (bytes < 4) bytes = 4;
+    if (b.buf == VK_NULL_HANDLE || b.size < bytes) {
+        destroyBuf(b);
+        if (!createHost(bytes, b)) return false;
+    }
+    if (src) memcpy(b.map, src, bytes);
+    return true;
+}
+
+// The context slab is the one buffer the shader HAMMERS: every trial re-reads 14 floats per sample
+// out of it, tens of times per shape. Host-visible memory is across the bus, and keeping it there
+// made the device pass 2.3x SLOWER than the CPU it was replacing — the arithmetic was never the
+// cost, the bus was. Nothing on the host ever touches it, so it belongs in VRAM.
+bool refScratch(Buf& b, size_t bytes) {
+    if (bytes < 4) bytes = 4;
+    if (b.buf != VK_NULL_HANDLE && b.size >= bytes) return true;
+    destroyBuf(b);
+    return createBufEx(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, false, b);
+}
+
+// fp_refine runs one ROUND of the local geometry refine for njobs shapes and returns how many
+// moved. ip = [n, njobs, W, H, tw, th, tile, ctxCap, sweeps, unweighted, tileIdxLen];
+// fp = [minGain, intrudeMax, cleanDev, shrink, minStepFrac]. Returns -1 when the device cannot run
+// it at all, so the caller keeps its host path rather than silently doing nothing.
+API int fp_refine(const int* ip, const float* fp,
+                  const float* shapeP, const float* shapeCol, const int* shapeKind, const int* shapeBox,
+                  const int* tileOff, const int* tileIdx,
+                  const int* jobShape, const int* jobWin, const float* jobAxes, const int* jobNAx,
+                  float* outP, float* outGain) {
+    g_profScope = PROF_SEARCH;
+    if (!g_device || g_fatal) return -1;
+    int n = ip[0], njobs = ip[1], W = ip[2], H = ip[3], tw = ip[4], th = ip[5];
+    int tile = ip[6], ctxCap = ip[7], sweeps = ip[8], unweighted = ip[9], tiLen = ip[10];
+    if (n < 1 || njobs < 1 || ctxCap < 1) return -1;
+    if (!buildRefine()) { g_lastError = 2020; return -1; }
+
+    // The context slab is the whole cost of this pass: njobs * ctxCap * 14 floats. A 3000-shape
+    // round at the 4096 sample cap would be 688MB, which is not a thing to ask of a 4GB card — so
+    // the CALLER chunks njobs and this only has to refuse an impossible single chunk.
+    size_t ctxBytes = (size_t)njobs * (size_t)ctxCap * 14 * sizeof(float);
+    if (!refUp(g_refSP, shapeP, (size_t)n * 6 * sizeof(float)) ||
+        !refUp(g_refSC, shapeCol, (size_t)n * 4 * sizeof(float)) ||
+        !refUp(g_refSK, shapeKind, (size_t)n * sizeof(int32_t)) ||
+        !refUp(g_refSB, shapeBox, (size_t)n * 4 * sizeof(int32_t)) ||
+        !refUp(g_refTO, tileOff, (size_t)(tw * th + 1) * sizeof(int32_t)) ||
+        !refUp(g_refTI, tileIdx, (size_t)(tiLen > 0 ? tiLen : 1) * sizeof(int32_t)) ||
+        !refUp(g_refJS, jobShape, (size_t)njobs * sizeof(int32_t)) ||
+        !refUp(g_refJW, jobWin, (size_t)njobs * 6 * sizeof(int32_t)) ||
+        !refUp(g_refJA, jobAxes, (size_t)njobs * 6 * 4 * sizeof(float)) ||
+        !refUp(g_refJN, jobNAx, (size_t)njobs * sizeof(int32_t)) ||
+        !refScratch(g_refCTX, ctxBytes) ||
+        !refUp(g_refOP, nullptr, (size_t)njobs * 6 * sizeof(float)) ||
+        !refUp(g_refOG, nullptr, (size_t)njobs * sizeof(float))) {
+        g_lastError = 2021;
+        refineTeardown(); // a half-grown set of buffers is worse than none
+        return -1;
+    }
+    // outP defaults to the shape's current geometry so a job that does not move still reads back
+    // something meaningful.
+    {
+        float* dst = (float*)g_refOP.map;
+        for (int j = 0; j < njobs; j++)
+            for (int k = 0; k < 6; k++) dst[j * 6 + k] = shapeP[jobShape[j] * 6 + k];
+        memset(g_refOG.map, 0, (size_t)njobs * sizeof(float));
+    }
+
+    VkBuffer bufs[17] = { g_target.buf, g_weight.buf, g_refSP.buf, g_refSC.buf, g_refSK.buf,
+                          g_refSB.buf, g_refTO.buf, g_refTI.buf, g_refJS.buf, g_refJW.buf,
+                          g_refJA.buf, g_refJN.buf, g_refCTX.buf, g_refOP.buf, g_refOG.buf,
+                          g_maskAtlas.buf, g_maskMeta.buf };
+    VkDeviceSize szs[17] = { g_target.size, g_weight.size, g_refSP.size, g_refSC.size, g_refSK.size,
+                             g_refSB.size, g_refTO.size, g_refTI.size, g_refJS.size, g_refJW.size,
+                             g_refJA.size, g_refJN.size, g_refCTX.size, g_refOP.size, g_refOG.size,
+                             g_maskAtlas.size, g_maskMeta.size };
+    VkWriteDescriptorSet w[17]; VkDescriptorBufferInfo bi[17];
+    for (uint32_t i = 0; i < 17; i++) {
+        if (bufs[i] == VK_NULL_HANDLE) { g_lastError = 2022; return -1; }
+        bi[i] = {bufs[i], 0, szs[i]};
+        w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[i].dstSet = g_refSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(g_device, 17, w, 0, nullptr);
+
+    RefPC pc{ W, H, tw, tile, ctxCap, sweeps, unweighted, 0, fp[0], fp[1], fp[2], fp[3], fp[4] };
+    // Same TDR chunking as everywhere else: one workgroup per shape, and a shape's whole descent is
+    // a long serial chain of trials, so a big round is exactly the shape of submit that trips the
+    // watchdog on a weak card.
+    int chunk = polishChunk(PCH_REDUCE, njobs);
+    for (int f = 0; f < njobs && !g_fatal; f += chunk) {
+        int cnt = njobs - f < chunk ? njobs - f : chunk;
+        beginCmd();
+        vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_refPipe);
+        vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_refPL, 0, 1, &g_refSet, 0, nullptr);
+        pc.firstJob = f; // gl_WorkGroupID.x is chunk-relative; the shader adds this back
+        vkCmdPushConstants(g_cmd, g_refPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(g_cmd, (uint32_t)cnt, 1, 1);
+        endSubmit();
+    }
+    if (g_fatal) return -1;
+
+    memcpy(outP, g_refOP.map, (size_t)njobs * 6 * sizeof(float));
+    memcpy(outGain, g_refOG.map, (size_t)njobs * sizeof(float));
+    int moved = 0;
+    for (int j = 0; j < njobs; j++) if (outGain[j] > 0) moved++;
+    g_refReady = 1;
+    return moved;
 }
 
 API void fp_set_sample_budget(int n) { g_sampleBudget = (n < 1) ? 4000 : n; }

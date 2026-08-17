@@ -1,0 +1,281 @@
+#version 450
+// float32 UNCONDITIONALLY, unlike the polish shaders that carry an fp64/fp32 pair. This pass has
+// no fp64 variant to fall back to and needs none: the host summed the window serially in float64,
+// which is where the precision mattered, and a per-lane partial through a tree reduction is
+// already better conditioned than that serial sum. Staying fp32 also means the pass runs on a card
+// without shaderFloat64, which is the point of moving it here.
+#define REAL float
+#define RVEC3 vec3
+#extension GL_GOOGLE_include_directive : require
+// refine.comp — the whole local geometry refine for ONE shape per workgroup.
+//
+// This is the port of engine/skewrefine.go's localRefine. On the host it was the single largest
+// block of a run: 50% of the CPU samples and 16% of the wall, already goroutine-parallel, so more
+// cores bought nothing — the work had to move.
+//
+// Why a workgroup per shape and not a thread per shape. The pass caches, per shape, a WINDOW
+// CONTEXT: for every sampled pixel, the colour below the shape and the affine (T, C) of everything
+// above it, gathered once by walking the stack and then reused by every trial. That cache is what
+// makes the ~60 trials per shape affordable, and it is far too big to give one per thread. So the
+// shape owns a workgroup: the lanes build the context together, then every trial is a workgroup
+// reduction over it.
+//
+// Uniformity. Every lane runs the ENTIRE descent and keeps its own identical copy of the state, so
+// each decision is computed the same way on every lane and all control flow is workgroup-uniform —
+// which is what makes the barriers inside evalTrial legal. Nothing is broadcast through shared
+// memory except the reduction result. The one place this costs work is the second probe of a
+// direction pair: the host stops at the first direction that pays, and here the other one is
+// evaluated and discarded, because a lane that skipped it would miss a barrier.
+//
+// NOT bit-identical to the host pass, and cannot be: the host sums the window serially in float64
+// and this sums per-lane partials through a tree. Different order, slightly different sums, so a
+// marginal accept can flip. That is sound because every accept is still gated on LOWERING this
+// shape's exact local error — the pass can only choose a different subset of improvements, never
+// make the picture worse. It is measured end to end like any other quality change.
+
+// 64 lanes, not 256. A shape's window is a few hundred samples after striding, so a wider group
+// leaves most lanes with one sample each and pays a deeper barrier tree for it — the reduction, not
+// the arithmetic, was the cost. The host keeps the shapes too small to fill even this.
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0)  readonly  buffer Tgt   { float target[]; };
+layout(std430, binding = 1)  readonly  buffer Wgt   { float weightb[]; };
+layout(std430, binding = 2)  readonly  buffer SP    { float shapeP[]; };    // n*6
+layout(std430, binding = 3)  readonly  buffer SC    { float shapeCol[]; };  // n*4 rgba, straight
+layout(std430, binding = 4)  readonly  buffer SK    { int   shapeKind[]; }; // n
+layout(std430, binding = 5)  readonly  buffer SB    { int   shapeBox[]; };  // n*4 clamped bbox
+layout(std430, binding = 6)  readonly  buffer TO    { int   tileOff[]; };   // tw*th+1, CSR
+layout(std430, binding = 7)  readonly  buffer TI    { int   tileIdx[]; };
+layout(std430, binding = 8)  readonly  buffer JS    { int   jobShape[]; };  // job -> shape
+layout(std430, binding = 9)  readonly  buffer JW    { int   jobWin[]; };    // job*6: x0,y0,x1,y1,step,need
+layout(std430, binding = 10) readonly  buffer JA    { float jobAxes[]; };   // job*MAXAX*4: slot,step,lo,hi
+layout(std430, binding = 11) readonly  buffer JN    { int   jobNAx[]; };    // job
+layout(std430, binding = 12)           buffer CTX   { float ctx[]; };       // job*ctxCap*CTXW
+layout(std430, binding = 13) writeonly buffer OP    { float outP[]; };      // job*6
+layout(std430, binding = 14)           buffer OG    { float outGain[]; };   // job (<=0 = stayed put)
+layout(std430, binding = 15) readonly  buffer MA    { float maskAtlas[]; };
+layout(std430, binding = 16) readonly  buffer MM    { int   maskMeta[]; };
+#include "mask_common.glsl"
+#include "polish_common.glsl"
+
+layout(push_constant) uniform PC {
+    int W, H, tw, tile, ctxCap, sweeps, unweighted, firstJob;
+    float minGain, intrudeMax, cleanDev, shrink, minStepFrac;
+} pc;
+
+const int CTXW  = 14; // below(3) C(3) T(1) tgt(3) wt(1) eZero(1) dev(1) cov(1)
+const int MAXAX = 6;
+// Safety ceilings. The pattern search terminates on its own — a direction stops paying, and the
+// step shrinks below its floor — but a shader that trusts that has no way back if a NaN gets into
+// the comparison, so both loops carry a hard cap.
+const int MAXDOUBLE = 24;
+const int MAXSTEPS  = 64;
+const float INF = 3.4028235e38;
+
+shared float shE[64];
+shared float shI[64];
+shared float shOut[2];
+
+// hardCov mirrors raster.Coverage: the baked radial falloff for the gradient kinds and a mask
+// sample for a bank word, a binary fill for everything else.
+float hardCov(int kind, float P[6], int x, int y) {
+    if (isGradKind(kind)) return gradCovAny(kind, P, x, y);
+    return insideShape(kind, P, x, y) ? 1.0 : 0.0;
+}
+
+// trialBox mirrors raster.BBox for the box-framed kinds this pass refines on device (the host
+// keeps triangles, lines and bank words). Outside it the coverage is exactly zero, which is what
+// lets a trial charge the precomputed eZero for those samples instead of evaluating them.
+ivec4 trialBox(int kind, float P[6]) {
+    float cx = P[0], cy = P[1];
+    float th = P[4] * 0.017453292519943295, c = cos(th), s = sin(th);
+    float ex, ey;
+    if (kind == 1) {
+        float hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+        float shx = hw + abs(P[5]) * hh;
+        ex = abs(shx * c) + abs(hh * s); ey = abs(shx * s) + abs(hh * c);
+    } else {
+        float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+        if (P[5] != 0.0) {
+            float shx = sqrt(rx * rx + P[5] * P[5] * ry * ry);
+            ex = abs(shx * c) + abs(ry * s); ey = abs(shx * s) + abs(ry * c);
+        } else {
+            ex = sqrt(rx * rx * c * c + ry * ry * s * s);
+            ey = sqrt(rx * rx * s * s + ry * ry * c * c);
+        }
+    }
+    return ivec4(clamp(int(floor(cx - ex - 1.0)), 0, pc.W - 1),
+                 clamp(int(floor(cy - ey - 1.0)), 0, pc.H - 1),
+                 clamp(int(ceil(cx + ex + 1.0)), 0, pc.W - 1),
+                 clamp(int(ceil(cy + ey + 1.0)), 0, pc.H - 1));
+}
+
+// evalTrial scores P over the whole window and leaves {error, intruded area} in shOut.
+// COLLECTIVE — every lane must reach it, and the parameters must be identical on every lane.
+// setDev fills the clean-ground reference instead of testing against it, which is what the host's
+// first full-window pass does.
+void evalTrial(float P[6], int job, int need, int nx, int x0, int y0, int step,
+               int kind, vec4 col, bool setDev) {
+    uint lid = gl_LocalInvocationID.x;
+    ivec4 bb = trialBox(kind, P);
+    float area = float(step * step); // one strided sample stands for this many pixels
+    float e = 0.0, intr = 0.0;
+    int base = job * pc.ctxCap * CTXW;
+    for (int s = int(lid); s < need; s += 64) {
+        int cb = base + s * CTXW;
+        int yy = s / nx, xx = s - yy * nx;
+        int x = x0 + xx * step, y = y0 + yy * step;
+        if (x < bb.x || x > bb.z || y < bb.y || y > bb.w) {
+            e += ctx[cb + 11]; // eZero: what the full expression yields at coverage 0
+            continue;
+        }
+        float c = hardCov(kind, P, x, y);
+        float a = c * col.a;
+        float inv = 1.0 - a;
+        float xr = ctx[cb + 0] * inv + col.r * a;
+        float xg = ctx[cb + 1] * inv + col.g * a;
+        float xb = ctx[cb + 2] * inv + col.b * a;
+        float tt = ctx[cb + 6];
+        float dr = tt * xr + ctx[cb + 3] - ctx[cb + 7];
+        float dg = tt * xg + ctx[cb + 4] - ctx[cb + 8];
+        float db = tt * xb + ctx[cb + 5] - ctx[cb + 9];
+        e += ctx[cb + 10] * (dr * dr + dg * dg + db * db);
+        if (setDev) {
+            ctx[cb + 12] = max(abs(dr), max(abs(dg), abs(db)));
+            ctx[cb + 13] = c;
+        } else if (c > ctx[cb + 13] + 0.02 && ctx[cb + 12] < pc.cleanDev) {
+            // New paint on ground the picture ALREADY gets right. The sum alone would trade a
+            // visible blemish for a diffuse gain elsewhere; this is the veto that stops it.
+            intr += area;
+        }
+    }
+    shE[lid] = e;
+    shI[lid] = intr;
+    barrier();
+    for (uint k = 32u; k > 0u; k >>= 1) {
+        if (lid < k) { shE[lid] += shE[lid + k]; shI[lid] += shI[lid + k]; }
+        barrier();
+    }
+    if (lid == 0u) { shOut[0] = shE[0]; shOut[1] = shI[0]; }
+    barrier();
+}
+
+void main() {
+    // firstJob: the round is dispatched in chunks so no single submit approaches the TDR watchdog,
+    // and gl_WorkGroupID.x is chunk-relative.
+    int job = int(gl_WorkGroupID.x) + pc.firstJob;
+    int si = jobShape[job];
+    int x0 = jobWin[job * 6 + 0], y0 = jobWin[job * 6 + 1];
+    int x1 = jobWin[job * 6 + 2];
+    int step = jobWin[job * 6 + 4], need = jobWin[job * 6 + 5];
+    int nx = (x1 - x0) / step + 1;
+    int kind = shapeKind[si];
+    vec4 col = vec4(shapeCol[si * 4], shapeCol[si * 4 + 1], shapeCol[si * 4 + 2], shapeCol[si * 4 + 3]);
+    int nax = jobNAx[job];
+    if (gl_LocalInvocationID.x == 0u) outGain[job] = 0.0;
+
+    // ---- phase 1: the window context, one walk of the stack per sample ----
+    int cbase0 = job * pc.ctxCap * CTXW;
+    for (int s = int(gl_LocalInvocationID.x); s < need; s += 64) {
+        int yy = s / nx, xx = s - yy * nx;
+        int x = x0 + xx * step, y = y0 + yy * step;
+        int idx = y * pc.W + x, q = idx * 4;
+        float tr = target[q], tg = target[q + 1], tb = target[q + 2];
+        float wt = pc.unweighted != 0 ? 1.0 : weightb[idx];
+        float br = 0.0, bg = 0.0, bbv = 0.0, cr = 0.0, cg = 0.0, cbv = 0.0, tt = 1.0;
+        // The tile list is in ascending shape order and alpha-over is order-dependent, so this walk
+        // has to stay serial per pixel — which it is: one lane owns the whole sample.
+        int cell = (y / pc.tile) * pc.tw + x / pc.tile;
+        for (int k = tileOff[cell]; k < tileOff[cell + 1]; k++) {
+            int jj = tileIdx[k];
+            if (jj == si) continue;
+            if (x < shapeBox[jj * 4] || x > shapeBox[jj * 4 + 2] ||
+                y < shapeBox[jj * 4 + 1] || y > shapeBox[jj * 4 + 3]) continue;
+            float Q[6];
+            for (int m = 0; m < 6; m++) Q[m] = shapeP[jj * 6 + m];
+            float a = hardCov(shapeKind[jj], Q, x, y) * shapeCol[jj * 4 + 3];
+            if (a <= 0.0) continue;
+            float inv = 1.0 - a;
+            float qr = shapeCol[jj * 4], qg = shapeCol[jj * 4 + 1], qb = shapeCol[jj * 4 + 2];
+            if (jj < si) {
+                br = br * inv + qr * a; bg = bg * inv + qg * a; bbv = bbv * inv + qb * a;
+            } else {
+                cr = cr * inv + qr * a; cg = cg * inv + qg * a; cbv = cbv * inv + qb * a;
+                tt *= inv;
+            }
+        }
+        int cb = cbase0 + s * CTXW;
+        ctx[cb + 0] = br;  ctx[cb + 1] = bg;  ctx[cb + 2] = bbv;
+        ctx[cb + 3] = cr;  ctx[cb + 4] = cg;  ctx[cb + 5] = cbv;
+        ctx[cb + 6] = tt;
+        ctx[cb + 7] = tr;  ctx[cb + 8] = tg;  ctx[cb + 9] = tb;
+        ctx[cb + 10] = wt;
+        float dr = tt * br + cr - tr, dg = tt * bg + cg - tg, db = tt * bbv + cbv - tb;
+        ctx[cb + 11] = wt * (dr * dr + dg * dg + db * db);
+        ctx[cb + 12] = 0.0;
+        ctx[cb + 13] = 0.0;
+    }
+    barrier();
+
+    // ---- phase 2: the base score over the full window, filling the clean-ground reference ----
+    float cur[6];
+    for (int k = 0; k < 6; k++) cur[k] = shapeP[si * 6 + k];
+    evalTrial(cur, job, need, nx, x0, y0, step, kind, col, true);
+    float base = shOut[0];
+    if (!(base > 0.0)) return;
+    float best = base;
+    bool moved = false;
+
+    // ---- phase 3: sweeps over the axes, each axis a pattern search ----
+    for (int sweep = 0; sweep < pc.sweeps; sweep++) {
+        bool improvedAny = false;
+        for (int ai = 0; ai < nax; ai++) {
+            int abase = (job * MAXAX + ai) * 4;
+            int slot = int(jobAxes[abase] + 0.5);
+            float stepUnit = jobAxes[abase + 1];
+            float lo = jobAxes[abase + 2], hi = jobAxes[abase + 3];
+            if (stepUnit <= 0.0) continue;
+            float minStep = pc.minStepFrac * stepUnit;
+            float start = cur[slot];
+            float stp = stepUnit;
+            // The doubling walk below MUTATES stp, and the host's outer loop then shrinks the
+            // mutated value — the schedule is data-dependent, not a fixed ladder. It stays
+            // workgroup-uniform because every lane computes the same decisions from the same
+            // numbers, which is all the barriers require.
+            for (int it = 0; it < MAXSTEPS && stp >= minStep; it++, stp *= pc.shrink) {
+                float dir = 0.0;
+                for (int d = 0; d < 2; d++) {
+                    float dd = d == 0 ? 1.0 : -1.0;
+                    float v = cur[slot] + dd * stp;
+                    bool okv = v >= lo && v <= hi && dir == 0.0;
+                    float trial[6];
+                    for (int k = 0; k < 6; k++) trial[k] = cur[k];
+                    trial[slot] = v;
+                    evalTrial(trial, job, need, nx, x0, y0, step, kind, col, false);
+                    float e = shOut[1] > pc.intrudeMax ? INF : shOut[0];
+                    if (okv && e < best) { best = e; cur[slot] = v; dir = dd; }
+                }
+                for (int dbl = 0; dbl < MAXDOUBLE && dir != 0.0; dbl++) {
+                    float s2 = stp * 2.0;
+                    float v = cur[slot] + dir * s2;
+                    bool okv = v >= lo && v <= hi;
+                    float trial[6];
+                    for (int k = 0; k < 6; k++) trial[k] = cur[k];
+                    trial[slot] = v;
+                    evalTrial(trial, job, need, nx, x0, y0, step, kind, col, false);
+                    float e = shOut[1] > pc.intrudeMax ? INF : shOut[0];
+                    if (!okv || e >= best) { dir = 0.0; }
+                    else { best = e; cur[slot] = v; stp = s2; }
+                }
+            }
+            if (cur[slot] != start) { improvedAny = true; moved = true; }
+        }
+        if (!improvedAny) break;
+    }
+
+    // ---- accept ----
+    if (gl_LocalInvocationID.x == 0u && moved && base - best >= pc.minGain * base) {
+        for (int k = 0; k < 6; k++) outP[job * 6 + k] = cur[k];
+        outGain[job] = base - best;
+    }
+}

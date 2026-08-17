@@ -276,7 +276,13 @@ func newRun(be backend.Backend, opt Options) *run {
 
 	// Semi-transparent shapes: alpha ~U(alphaMin,1). Forced opaque for cutouts
 	// (the reconstructed object must stay alpha=1 so the cutout silhouette is solid).
-	allowAlpha := opt.AllowAlpha && !opt.TransparentBG
+	// PaddedOpaque is NOT a real cutout — it is the keep-inside margin the client adds to every
+	// run, and the source under it was opaque. Without the exception the generator treated every
+	// default client run as a cutout (opaque candidates, opaque prune, colour re-solve) while
+	// applyPolish's alpha floor (engine.go:332) already excepted it and handed the descent a 0.30
+	// floor: the same run was opaque for generation and organic for polish. FH6_PADALPHA=0 pins
+	// the old, inconsistent behaviour.
+	allowAlpha := opt.AllowAlpha && (!opt.TransparentBG || (opt.PaddedOpaque && paddedAlphaFix))
 	alphaMin := resolveAlphaMin(opt.AlphaMin)
 
 	// Early-stop budget: how many consecutive non-improving shapes before we give
