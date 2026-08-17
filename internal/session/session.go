@@ -117,7 +117,17 @@ func Prepare(req Request) (*Run, error) {
 	// Always pad when asked, never gated on how transparent the image is: content can touch an edge
 	// even when the middle is transparent, and a cutout silhouette touches its bbox by construction
 	// after the auto-crop. Quality-neutral, because the empty margin draws no shapes.
-	if req.KeepInside {
+	//
+	// Except in pixel mode, where it is not neutral at all — it BREAKS the mode. Pixel art bypasses
+	// the engine for an exact rectangle decomposition, and that starts by recovering the sprite's
+	// logical pixel size as the GCD of every colour-change boundary. The surround introduces two
+	// boundaries of its own, at the margin, and gcd(step, pad) is 1 for almost any pad — so the step
+	// collapses to 1, the decomposition explodes to one rectangle per screen pixel, and the run dies
+	// with "pixel art needs N rectangles … simplify the art", blaming the user for a margin the app
+	// added. Keep-inside is the client's DEFAULT, so picking Pixel art there failed outright.
+	// Nothing is lost by skipping it: an exact decomposition cannot spill outside the content in the
+	// first place, which is the only thing the surround is for.
+	if req.KeepInside && preset.PresetMode(req.Choices.Mode) != "pixel" {
 		padded, padPx := imageio.PadTransparent(&run.Prep, PadFrac)
 		run.Prep, run.PadPx = *padded, padPx
 		run.Notes = append(run.Notes, fmt.Sprintf("keep-inside: transparent surround %dpx (%dx%d), bounding shapes on all edges", padPx, run.Prep.W, run.Prep.H))
@@ -191,7 +201,21 @@ func (r *Run) finish(e runner.Done, onEvent func(runner.Event)) runner.Done {
 	shapes, canvas := e.Result.Shapes, e.Canvas
 
 	if r.Ink > 0 {
-		if lines := hybrid.Ink(&r.Prep, r.Ink, false); len(lines) > 0 {
+		// On the CONTENT rectangle, never on the padded canvas. The keep-inside surround is
+		// transparent black and the ink engine's luma ignores alpha, so the margin presents a
+		// maximum-contrast step exactly on the content border — and the FDoG answers it with a frame
+		// around the whole decal, spending a chunk of the ink budget on an outline nobody drew.
+		// Measured on a synthetic mid-grey field with one blob: 8 of 20 lines land on the margin ring
+		// with the surround, 0 without it. The lines come back in view coordinates and are shifted
+		// into the padded frame so everything below — the score, then the unpad — is unchanged.
+		src := &r.Prep
+		if r.PadPx > 0 {
+			src = imageio.UnpadPrepared(&r.Prep, r.PadPx, r.ViewW, r.ViewH)
+		}
+		if lines := hybrid.Ink(src, r.Ink, false); len(lines) > 0 {
+			if r.PadPx > 0 {
+				lines = imageio.TranslateShapes(lines, float64(r.PadPx), float64(r.PadPx))
+			}
 			shapes = append(shapes, lines...)
 			canvas = imageio.RenderFH6Image(shapes, r.Prep.HasTransparency, r.Prep.W, r.Prep.H, 2)
 			onEvent(runner.Log{Line: fmt.Sprintf("hybrid: +%d FDoG lines on top of the fill", len(lines))})

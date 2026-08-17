@@ -925,18 +925,34 @@ func (r *run) refine() {
 // Only the OVER case is corrected here. Coming in under budget is also real — anime measured 987 of
 // 1000 — but topping that back up means placing shapes the passes decided were not worth having, which
 // is a quality change and has to be measured, not slipped in behind a bug fix.
+// stackHasAlpha reports whether any placed shape is semi-transparent. The background (index 0) is
+// excluded: a cutout's background is alpha 0 by construction and says nothing about the shapes.
+func stackHasAlpha(shapes []model.Shape) bool {
+	for i := 1; i < len(shapes); i++ {
+		if c := shapes[i].Color; len(c) >= 4 && c[3] < 255 {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *run) clampToBudget() {
 	if r.opt.StopAt < 1 || len(r.shapes) <= r.opt.StopAt+1 {
 		return
 	}
 	over := len(r.shapes) - (r.opt.StopAt + 1)
-	// The rank has to match the stack. postProcess already refuses pruneToBudget on an alpha run for
-	// a stated reason — its opaque replace-ownership model gives a semi-transparent shape contrib 0,
-	// so it drops exactly the shapes an organic preset is made of — and this clamp was calling it
-	// anyway. With alphaMin 0.30 on anime/photo that is most of the stack, so the one or two shapes
-	// this trims were being picked at random rather than by what they are worth. The alpha-aware
-	// top-2-owner rank is the same measure the blend path already uses.
-	if r.allowAlpha {
+	// The rank has to match the stack. pruneToBudget's opaque replace-ownership model gives a
+	// semi-transparent shape contribution 0, so on a translucent stack it ranks nothing and the
+	// shapes it drops are whatever the sort happened to order first.
+	//
+	// The test is the STACK ITSELF, not a flag. Keyed on r.allowAlpha this was false exactly where
+	// it needed to be true: keep-inside pads, PadTransparent sets HasTransparency, so TransparentBG
+	// is set and run.go's allowAlpha resolves to false — while applyPolish deliberately EXCEPTS
+	// PaddedOpaque and hands the descent a 0.30 alpha floor, so the stack it produced is translucent.
+	// engine.go's recolor gate carries the same warning about the same two flags; keying on the
+	// flag here would have repeated the bug it describes, on the client's default path. Asking the
+	// shapes cannot drift from what the passes actually did to them.
+	if stackHasAlpha(r.shapes) {
 		r.shapes = PruneToBudgetBlend(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt+1,
 			r.opt.Background, r.opt.TransparentBG)
 	} else {

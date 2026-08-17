@@ -121,6 +121,27 @@ func PadTransparent(prep *Prepared, padFrac float64) (*Prepared, int) {
 	return &Prepared{W: nw, H: nh, Pixels: px, Background: prep.Background, HasTransparency: true, PaddedOpaque: !prep.HasTransparency}, pad
 }
 
+// UnpadPrepared is the inverse of PadTransparent on the PIXELS: it returns the w×h content rectangle
+// sitting pad px inside prep, as a fresh Prepared carrying the pre-pad transparency flags. A no-op
+// when pad<=0 or the rectangle does not fit.
+//
+// It exists because a padded source is the right thing to FIT and the wrong thing to ANALYSE. The
+// surround is transparent black, and every analysis in this project reads colour without alpha — so
+// to a luma extractor the margin is a maximum-contrast step exactly on the content rectangle, and it
+// answers with a frame around the whole picture.
+func UnpadPrepared(prep *Prepared, pad, w, h int) *Prepared {
+	if prep == nil || pad <= 0 || w <= 0 || h <= 0 || w+2*pad > prep.W || h+2*pad > prep.H {
+		return prep
+	}
+	px := make([]float32, w*h*4)
+	for y := 0; y < h; y++ {
+		src := ((y+pad)*prep.W + pad) * 4
+		copy(px[y*w*4:(y+1)*w*4], prep.Pixels[src:src+w*4])
+	}
+	return &Prepared{W: w, H: h, Pixels: px, Background: prep.Background,
+		HasTransparency: !prep.PaddedOpaque, PaddedOpaque: false}
+}
+
 // TranslateShapes shifts every shape's position by (dx,dy) canvas pixels, in place, returning the
 // slice. Used to map a padded reconstruction's geometry back into the original (un-padded) canvas after
 // a transparent-surround run, so preview/export/inject coordinates land in the original image space.

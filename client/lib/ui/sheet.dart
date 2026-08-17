@@ -736,6 +736,15 @@ class _IntFieldState extends State<_IntField> {
   final _focus = FocusNode();
   late final VoidCallback _focusListener;
 
+  /// The text as the MODEL last put it there. _commit compares against this so a focus pass with
+  /// no edit commits nothing: the field commits on blur, and several knobs legitimately display a
+  /// value outside [min,max] — a sentinel 0 meaning "the engine decides". Clicking into such a
+  /// field and clicking away used to clamp the sentinel and store the clamp as a real override,
+  /// silently and permanently: `0.clamp(1, 5000000)` writes Random = 1, and every later run in
+  /// every mode then searches ONE candidate per shape. Nothing on screen says so and it survives a
+  /// restart.
+  late String _asShown = widget.value?.toString() ?? '';
+
   @override
   void initState() {
     super.initState();
@@ -753,6 +762,7 @@ class _IntFieldState extends State<_IntField> {
     if (!_focus.hasFocus) {
       final text = widget.value?.toString() ?? '';
       if (_ctl.text != text) _ctl.text = text;
+      _asShown = text;
     }
   }
 
@@ -771,13 +781,16 @@ class _IntFieldState extends State<_IntField> {
   }
 
   void _commit() {
+    if (_ctl.text.trim() == _asShown.trim()) return; // see _asShown: no edit, no override
     final v = int.tryParse(_ctl.text.trim());
     if (v == null) {
       _ctl.text = widget.value?.toString() ?? '';
+      _asShown = _ctl.text;
       return;
     }
     final clamped = v.clamp(widget.min, widget.max);
     _ctl.text = clamped.toString();
+    _asShown = _ctl.text;
     if (clamped != widget.value) widget.onChanged(clamped);
   }
 

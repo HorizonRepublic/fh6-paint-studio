@@ -18,7 +18,19 @@ class Prefs {
   final File _file;
   final Map<String, dynamic> _values;
 
-  static Future<Prefs> load() async {
+  /// The ONE instance, shared by every caller.
+  ///
+  /// It used to open a fresh object per call, and there are two callers: main.dart owns `lang`,
+  /// Studio owns the budget, the mode, the expert overrides and the inject settings. Each held its
+  /// own snapshot of the map and each write serialises the WHOLE map, so whichever wrote last
+  /// reverted every key the other had set since launch — pick a language after changing the budget
+  /// and the budget came back on the next start, and the other way round for the language. A
+  /// preference file has one writer or it has none.
+  static Future<Prefs>? _shared;
+
+  static Future<Prefs> load() => _shared ??= _open();
+
+  static Future<Prefs> _open() async {
     final file = File(_path());
     var values = <String, dynamic>{};
     try {

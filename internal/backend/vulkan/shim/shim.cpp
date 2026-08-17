@@ -2084,6 +2084,13 @@ API int fp_masks_on() { return g_masksOn; }
 API void fp_eval(const float* cands, int n, float* out) {
     g_profScope = PROF_EVAL;
     if (n <= 0 || !g_device) return;
+    // g_fatal was the one hole in this family. evalChunked's loop is `f < n && !g_fatal`, so with
+    // the flag already set it runs ZERO iterations — submitWait is never entered, g_lastError is
+    // never re-armed to 1052 — and the memcpy at the bottom then hands back the LAST LIVE BATCH's
+    // scores. Vulkan.Evaluate decides success on fp_last_error alone, so the engine scored a fresh
+    // candidate pool against results belonging to a different one, and picked winners from it,
+    // until the next DeviceLost poll. Every sibling entry point bails; this one did not.
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; return; }
     if (n > g_maxCands) n = g_maxCands;
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the guaranteed dispatch limit (Intel iGPUs enforce exactly 65535)
     memcpy(g_cands.map, cands, (size_t)n * 11 * sizeof(float));
@@ -2141,7 +2148,11 @@ API void fp_apply(const float* cand) {
 // →compute barrier between shapes carries the same RAW dependency the old per-call fence did.
 API void fp_apply_batch(const float* cands, int n) {
     g_profScope = PROF_APPLY;
-    if (!g_device || g_fatal || n < 1) return;
+    // Arm the error on the dead-device return, like submitWait does. Silent, the canvas keeps the
+    // PREVIOUS stack and the caller — which reports success unconditionally — scores that stale
+    // canvas as the one it just rebuilt.
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; return; }
+    if (!g_device || n < 1) return;
     const int CHUNK = 512; // TDR guard: bbox-sized dispatches are tiny, but never risk one giant submit
     for (int done = 0; done < n && !g_fatal; done += CHUNK) {
         int m = n - done; if (m > CHUNK) m = CHUNK;
@@ -2691,7 +2702,11 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6];
     // g_fatal: after a device loss g_best still holds the LAST GOOD argmin result — returning it
     // would hand the greedy a plausible stale winner it then places over and over. FLT_MAX = fail.
-    if (!g_device || g_fatal || n < 1 || nKinds < 1) { out_best[0] = 3.4028235e38f; return; }
+    // FLT_MAX alone reads as "no improving candidate", which is a legitimate answer — so the error
+    // has to be armed too, or the engine retires the device search and grinds the host generator
+    // against a GPU that is gone. Same lesson as fp_search_mutate.
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; out_best[0] = 3.4028235e38f; return; }
+    if (!g_device || n < 1 || nKinds < 1) { out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
     g_survN = 0; // a failed or non-coarse search must not leave the previous pool readable
     if (!ensureSearch(n)) { out_best[0] = 3.4028235e38f; return; }
@@ -2783,7 +2798,8 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     int n = ip[0], nKinds = ip[1], gw = ip[2], gh = ip[3];
     int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6], K = ip[7];
     float maxR = fp[0], alphaMin = fp[1], boundPad = fp[3], boundMix = fp[4], canvasPad = fp[5];
-    if (!g_device || g_fatal || n < 1 || nKinds < 1 || K < 1) { out_best[0] = 3.4028235e38f; return; }
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; out_best[0] = 3.4028235e38f; return; } // see fp_search_random
+    if (!g_device || n < 1 || nKinds < 1 || K < 1) { out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535;
     // K > n (reachable through the expert panel's near-unclamped seed counter) makes nGen == K
     // exceed n; the buffers must be sized for what the DISPATCHES write, not the requested n —
@@ -2975,7 +2991,12 @@ Buf g_refSP, g_refSC, g_refSK, g_refSB, g_refTO, g_refTI, g_refJS, g_refJW, g_re
 int g_refReady = 0;
 
 bool buildRefine() {
-    if (g_refPipe) return true;
+    // Guard on the LAST thing built, not the first. g_refPipe is set before the pool and the
+    // descriptor set; a failure at either left it non-null with g_refSet still null, and fp_refine
+    // is called once per chunk — so the second chunk took this early-out and reached
+    // vkUpdateDescriptorSets with dstSet = VK_NULL_HANDLE. (The null check inside fp_refine covers
+    // the BUFFERS, never the set.)
+    if (g_refSet) return true;
     VkDescriptorSetLayoutBinding bs[17];
     for (uint32_t i = 0; i < 17; i++) {
         bs[i] = {}; bs[i].binding = i; bs[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -3053,7 +3074,11 @@ API int fp_refine(const int* ip, const float* fp,
                   const int* jobShape, const int* jobWin, const float* jobAxes, const int* jobNAx,
                   float* outP, float* outGain) {
     g_profScope = PROF_SEARCH;
-    if (!g_device || g_fatal) return -1;
+    // -1 means "the device cannot run this", which the caller reads as a missing export and answers
+    // by retiring the device path for the whole run. Arm the error so a dead GPU is distinguishable
+    // from an old DLL.
+    if (g_fatal) { if (!g_lastError) g_lastError = 1052; return -1; }
+    if (!g_device) return -1;
     int n = ip[0], njobs = ip[1], W = ip[2], H = ip[3], tw = ip[4], th = ip[5];
     int tile = ip[6], ctxCap = ip[7], sweeps = ip[8], unweighted = ip[9], tiLen = ip[10];
     if (n < 1 || njobs < 1 || ctxCap < 1) return -1;

@@ -938,18 +938,28 @@ class Studio extends ChangeNotifier {
       'created': DateTime.now().toUtc().toIso8601String(),
     };
     final shapesSnapshot = (g['shapes'] as List?) ?? const [];
+    ui.Image? scaled;
     try {
-      final bytes = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-      // No dispose here: the `finally` below owns the clone. Freeing it twice trips an assert in
-      // debug and decrements the native refcount twice in release — which frees a picture the
-      // studio's own `preview` is still sharing.
+      // BOUND the upload. The preview is the fit's own canvas, and anime and flat fit at the
+      // source's native resolution up to 4096 — so a 2000px source produces a 2000x2000 preview,
+      // 16 MB raw, ~21 MB once base64'd into the JSON request. The engine refuses a JSON message
+      // over 16 MiB (ipc.Read) because at that size it can only be a desynced stream, and the read
+      // loop cannot resynchronise, so it closes the connection: the daemon EXITED on the automatic
+      // save of every large run, taking the fit with it. A library preview is opened at display
+      // size; 1400 on the long side is ~10.5 MB of base64 and leaves room for the shape list.
+      scaled = await _boundedForUpload(img, 1400);
+      final up = scaled ?? img;
+      final bytes = await up.toByteData(format: ui.ImageByteFormat.rawRgba);
+      // No dispose here: the `finally` below owns both the clone and the scaled copy. Freeing one
+      // twice trips an assert in debug and decrements the native refcount twice in release — which
+      // frees a picture the studio's own `preview` is still sharing.
       if (bytes == null) return false;
       final res = await e.librarySave(
         shapes: shapesSnapshot,
         entry: entry,
         pixels: bytes.buffer.asUint8List(),
-        pixelW: img.width,
-        pixelH: img.height,
+        pixelW: up.width,
+        pixelH: up.height,
       );
       // Point the rail at the run just written, the way opening one does — but
       // NOT for an automatic save, which must not move a selection the user has
@@ -965,7 +975,31 @@ class Studio extends ChangeNotifier {
       if (!_disposed) notifyListeners();
       return false;
     } finally {
+      scaled?.dispose();
       img.dispose(); // the clone taken above; the studio's own preview is untouched
+    }
+  }
+
+  /// A copy of [src] with its long side at most [maxSide], or null when it already fits (the
+  /// caller then keeps using [src], and owns only what it was given).
+  static Future<ui.Image?> _boundedForUpload(ui.Image src, int maxSide) async {
+    final long = src.width > src.height ? src.width : src.height;
+    if (long <= maxSide) return null;
+    final k = maxSide / long;
+    final w = (src.width * k).round().clamp(1, maxSide);
+    final h = (src.height * k).round().clamp(1, maxSide);
+    final rec = ui.PictureRecorder();
+    ui.Canvas(rec).drawImageRect(
+      src,
+      ui.Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble()),
+      ui.Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()),
+      ui.Paint()..filterQuality = ui.FilterQuality.medium,
+    );
+    final pic = rec.endRecording();
+    try {
+      return await pic.toImage(w, h);
+    } finally {
+      pic.dispose();
     }
   }
 

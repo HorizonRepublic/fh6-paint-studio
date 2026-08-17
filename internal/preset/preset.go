@@ -573,19 +573,36 @@ func PerceptualWeightExp() (expo, eps float64) {
 
 // DarkFrac measures the fraction of pixels whose LINEAR luma sits below 0.02 — the dark-dominance
 // feature DarkWeightParams keys on. pixels is the linear RGBA plane (len w*h*4).
+//
+// FULLY TRANSPARENT pixels are not counted, in either the numerator or the denominator. A pixel with
+// no alpha has no luma to be dark, and counting it as black broke the feature on the path the product
+// actually uses: the keep-inside surround is transparent black and it is 31% of a padded square
+// canvas, 38% of a padded 16:9 one. The threshold was calibrated at 0.35 on UNPADDED images ("dark
+// arts sit at 0.43-0.63, everything else <= 0.24"), and the CLI — which is what every A/B runs
+// through — does not pad. So the margin alone pushed every client run over the line and every one of
+// them got the strong shadow pair, including the light art the measurement says pays ΔE 2.09 -> 2.51
+// for it. The same arithmetic hit a genuine cutout source, where the transparency is the user's own.
+// An image with no transparent pixels is bit-identical either way, so the calibration is untouched.
 func DarkFrac(pixels []float32) float64 {
 	n := len(pixels) / 4
 	if n == 0 {
 		return 0
 	}
-	dark := 0
+	dark, opaque := 0, 0
 	for i := 0; i < n; i++ {
+		if pixels[i*4+3] <= 0 {
+			continue
+		}
+		opaque++
 		y := 0.2126*pixels[i*4] + 0.7152*pixels[i*4+1] + 0.0722*pixels[i*4+2]
 		if y < 0.02 {
 			dark++
 		}
 	}
-	return float64(dark) / float64(n)
+	if opaque == 0 {
+		return 0
+	}
+	return float64(dark) / float64(opaque)
 }
 
 // BuildWeightMap produces the per-pixel saliency weight.
@@ -1150,6 +1167,12 @@ func ModeKnobDefaults(mode string, colors int, cutout bool) Choices {
 	c.AlphaMin = float64(md.AlphaMin)
 	c.PolishIters = md.PolishIters
 	c.PolishTau1 = md.PolishTau1
+	// RampWeight was left at DefaultChoices' -1 sentinel while the mode actually runs md.RampWeight
+	// (1.5 on anime). The panel clamps for DISPLAY only, so the slider read 0.00 with no override
+	// dot — asserting that OFF was the default — and the first nudge upward committed a value BELOW
+	// the real one, cutting the boost the user was trying to raise. Every knob this function reports
+	// has to be the concrete number the run will use; that is the whole point of it.
+	c.RampWeight = md.RampWeight
 	c.Random, c.Mutated, c.SampleBudget, c.MaxNoImprove = random, mutated, sampleBudget, maxNI
 	return c
 }
