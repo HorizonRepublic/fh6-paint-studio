@@ -940,10 +940,10 @@ class Studio extends ChangeNotifier {
     final shapesSnapshot = (g['shapes'] as List?) ?? const [];
     try {
       final bytes = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
-      if (bytes == null) {
-        img.dispose();
-        return false;
-      }
+      // No dispose here: the `finally` below owns the clone. Freeing it twice trips an assert in
+      // debug and decrements the native refcount twice in release — which frees a picture the
+      // studio's own `preview` is still sharing.
+      if (bytes == null) return false;
       final res = await e.librarySave(
         shapes: shapesSnapshot,
         entry: entry,

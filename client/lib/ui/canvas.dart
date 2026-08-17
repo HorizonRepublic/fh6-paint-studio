@@ -499,9 +499,20 @@ class _CropOverlayState extends State<CropOverlay> {
             // of fighting it on both.
             final k = _ratioOf(_ratio);
             if (k != null) {
-              final w = now.dx - start.dx;
-              final h = w.abs() / k * (now.dy < start.dy ? -1 : 1);
-              now = Offset(now.dx, start.dy + h);
+              final up = now.dy < start.dy;
+              var w = now.dx - start.dx;
+              var h = w.abs() / k;
+              // The DERIVED side has to stay on the picture too. Only the pointer axis was
+              // clamped, so a locked ratio drew freely past the top and bottom edges — and the
+              // engine intersects the region with the image, so the run then fitted a different
+              // rectangle from the one the user had just drawn on screen. Give back the width the
+              // clipped height cost, and the ratio holds instead of breaking at the edge.
+              final room = up ? start.dy : widget.studio.sourceH - start.dy;
+              if (h > room) {
+                h = room;
+                w = w.sign * h * k;
+              }
+              now = Offset(start.dx + w, start.dy + (up ? -h : h));
             }
             setState(() => _rect = Rect.fromPoints(start, now));
           },

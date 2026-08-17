@@ -523,6 +523,9 @@ class _EditorViewState extends State<EditorView> {
     final path = await pickImage();
     if (path == null) return;
     await ed.setReference(path);
+    // The picker and the decode are both awaited, and the editor can be gone by the time they
+    // answer — setState on a disposed State throws.
+    if (!mounted) return;
     // Loading a reference is a request to see it: turn the ghost on if it was
     // off, and leave a strength the user already set alone.
     setState(() => _onion = _onion == 0 ? 0.6 : _onion);

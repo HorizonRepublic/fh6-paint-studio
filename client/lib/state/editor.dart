@@ -1333,7 +1333,10 @@ class Editor extends ChangeNotifier {
 
   void mirrorSelected({required bool horizontal}) {
     final s = current;
-    if (s == null) return;
+    // The background is stored corner to corner, so mirroring it swaps its corners into x1>x2 and
+    // the renderer draws nothing — the canvas colour simply vanished. It is also meaningless: a
+    // full-canvas rectangle is its own mirror. Every other structural op already guards index 0.
+    if (s == null || selected == 0) return;
     mark();
     s.mirror(horizontal ? width / 2 : height / 2, horizontal: horizontal);
     commit();

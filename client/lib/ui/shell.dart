@@ -79,6 +79,11 @@ class _ShellState extends State<Shell> {
 
   @override
   void dispose() {
+    // The editor is owned here, so it has to be released here too: closing the window with it open
+    // left its render, its reference picture and its palette tiles undisposed, and its ChangeNotifier
+    // alive with in-flight renders still due to call back into it.
+    _editor?.dispose();
+    _editor = null;
     _window.dispose();
     super.dispose();
   }
