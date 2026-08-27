@@ -33,7 +33,7 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   file_selector: ^1.1.0
-  desktop_drop: ^0.7.1
+  desktop_drop: ^0.8.0
   cross_file: ^0.3.5+4
 
 dev_dependencies:
