@@ -38,8 +38,12 @@ constexpr int kCaptionHeightDip = 52;
 // How much of the caption's right end belongs to Flutter's own controls. Dart
 // measures the real cluster and pushes it here after every layout, because the
 // language button is as wide as that language's name for itself. The starting
-// value only has to survive the first frame.
-std::atomic<int> g_controls_dip{46 * 3 + 330};
+// value errs WIDE — covering the widest locale's cluster — because the two
+// failure directions are not symmetric: a band too wide only costs drag area
+// until the first report lands, a band too narrow sends clicks on the leftmost
+// caption buttons to the window drag instead. Mirrored by kStartupControlsDip
+// in test/caption_test.dart, which checks it against every locale.
+std::atomic<int> g_controls_dip{1050};
 
 int ScaledFor(int dip, HWND window) {
   UINT dpi = GetDpiForWindow(window);
@@ -70,7 +74,11 @@ LRESULT CALLBACK ChildProc(HWND hwnd, UINT message, WPARAM wparam,
     GetClientRect(hwnd, &client);
 
     const int caption = ScaledFor(kCaptionHeightDip, parent ? parent : hwnd);
-    const int controls = ScaledFor(g_controls_dip.load(), parent ? parent : hwnd);
+    // +4dip cushion: Dart reports the exact distance to the cluster's left
+    // edge, and with zero margin the button's first border pixel rounds into
+    // the drag band. Four dip of lost drag area buys the whole edge.
+    const int controls =
+        ScaledFor(g_controls_dip.load() + 4, parent ? parent : hwnd);
     if (cursor.y < caption && cursor.x < client.right - controls) {
       return HTTRANSPARENT;
     }

@@ -439,7 +439,9 @@ class _LogDrawerState extends State<LogDrawer> {
     return Glass(
       live: false,
       child: SizedBox(
-        width: 720,
+        // 760, not 720: the filter chips and buttons alone need ~722 in the
+        // widest locale, and the row has nothing left to give way.
+        width: 760,
         height: 260,
         child: Column(
           children: [
@@ -448,7 +450,16 @@ class _LogDrawerState extends State<LogDrawer> {
               child: Row(
                 children: [
                   const SizedBox(width: 11),
-                  Text(context.s('activity').toUpperCase(), style: T.label),
+                  // Flexible with an ellipsis: the chips and buttons are the
+                  // controls, so in a wide locale the title is what gives way.
+                  Flexible(
+                    child: Text(
+                      context.s('activity').toUpperCase(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: T.label,
+                    ),
+                  ),
                   const Spacer(),
                   for (final (key, label) in [
                     ('all', context.s('all')),

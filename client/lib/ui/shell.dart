@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../state/editor.dart';
+import '../state/logfile.dart';
 import '../state/studio.dart';
 import 'about.dart';
 import 'activity.dart';
@@ -148,6 +149,7 @@ class _ShellState extends State<Shell> {
   /// reference in the editor resizes it to the picture being traced.
   void _editBlank() {
     final engine = studio.engine;
+    AppLog.write('debug', 'editBlank engine=${engine != null}');
     if (engine == null) return;
     final ed = Editor(() => studio.engine)..loadBlank(1000, 1000);
     setState(() {
@@ -185,7 +187,10 @@ class _ShellState extends State<Shell> {
 
   Studio get studio => widget.studio;
 
-  void _toggle(_Pop p) => setState(() => _pop = _pop == p ? _Pop.none : p);
+  void _toggle(_Pop p) {
+    AppLog.write('debug', 'toggle $p (was $_pop)');
+    setState(() => _pop = _pop == p ? _Pop.none : p);
+  }
 
   Future<void> _open() async {
     final path = await pickImage();
@@ -216,8 +221,25 @@ class _ShellState extends State<Shell> {
     if (path != null) await studio.exportTo(path);
   }
 
+  void _logDown(PointerDownEvent e) {
+    final s = MediaQuery.sizeOf(context);
+    AppLog.write(
+      'debug',
+      'down ${e.position.dx.toStringAsFixed(1)},'
+      '${e.position.dy.toStringAsFixed(1)} '
+      'size=${s.width.toStringAsFixed(1)}x${s.height.toStringAsFixed(1)} '
+      'dpr=${MediaQuery.devicePixelRatioOf(context)}',
+    );
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerDown: _logDown,
+    child: _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final ed = _editor;
     if (ed != null) {
       // The editor keeps the caption. It used to replace the entire shell,
@@ -766,33 +788,36 @@ class _Header extends StatelessWidget {
           const SizedBox(width: 14),
           const HalftoneMark(size: 26),
           const SizedBox(width: 10),
-          // Flexible with ellipses: the file name is user data of unbounded
-          // length and the meta line is a translated sentence, so at a narrow
-          // window this pair simply overran the header — pushing the window
-          // buttons off the right edge, where they could not be clicked. The
-          // identity gives way; the controls do not.
-          Flexible(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: T.text(13, color: T.title, weight: FontWeight.w600),
-                ),
-                const SizedBox(height: 1),
-                Text(
-                  meta,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: T.text(11, color: T.hint),
-                ),
-              ],
+          // ONE Expanded, not Flexible + Spacer: two flex children split the
+          // free space between them, which parked the controls cluster up to
+          // hundreds of px short of the right edge — where the runner's drag
+          // band (measured from the window's right) swallowed its left half.
+          // The Align keeps the identity at its natural width and ellipsizes
+          // it at a narrow window; the cluster is pinned to the edge.
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: T.text(13, color: T.title, weight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 1),
+                  Text(
+                    meta,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: T.text(11, color: T.hint),
+                  ),
+                ],
+              ),
             ),
           ),
-          const Spacer(),
           // Everything from here on is a control, and the runner is told how
           // wide this cluster is so the drag band stops exactly where it does.
           CaptionControls(

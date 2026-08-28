@@ -161,238 +161,254 @@ class _AdvancedSheetState extends State<AdvancedSheet> {
                 child: Scrollbar(
                   controller: _scroll,
                   child: SingleChildScrollView(
-                  controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(15, 6, 15, 8),
-                  child: Column(
-                    children: [
-                      _Row(
-                        label: context.s('srcRes'),
-                        help: context.s('srcResHelp'),
-                        value: studio.sourceRes,
-                        onChanged: studio.setSourceRes,
-                      ),
-                      _Row(
-                        label: context.s('keepIn'),
-                        help: context.s('keepInHelp'),
-                        value: studio.keepInside,
-                        onChanged: studio.setKeepInside,
-                      ),
-                      _Row(
-                        label: context.s('fastMode'),
-                        help: context.s('fastModeHelp'),
-                        value: studio.choices['AIFast'] as bool? ?? false,
-                        onChanged: (v) => studio.setChoice('AIFast', v),
-                      ),
-                      _Row(
-                        label: context.s('dropContour'),
-                        help: context.s('dropContourHelp'),
-                        value: noEagle,
-                        onChanged: (v) => _setEdge(eagle: v),
-                      ),
-                      _Row(
-                        label: context.s('dropFalseEdge'),
-                        help: context.s('dropFalseEdgeHelp'),
-                        value: noFe,
-                        onChanged: (v) => _setEdge(fe: v),
-                      ),
-                      _Row(
-                        label: context.s('singleColour'),
-                        help: context.s('singleColourHelp'),
-                        value: mono,
-                        onChanged: (v) =>
-                            studio.setChoice('MonoColor', v ? 'auto' : ''),
-                      ),
-                      _Row(
-                        label: context.s('economy'),
-                        help: context.s('economyHelp'),
-                        value: studio.choices['Economy'] as bool? ?? false,
-                        onChanged: (v) => studio.setChoice('Economy', v),
-                      ),
-                      _Stepper(
-                        label: context.s('bestOf'),
-                        help: context.s('bestOfHelp'),
-                        value: (studio.choices['BestOf'] as num?)?.toInt() ?? 1,
-                        min: 1,
-                        // The engine clamps at nine; offering more would be a
-                        // control that silently does nothing past the fourth tap.
-                        max: 9,
-                        onChanged: (v) => studio.setChoice('BestOf', v),
-                      ),
-                      const SizedBox(height: 6),
-                      Container(height: 1, color: T.hairline),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 10, 8, 2),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    context.s('expertTitle').toUpperCase(),
-                                    style: T.label,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    context.s('expertWarn'),
-                                    style: T.text(10.5, color: T.hint),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Btn(
-                              context.s('expertReset'),
-                              onTap: () => studio.clearChoices(expertKeys),
-                            ),
-                          ],
+                    controller: _scroll,
+                    padding: const EdgeInsets.fromLTRB(15, 6, 15, 8),
+                    child: Column(
+                      children: [
+                        _Row(
+                          label: context.s('srcRes'),
+                          help: context.s('srcResHelp'),
+                          value: studio.sourceRes,
+                          onChanged: studio.setSourceRes,
                         ),
-                      ),
-                      _Section(context.s('expertGroupSmooth')),
-                      _knobBool(context, 'Polish', 'kPolish', fallback: true),
-                      _knobInt(
-                        context,
-                        'PolishIters',
-                        'kPolishIters',
-                        min: 20,
-                        max: 2000,
-                        enabled: polishOn,
-                      ),
-                      _knobSlider(
-                        context,
-                        'PolishTau1',
-                        'kPolishTau',
-                        min: 0.02,
-                        max: 0.20,
-                        fallback: 0.08,
-                        enabled: polishOn,
-                      ),
-                      _knobBool(context, 'Alpha', 'kAlpha', fallback: true),
-                      _knobSlider(
-                        context,
-                        'AlphaMin',
-                        'kAlphaMin',
-                        min: 0.05,
-                        max: 1.0,
-                        fallback: 0.30,
-                        enabled: alphaOn,
-                      ),
-                      _Section(context.s('expertGroupShapes')),
-                      _knobSlider(
-                        context,
-                        'WeightStrength',
-                        'kWeightStrength',
-                        min: 0,
-                        max: 1,
-                        fallback: 0.15,
-                      ),
-                      _knobSlider(
-                        context,
-                        'Aspect',
-                        'kAspect',
-                        min: 1,
-                        max: 12,
-                        fallback: 6,
-                        decimals: 1,
-                      ),
-                      _knobText(context, 'Kinds', 'kKinds'),
-                      _knobText(context, 'KindWeights', 'kKindWeights'),
-                      _knobBool(context, 'Boundary', 'kBoundary'),
-                      _knobBool(context, 'Backfit', 'kBackfit'),
-                      _knobBool(context, 'Compact', 'kCompact', fallback: true),
-                      _knobSlider(
-                        context,
-                        'StandoutTol',
-                        'kStandout',
-                        min: 0,
-                        max: 0.02,
-                        fallback: 0,
-                        decimals: 3,
-                      ),
-                      _knobInt(context, 'Grid', 'kGrid', min: 16, max: 160),
-                      _Section(context.s('expertGroupSearch')),
-                      _KnobShell(
-                        label: context.s('kQuality'),
-                        help: context.s('kQualityHelp'),
-                        overridden: studio.isOverridden('Quality'),
-                        onReset: () => _reset('Quality'),
-                        child: _Select(
+                        _Row(
+                          label: context.s('keepIn'),
+                          help: context.s('keepInHelp'),
+                          value: studio.keepInside,
+                          onChanged: studio.setKeepInside,
+                        ),
+                        _Row(
+                          label: context.s('fastMode'),
+                          help: context.s('fastModeHelp'),
+                          value: studio.choices['AIFast'] as bool? ?? false,
+                          onChanged: (v) => studio.setChoice('AIFast', v),
+                        ),
+                        _Row(
+                          label: context.s('dropContour'),
+                          help: context.s('dropContourHelp'),
+                          value: noEagle,
+                          onChanged: (v) => _setEdge(eagle: v),
+                        ),
+                        _Row(
+                          label: context.s('dropFalseEdge'),
+                          help: context.s('dropFalseEdgeHelp'),
+                          value: noFe,
+                          onChanged: (v) => _setEdge(fe: v),
+                        ),
+                        _Row(
+                          label: context.s('singleColour'),
+                          help: context.s('singleColourHelp'),
+                          value: mono,
+                          onChanged: (v) =>
+                              studio.setChoice('MonoColor', v ? 'auto' : ''),
+                        ),
+                        _Row(
+                          label: context.s('economy'),
+                          help: context.s('economyHelp'),
+                          value: studio.choices['Economy'] as bool? ?? false,
+                          onChanged: (v) => studio.setChoice('Economy', v),
+                        ),
+                        _Stepper(
+                          label: context.s('bestOf'),
+                          help: context.s('bestOfHelp'),
                           value:
-                              studio.knobValue('Quality') as String? ??
-                              'quality',
-                          options: const [
-                            'fast',
-                            'balanced',
-                            'max',
-                            'quality',
-                            'ultra',
-                          ],
-                          onChanged: (v) {
-                            studio.setChoice('Quality', v);
-                            studio.refreshKnobDefaults();
-                          },
+                              (studio.choices['BestOf'] as num?)?.toInt() ?? 1,
+                          min: 1,
+                          // The engine clamps at nine; offering more would be a
+                          // control that silently does nothing past the fourth tap.
+                          max: 9,
+                          onChanged: (v) => studio.setChoice('BestOf', v),
                         ),
-                      ),
-                      _knobInt(
-                        context,
-                        'Seed',
-                        'kSeed',
-                        min: 0,
-                        max: 1 << 30,
-                      ),
-                      // The counts are deliberately near-unclamped (owner's
-                      // call): whoever opens this panel is trading their own
-                      // time and VRAM, and a ceiling that second-guesses them
-                      // is a control that silently does nothing.
-                      _knobInt(
-                        context,
-                        'Random',
-                        'kRandom',
-                        min: 1,
-                        max: 5000000,
-                      ),
-                      _knobInt(
-                        context,
-                        'Mutated',
-                        'kMutated',
-                        min: 0,
-                        max: 2000000,
-                      ),
-                      _knobInt(
-                        context,
-                        'SampleBudget',
-                        'kSample',
-                        min: 100,
-                        max: 2000000,
-                      ),
-                      _knobInt(
-                        context,
-                        'MaxNoImprove',
-                        'kPatience',
-                        min: 1,
-                        max: 1000000,
-                      ),
-                      _knobSlider(
-                        context,
-                        'Overdraw',
-                        'kOverdraw',
-                        min: 1,
-                        max: 3,
-                        fallback: 1,
-                        decimals: 1,
-                      ),
-                      _knobSlider(
-                        context,
-                        'RampWeight',
-                        'kRampWeight',
-                        min: 0,
-                        max: 4,
-                        fallback: 1.5,
-                        decimals: 1,
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        Container(height: 1, color: T.hairline),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(8, 10, 8, 2),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      context.s('expertTitle').toUpperCase(),
+                                      style: T.label,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      context.s('expertWarn'),
+                                      style: T.text(10.5, color: T.hint),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Btn(
+                                context.s('expertReset'),
+                                onTap: () => studio.clearChoices(expertKeys),
+                              ),
+                            ],
+                          ),
+                        ),
+                        _Section(context.s('expertGroupSmooth')),
+                        _knobBool(context, 'Polish', 'kPolish', fallback: true),
+                        _knobInt(
+                          context,
+                          'PolishIters',
+                          'kPolishIters',
+                          min: 20,
+                          max: 2000,
+                          enabled: polishOn,
+                        ),
+                        _knobSlider(
+                          context,
+                          'PolishTau1',
+                          'kPolishTau',
+                          min: 0.02,
+                          max: 0.20,
+                          fallback: 0.08,
+                          enabled: polishOn,
+                        ),
+                        _knobBool(context, 'Alpha', 'kAlpha', fallback: true),
+                        _knobSlider(
+                          context,
+                          'AlphaMin',
+                          'kAlphaMin',
+                          min: 0.05,
+                          max: 1.0,
+                          fallback: 0.30,
+                          enabled: alphaOn,
+                        ),
+                        _Section(context.s('expertGroupShapes')),
+                        _knobSlider(
+                          context,
+                          'WeightStrength',
+                          'kWeightStrength',
+                          min: 0,
+                          max: 1,
+                          fallback: 0.15,
+                        ),
+                        _knobSlider(
+                          context,
+                          'Aspect',
+                          'kAspect',
+                          min: 1,
+                          max: 12,
+                          fallback: 6,
+                          decimals: 1,
+                        ),
+                        _knobText(
+                          context,
+                          'Kinds',
+                          'kKinds',
+                          sanitize: sanitizeKinds,
+                        ),
+                        _knobText(
+                          context,
+                          'KindWeights',
+                          'kKindWeights',
+                          sanitize: sanitizeKindWeights,
+                        ),
+                        _knobBool(context, 'Boundary', 'kBoundary'),
+                        _knobBool(context, 'Backfit', 'kBackfit'),
+                        _knobBool(
+                          context,
+                          'Compact',
+                          'kCompact',
+                          fallback: true,
+                        ),
+                        _knobSlider(
+                          context,
+                          'StandoutTol',
+                          'kStandout',
+                          min: 0,
+                          max: 0.02,
+                          fallback: 0,
+                          decimals: 3,
+                        ),
+                        _knobInt(context, 'Grid', 'kGrid', min: 16, max: 160),
+                        _Section(context.s('expertGroupSearch')),
+                        _KnobShell(
+                          label: context.s('kQuality'),
+                          help: context.s('kQualityHelp'),
+                          overridden: studio.isOverridden('Quality'),
+                          onReset: () => _reset('Quality'),
+                          child: _Select(
+                            value:
+                                studio.knobValue('Quality') as String? ??
+                                'quality',
+                            options: const [
+                              'fast',
+                              'balanced',
+                              'max',
+                              'quality',
+                              'ultra',
+                            ],
+                            onChanged: (v) {
+                              studio.setChoice('Quality', v);
+                              studio.refreshKnobDefaults();
+                            },
+                          ),
+                        ),
+                        _knobInt(
+                          context,
+                          'Seed',
+                          'kSeed',
+                          min: 0,
+                          max: 1 << 30,
+                        ),
+                        // The counts are deliberately near-unclamped (owner's
+                        // call): whoever opens this panel is trading their own
+                        // time and VRAM, and a ceiling that second-guesses them
+                        // is a control that silently does nothing.
+                        _knobInt(
+                          context,
+                          'Random',
+                          'kRandom',
+                          min: 1,
+                          max: 5000000,
+                        ),
+                        _knobInt(
+                          context,
+                          'Mutated',
+                          'kMutated',
+                          min: 0,
+                          max: 2000000,
+                        ),
+                        _knobInt(
+                          context,
+                          'SampleBudget',
+                          'kSample',
+                          min: 100,
+                          max: 2000000,
+                        ),
+                        _knobInt(
+                          context,
+                          'MaxNoImprove',
+                          'kPatience',
+                          min: 1,
+                          max: 1000000,
+                        ),
+                        _knobSlider(
+                          context,
+                          'Overdraw',
+                          'kOverdraw',
+                          min: 1,
+                          max: 3,
+                          fallback: 1,
+                          decimals: 1,
+                        ),
+                        _knobSlider(
+                          context,
+                          'RampWeight',
+                          'kRampWeight',
+                          min: 0,
+                          max: 4,
+                          fallback: 1.5,
+                          decimals: 1,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
                 ),
               ),
             ],
@@ -468,17 +484,48 @@ class _AdvancedSheetState extends State<AdvancedSheet> {
     ),
   );
 
-  Widget _knobText(BuildContext context, String key, String strKey) =>
-      _KnobShell(
-        label: context.s(strKey),
-        help: context.s('${strKey}Help'),
-        overridden: studio.isOverridden(key),
-        onReset: () => _reset(key),
-        child: _TextFieldControl(
-          value: studio.knobValue(key) as String? ?? '',
-          onChanged: (v) => studio.setChoice(key, v),
-        ),
-      );
+  Widget _knobText(
+    BuildContext context,
+    String key,
+    String strKey, {
+    String Function(String)? sanitize,
+  }) => _KnobShell(
+    label: context.s(strKey),
+    help: context.s('${strKey}Help'),
+    overridden: studio.isOverridden(key),
+    onReset: () => _reset(key),
+    child: _TextFieldControl(
+      value: studio.knobValue(key) as String? ?? '',
+      sanitize: sanitize,
+      onChanged: (v) => studio.setChoice(key, v),
+    ),
+  );
+}
+
+/// The engine's vocabulary, mirrored so the field can only say what the run will hear.
+/// preset.ParseKinds keeps ONLY these three words and silently falls back to ellipse-only, so
+/// "ellipse, rect" lit the override dot while rectangles quietly left the run.
+String sanitizeKinds(String v) {
+  const vocab = {'ellipse', 'rectangle', 'triangle'};
+  final out = <String>[];
+  for (final part in v.split(',')) {
+    final t = part.trim().toLowerCase();
+    if (vocab.contains(t) && !out.contains(t)) out.add(t);
+  }
+  return out.join(',');
+}
+
+/// preset.ParseKindWeights returns nil on ANY malformed entry — the whole list is discarded, not
+/// the bad number — so one typo must clear the field rather than look accepted.
+String sanitizeKindWeights(String v) {
+  if (v.trim().isEmpty) return '';
+  final out = <String>[];
+  for (final part in v.split(',')) {
+    final t = part.trim();
+    if (double.tryParse(t) == null) return '';
+    out.add(t);
+  }
+  return out.join(',');
 }
 
 class _Row extends StatelessWidget {
@@ -781,7 +828,8 @@ class _IntFieldState extends State<_IntField> {
   }
 
   void _commit() {
-    if (_ctl.text.trim() == _asShown.trim()) return; // see _asShown: no edit, no override
+    // see _asShown: no edit, no override
+    if (_ctl.text.trim() == _asShown.trim()) return;
     final v = int.tryParse(_ctl.text.trim());
     if (v == null) {
       _ctl.text = widget.value?.toString() ?? '';
@@ -879,9 +927,17 @@ class _SliderControl extends StatelessWidget {
 
 /// Free text for the CSV knobs (shape kinds and their mix).
 class _TextFieldControl extends StatefulWidget {
-  const _TextFieldControl({required this.value, required this.onChanged});
+  const _TextFieldControl({
+    required this.value,
+    required this.onChanged,
+    this.sanitize,
+  });
 
   final String value;
+
+  /// Rewrites what was typed into what the engine will actually accept, before it is stored — so
+  /// a knob cannot claim an override the run discards.
+  final String Function(String)? sanitize;
   final ValueChanged<String> onChanged;
 
   @override
@@ -923,7 +979,10 @@ class _TextFieldControlState extends State<_TextFieldControl> {
   }
 
   void _commit() {
-    final v = _ctl.text.trim();
+    var v = _ctl.text.trim();
+    final clean = widget.sanitize;
+    if (clean != null) v = clean(v);
+    if (_ctl.text != v) _ctl.text = v; // show what was kept
     if (v != widget.value) widget.onChanged(v);
   }
 
@@ -1095,27 +1154,33 @@ class SettingsSheet extends StatelessWidget {
               // usually somewhere else on the machine by the time it lands.
               Padding(
                 padding: const EdgeInsets.fromLTRB(15, 11, 15, 14),
-                child: Row(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                    Text(context.s('diagnostics'), style: T.label),
+                    const SizedBox(height: 3),
+                    Text(
+                      AppLog.path ?? context.s('logHint'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: T.monoText(10, color: T.hint),
+                    ),
+                    const SizedBox(height: 9),
+                    // A Wrap, not a Row: the pair of labels outgrows the sheet
+                    // in the wider locales, and a Row answers that by pushing
+                    // the second button out of its own box.
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        spacing: 7,
+                        runSpacing: 7,
+                        alignment: WrapAlignment.end,
                         children: [
-                          Text(context.s('diagnostics'), style: T.label),
-                          const SizedBox(height: 3),
-                          Text(
-                            AppLog.path ?? context.s('logHint'),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: T.monoText(10, color: T.hint),
-                          ),
+                          Btn(context.s('copyPath'), onTap: _copyPath),
+                          Btn(context.s('openLogFolder'), onTap: AppLog.reveal),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Btn(context.s('copyPath'), onTap: _copyPath),
-                    const SizedBox(width: 7),
-                    Btn(context.s('openLogFolder'), onTap: AppLog.reveal),
                   ],
                 ),
               ),

@@ -175,15 +175,30 @@ class _PressableState extends State<Pressable> {
     final enabled = widget.onTap != null || widget.onSecondaryTap != null;
     final core = MouseRegion(
       cursor: enabled ? widget.cursor : SystemMouseCursors.basic,
+      // Mounted guards: a pointer's up/cancel/exit is delivered to whatever its
+      // hit test found at DOWN time, so a control removed mid-gesture (the
+      // empty-screen card while the picked image swaps in) still receives the
+      // tail of the gesture after dispose.
       onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() {
-        _hover = false;
-        _down = false;
-      }),
+      onExit: (_) {
+        if (!mounted) return;
+        setState(() {
+          _hover = false;
+          _down = false;
+        });
+      },
       child: Listener(
         onPointerDown: enabled ? (_) => setState(() => _down = true) : null,
-        onPointerUp: enabled ? (_) => setState(() => _down = false) : null,
-        onPointerCancel: enabled ? (_) => setState(() => _down = false) : null,
+        onPointerUp: enabled
+            ? (_) {
+                if (mounted) setState(() => _down = false);
+              }
+            : null,
+        onPointerCancel: enabled
+            ? (_) {
+                if (mounted) setState(() => _down = false);
+              }
+            : null,
         child: GestureDetector(
           behavior: widget.behavior,
           onTap: widget.onTap,

@@ -14,6 +14,7 @@ library;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../state/logfile.dart';
 import 'tokens.dart';
 
 const captionHeight = 52.0;
@@ -96,14 +97,67 @@ class CaptionControls extends StatefulWidget {
 class _CaptionControlsState extends State<CaptionControls> {
   final _key = GlobalKey();
   double _reported = -1;
+  bool _inFlight = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // A font arriving relayouts the labels without rebuilding this widget, and
+    // a static screen schedules no further frames — so the width report would
+    // stay at the pre-font measurement forever.
+    PaintingBinding.instance.systemFonts.addListener(_fontsChanged);
+  }
+
+  @override
+  void dispose() {
+    PaintingBinding.instance.systemFonts.removeListener(_fontsChanged);
+    super.dispose();
+  }
+
+  void _fontsChanged() {
+    WidgetsBinding.instance.addPostFrameCallback(_measure);
+    WidgetsBinding.instance.scheduleFrame();
+  }
 
   void _measure(Duration _) {
-    final box = _key.currentContext?.findRenderObject() as RenderBox?;
-    if (box == null || !box.hasSize) return;
-    final w = box.size.width;
-    if ((w - _reported).abs() < 0.5) return;
-    _reported = w;
-    WindowState.setControlsWidth(w);
+    _report();
+  }
+
+  /// The width is only remembered once the runner has ANSWERED. A report can be
+  /// lost — the first frame can complete before the runner registers the
+  /// channel — and a lost report used to be cached as delivered: the runner
+  /// kept its startup guess and every caption button left of that line dragged
+  /// the window instead of clicking, until the app was restarted.
+  Future<void> _report() async {
+    if (_inFlight) return;
+    _inFlight = true;
+    try {
+      while (mounted) {
+        final box = _key.currentContext?.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) break;
+        // The DISTANCE from the window's right edge to the cluster's left
+        // edge, not the cluster's width: the runner subtracts this from the
+        // window's right, so it must describe where the cluster actually IS.
+        // The two only coincide while the layout truly pins the cluster to
+        // the edge — and one header regression already proved they can drift
+        // apart, handing the buttons to the drag band.
+        if (!mounted) break;
+        final w =
+            MediaQuery.sizeOf(context).width -
+            box.localToGlobal(Offset.zero).dx;
+        if ((w - _reported).abs() < 0.5) break;
+        try {
+          await WindowState.setControlsWidth(w);
+          _reported = w;
+          AppLog.write('debug', 'controls band $w: acked');
+        } catch (e) {
+          AppLog.write('debug', 'controls band $w: lost ($e)');
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
+      }
+    } finally {
+      _inFlight = false;
+    }
   }
 
   @override

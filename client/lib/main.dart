@@ -53,15 +53,33 @@ class StudioApp extends StatefulWidget {
   State<StudioApp> createState() => _StudioAppState();
 }
 
-class _StudioAppState extends State<StudioApp> {
+class _StudioAppState extends State<StudioApp> with WidgetsBindingObserver {
   final studio = Studio();
   String? connectError;
   Lang lang = languages.first;
   Prefs? _prefs;
 
+  /// The window's idea of itself, in the log. The empty-screen dead-buttons
+  /// defect looked exactly like a DPI mismatch between layout and hit-testing,
+  /// and this line is what tells the two apart in a user's log.
+  void _logMetrics(String tag) {
+    // Explicit numbers: toString of Size is tree-shaken out of release builds.
+    final v = WidgetsBinding.instance.platformDispatcher.views.first;
+    AppLog.write(
+      'debug',
+      '$tag: phys=${v.physicalSize.width}x${v.physicalSize.height} '
+      'dpr=${v.devicePixelRatio}',
+    );
+  }
+
+  @override
+  void didChangeMetrics() => _logMetrics('metrics');
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _logMetrics('frame1'));
     // The language is restored before the engine is reached, so the failure
     // screen is already in the user's language if the engine never starts.
     Prefs.load().then((p) {
@@ -101,6 +119,7 @@ class _StudioAppState extends State<StudioApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     studio.dispose();
     super.dispose();
   }
