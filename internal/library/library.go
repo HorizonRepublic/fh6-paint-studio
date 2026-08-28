@@ -68,6 +68,20 @@ func (s *Store) GeometryPath(id string) string { return filepath.Join(s.Root, id
 func (s *Store) PreviewPath(id string) string  { return filepath.Join(s.Root, id, "preview.png") }
 func (s *Store) ThumbPath(id string) string    { return filepath.Join(s.Root, id, "thumb.png") }
 
+// ImagePath resolves an entry's preview or thumbnail path. It exists so the id a caller hands in
+// is gated exactly like every mutating op gates it: the ipc handler used to join the id into a
+// path itself, which made "../../../../Users/x/Pictures/private" return that directory's
+// preview.png. which == "preview" selects the full-size image; anything else is the thumbnail.
+func (s *Store) ImagePath(id, which string) (string, error) {
+	if !validID(id) {
+		return "", fmt.Errorf("library: invalid id %q", id)
+	}
+	if which == "preview" {
+		return s.PreviewPath(id), nil
+	}
+	return s.ThumbPath(id), nil
+}
+
 // validID reports whether id is a safe single-segment directory name that resolves strictly inside
 // Root. It rejects path separators, traversal (".", ".."), and absolute / Windows drive-relative
 // paths (e.g. "C:foo", whose filepath.Base differs). The library's mutating ops gate on this.

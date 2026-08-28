@@ -82,9 +82,9 @@ func (s *Server) libraryMethod(req Request) bool {
 		handle(func(st *library.Store) (any, error) {
 			var p LibraryImageParams
 			_ = json.Unmarshal(req.Params, &p)
-			path := st.ThumbPath(p.ID)
-			if p.Which == "preview" {
-				path = st.PreviewPath(p.ID)
+			path, err := st.ImagePath(p.ID, p.Which)
+			if err != nil {
+				return nil, err
 			}
 			// PNG bytes straight off disk: every client already decodes PNG, and re-encoding here
 			// would only lose the thumbnail's already-chosen quality.

@@ -36,6 +36,10 @@ type Done struct {
 
 	Width, Height int
 	Quality       *Quality
+
+	// SrcRect is the part of the source FILE this run was fitted to (x, y, w, h in the file's own
+	// pixels), zero when the driver does not track it. See session.Run.SrcRect.
+	SrcRect [4]int
 }
 
 // Quality is the perceptual score of the finished render against the source it was fitted to.

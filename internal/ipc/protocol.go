@@ -118,6 +118,12 @@ type (
 		Width  int `json:"width"`
 		Height int `json:"height"`
 
+		// SourceRect is the part of the SOURCE FILE the run was fitted to, in that file's own pixels:
+		// x, y, w, h. The default path auto-crops to the content box whenever it covers under 97% of
+		// the file, and a client that draws "before" from the whole source then wipes a cropped
+		// reconstruction across an uncropped picture. Absent (nil) means the whole file.
+		SourceRect *[4]int `json:"sourceRect,omitempty"`
+
 		// DeltaE/SSIM score the finished render against the source. Measured where the fit happened,
 		// which the client cannot reproduce without the padded target, so it travels with the result.
 		DeltaE float64 `json:"deltaE,omitempty"`

@@ -46,6 +46,10 @@ type Server struct {
 	renderQ  []Request
 	renderOn bool
 
+	auxMu sync.Mutex
+	auxQ  []Request
+	auxOn bool
+
 	storeOnce sync.Once
 	store     *library.Store
 	storeErr  error
@@ -132,6 +136,48 @@ func (s *Server) dispatch(req Request) {
 	case "render":
 		s.queueRender(req)
 	default:
+		s.queueAux(req)
+	}
+}
+
+// queueAux moves the library and preset handlers off the read goroutine, for the same reason
+// generate and render were moved off it: while one of them runs, nothing else is even READ, so a
+// cancel sits in the socket buffer. Neither is cheap — presets.knobDefaults decodes the source and
+// CatmullRom-downscales it while holding descMu, and library.save does a base64 decode, a
+// full-size copy, a png.Encode and a thumbnail. Sequence that hangs Stop: long run -> open the
+// expert panel -> change mode -> press Stop.
+//
+// One worker, so these stay serialised with each other exactly as they were.
+func (s *Server) queueAux(req Request) {
+	s.auxMu.Lock()
+	var dropped []Request
+	if len(s.auxQ) >= 64 { // a bound, not a policy: the client sends these one at a time
+		dropped = append(dropped, s.auxQ[0])
+		s.auxQ = s.auxQ[1:]
+	}
+	s.auxQ = append(s.auxQ, req)
+	start := !s.auxOn
+	s.auxOn = true
+	s.auxMu.Unlock()
+	for _, d := range dropped {
+		s.fail(d.ID, fmt.Errorf("%s dropped (queue overflow)", d.Method))
+	}
+	if start {
+		go s.auxWorker()
+	}
+}
+
+func (s *Server) auxWorker() {
+	for {
+		s.auxMu.Lock()
+		if len(s.auxQ) == 0 {
+			s.auxOn = false
+			s.auxMu.Unlock()
+			return
+		}
+		req := s.auxQ[0]
+		s.auxQ = s.auxQ[1:]
+		s.auxMu.Unlock()
 		if !s.libraryMethod(req) && !s.presetMethod(req) {
 			s.fail(req.ID, fmt.Errorf("unknown method %q", req.Method))
 		}
@@ -291,6 +337,10 @@ func (s *Server) emit(id int32, ev runner.Event, start time.Time, output string)
 			GeometryPath: path,
 			Width:        e.Width,
 			Height:       e.Height,
+		}
+		if e.SrcRect[2] > 0 && e.SrcRect[3] > 0 {
+			r := e.SrcRect
+			done.SourceRect = &r
 		}
 		if e.Quality != nil {
 			done.DeltaE, done.SSIM = e.Quality.DeltaE, e.Quality.SSIM
