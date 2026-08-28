@@ -47,7 +47,19 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 	for i := range owner {
 		owner[i] = -1
 	}
-	for j := len(shapes) - 1; j >= 0; j-- {
+	// The engine's background rect (TypeRectangle, the only user of that type) is not a shape
+	// this pass may touch. Every render rebuilds from initCanvas and applies shapes[1:], so a
+	// repainted shapes[0] never reaches the score — but imageio.RenderFH6 and inject.Inject BOTH
+	// read it, so recolouring it made the preview and the in-game decal sit on a background the
+	// engine never optimised against. Its ownership was fictitious anyway: KindFromType(1) has no
+	// case and falls through to KindEllipse, so Data=[0,0,w,h] was rasterised as an ellipse
+	// CENTRED at the top-left corner with radii w,h — it claimed a quarter-ellipse (~78.5% of the
+	// canvas) and the bottom-right corner was owned by nothing.
+	last := 0
+	if len(shapes) > 0 && shapes[0].Type == model.TypeRectangle {
+		last = 1
+	}
+	for j := len(shapes) - 1; j >= last; j-- {
 		kind := model.KindFromType(shapes[j].Type)
 		p := model.ParamsFromShape(shapes[j])
 		if !opaqueShape(shapes[j]) {
@@ -136,7 +148,7 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 		}
 		wg.Wait()
 	}
-	for j := range shapes {
+	for j := last; j < len(shapes); j++ {
 		if sumW[j] <= 0 || !opaqueShape(shapes[j]) {
 			continue
 		}

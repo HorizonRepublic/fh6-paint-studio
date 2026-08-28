@@ -42,9 +42,20 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 
 	glows := gaussInitGlows(target, w, h, n)
 	shapes := make([]model.Shape, 0, len(glows)+1)
-	if !opt.TransparentBG {
-		shapes = append(shapes, gaussBgRect(bg, w, h))
+	// The rect is prepended even when the background is transparent — at alpha 0, so it composites
+	// as nothing and the canvas is what it always was. Skipping it put a GLOW at index 0, and
+	// index 0 is the one slot the whole pipeline treats as "not a shape": PolishWithBackend builds
+	// its parameter set from shapes[1:] and returns shapes[0] verbatim, so that first glow was
+	// never trained and was not in the training canvas either — yet it was composited back into
+	// the result at its grid-init values, meaning the best-hard point was chosen for a different
+	// image than the one delivered. Keep-inside makes TransparentBG true on every client run, so
+	// the "Soft glow" style hit this every time. It also restores the shapes[0]==background
+	// invariant that cmd/fh6paint and the unpad path rely on.
+	bgAlpha := 255
+	if opt.TransparentBG {
+		bgAlpha = 0
 	}
+	shapes = append(shapes, gaussBgRect(bg, w, h, bgAlpha))
 	shapes = append(shapes, glows...)
 	initErr := gaussRenderErr(be, shapes, w, h)
 
@@ -129,9 +140,9 @@ func gaussInitGlows(target []float32, w, h, n int) []model.Shape {
 	return out
 }
 
-func gaussBgRect(c model.RGBA, w, h int) model.Shape {
+func gaussBgRect(c model.RGBA, w, h, alpha int) model.Shape {
 	return model.Shape{Type: model.TypeRectangle, Data: []float64{0, 0, float64(w), float64(h)},
-		Color: []int{model.EncByte(c.R), model.EncByte(c.G), model.EncByte(c.B), 255}}
+		Color: []int{model.EncByte(c.R), model.EncByte(c.G), model.EncByte(c.B), alpha}}
 }
 
 // gaussRenderErr composites the shapes over a transparent canvas via the backend (the bg rect, if any,

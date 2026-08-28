@@ -1351,8 +1351,14 @@ func ParseKinds(csv string) []model.ShapeKind {
 		"triangle":  model.KindTriangle,
 	}
 	var out []model.ShapeKind
+	seen := map[model.ShapeKind]bool{}
 	for _, part := range strings.Split(csv, ",") {
-		if k, ok := m[strings.TrimSpace(strings.ToLower(part))]; ok {
+		// Deduplicated: a repeated kind only doubles its share of the CDF, which -kind-weights
+		// already expresses, and the list is copied into a fixed 8-float device buffer — nine
+		// entries ("ellipse,rectangle,triangle" typed three times) wrote 36 bytes into 32 and
+		// corrupted the neighbouring suballocation on every placed shape.
+		if k, ok := m[strings.TrimSpace(strings.ToLower(part))]; ok && !seen[k] {
+			seen[k] = true
 			out = append(out, k)
 		}
 	}

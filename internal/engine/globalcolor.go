@@ -815,6 +815,33 @@ func gcAlphaSweep(gl []gcLayer, c []float64, base, target, weight []float32, vca
 			na := math.Min(1, math.Max(aMin, num/den))
 			if math.Abs(na-l.alpha) > 1e-6 {
 				sc := float32(na / l.alpha)
+				// Carry the update into `cur`. r0 is reconstructed as cur − T·a·(c−V), and T is the
+				// transmittance of the layers ABOVE with their UPDATED alphas — so cur has to be
+				// updated too or the two describe different stacks: built once from the entry
+				// alphas, it made r0 evaluate to A_old + T_old·V + (T_old−T_new)·a·(c−V) instead of
+				// A_new + T_new·V, and every layer below the first one that moved was solved
+				// against a composite that no longer existed. The change is confined to this
+				// layer's bbox and is exact: cur += T·Δa·(c − V).
+				for y := l.y0; y <= l.y1; y++ {
+					row := (y - l.y0) * bw
+					for x := l.x0; x <= l.x1; x++ {
+						d := (row + x - l.x0)
+						aOld := l.a[d]
+						if aOld <= 0 {
+							continue
+						}
+						ti := y*w + x
+						t := trans[ti]
+						if t <= 0 {
+							continue
+						}
+						da := t * aOld * (sc - 1)
+						p, d3 := ti*4, d*3
+						cur[p+0] += da * (float32(cr) - v[d3+0])
+						cur[p+1] += da * (float32(cg) - v[d3+1])
+						cur[p+2] += da * (float32(cb) - v[d3+2])
+					}
+				}
 				for j := range l.a {
 					l.a[j] *= sc
 				}

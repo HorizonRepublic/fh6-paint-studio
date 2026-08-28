@@ -269,6 +269,10 @@ VkDescriptorSetLayout g_genDSL = VK_NULL_HANDLE, g_prepDSL = VK_NULL_HANDLE, g_a
 VkPipelineLayout      g_genPL = VK_NULL_HANDLE, g_prepPL = VK_NULL_HANDLE, g_argPL = VK_NULL_HANDLE, g_mutPL = VK_NULL_HANDLE;
 VkPipeline            g_genPipe = VK_NULL_HANDLE, g_prepPipe = VK_NULL_HANDLE, g_argPipe = VK_NULL_HANDLE, g_mutPipe = VK_NULL_HANDLE;
 VkDescriptorSet       g_genSet = VK_NULL_HANDLE, g_sevalSet = VK_NULL_HANDLE, g_prepSet = VK_NULL_HANDLE, g_argSet = VK_NULL_HANDLE, g_mutSet = VK_NULL_HANDLE;
+// The kinds list and its CDF live in fixed device buffers. Both search entry points refuse a
+// longer list rather than memcpy past the end: preset.ParseKinds deduplicates now, but a caller
+// that hands over more is a bug in the caller, not something to silently truncate.
+enum { FP_MAX_KINDS = 8 };
 Buf g_scand, g_sout, g_adj, g_best, g_kindsB, g_kindcdf, g_gridcdf, g_orient, g_bound, g_kgate, g_rampglow, g_coh, g_genCfg;
 
 // ---- coarse-to-fine filter (fp_set_coarse) ----
@@ -354,7 +358,7 @@ float g_propJitter = 0.05f; // spread around each proposal, in patch widths (see
 float g_propProgress = 0.f;
 
 // ---- on-device moment-seeded search (fp_search_moment) ----
-struct MomSeedPC { uint32_t seedLo, seedHi; int32_t K, gw, gh, W, H, hasBound; float maxR, boundPad, boundMix; };
+struct MomSeedPC { uint32_t seedLo, seedHi; int32_t K, gw, gh, W, H, hasBound, aniso; float maxR, boundPad, boundMix; };
 struct GenMomPC  { uint32_t seedLo, seedHi; int32_t n, perSeed, K, nKinds, allowAlpha, W, H, hasGate, hasRampGlow, bigKinds, bigKind; float alphaMin, canvasPad, glowTau, glowProb, rampThresh, rampTau, rampProb, bigTau, bigProb; };
 VkDescriptorSetLayout g_msDSL = VK_NULL_HANDLE, g_gmDSL = VK_NULL_HANDLE;
 VkPipelineLayout      g_msPL = VK_NULL_HANDLE, g_gmPL = VK_NULL_HANDLE;
@@ -1458,12 +1462,12 @@ API void fp_set_polish_eagle(const double* lambdaPtr) {
     if (g_peglambda <= 0.0 || !g_device || g_pn < 1) return;
     if (g_w < 8 || g_h < 8) { g_peglambda = 0.0; return; }
     size_t npix = (size_t)g_w * g_h;
-    if (g_egDSL == VK_NULL_HANDLE && !buildEagle()) { g_lastError = 2010; g_peglambda = 0.0; return; }
+    if (g_egSetT == VK_NULL_HANDLE && !buildEagle()) { g_lastError = 2010; g_peglambda = 0.0; return; } // last handle built, not the first
     // The lambda must die with the allocation, exactly as the two branches around it do: a live
     // lambda over a NULL g_termW dispatches against descriptor sets nothing ever wrote, which on a
     // low-VRAM card turns a survivable OOM into a device fault.
     if (!ensureTermW()) { g_lastError = 2012; g_peglambda = 0.0; return; }
-    if (g_egTL.buf == VK_NULL_HANDLE) {
+    if (g_egParts.buf == VK_NULL_HANDLE) { // last of the ~17-buffer chain below
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         bool ok = createBufEx(npix * 4, S, dl, false, g_egTL) && createBufEx(npix * 4, S, dl, false, g_egRL)
@@ -2057,20 +2061,31 @@ API int fp_init(const float* target, const float* weight, int w, int h, int maxC
 // every word's coverage concatenated; meta is {count, (offset,w,h) x count}. Returns 0 on success.
 API int fp_set_masks(const float* atlas, long long totalFloats, const int* meta, int count) {
     if (!g_device || !atlas || !meta || count < 1 || totalFloats < 1) return 1;
-    destroyBuf(g_maskAtlas); destroyBuf(g_maskMeta);
+    // Build into fresh buffers and swap only once everything succeeded. Destroying the old pair up
+    // front left g_evalSet 5/6 and g_applySet 1/2 bound to freed memory on either failure return
+    // below, because writeDescriptors() is only on the success path — and uploadMasks checks the
+    // return only for masksOn, so the run carried on and the next fp_eval read meta[0] out of a
+    // recycled suballocation.
     const VkBufferUsageFlags use = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     size_t aSize = (size_t)totalFloats * sizeof(float);
     size_t mSize = (size_t)(1 + count * 3) * sizeof(int32_t);
-    if (!createBufEx(aSize, use, dl, false, g_maskAtlas) || !createBufEx(mSize, use, dl, false, g_maskMeta)) {
+    Buf atlasB{}, metaB{};
+    if (!createBufEx(aSize, use, dl, false, atlasB) || !createBufEx(mSize, use, dl, false, metaB)) {
+        destroyBuf(atlasB); destroyBuf(metaB);
         g_lastError = 1021; return 2;
     }
-    if (!stagingReady(aSize > mSize ? aSize : mSize)) { g_lastError = 1060; return 3; }
-    memcpy(g_staging.map, atlas, aSize); copyBuf(g_staging.buf, g_maskAtlas.buf, aSize);
+    if (!stagingReady(aSize > mSize ? aSize : mSize)) {
+        destroyBuf(atlasB); destroyBuf(metaB);
+        g_lastError = 1060; return 3;
+    }
+    memcpy(g_staging.map, atlas, aSize); copyBuf(g_staging.buf, atlasB.buf, aSize);
     std::vector<int32_t> m(1 + (size_t)count * 3);
     m[0] = count;
     memcpy(m.data() + 1, meta, (size_t)count * 3 * sizeof(int32_t));
-    memcpy(g_staging.map, m.data(), mSize); copyBuf(g_staging.buf, g_maskMeta.buf, mSize);
+    memcpy(g_staging.map, m.data(), mSize); copyBuf(g_staging.buf, metaB.buf, mSize);
+    destroyBuf(g_maskAtlas); destroyBuf(g_maskMeta);
+    g_maskAtlas = atlasB; g_maskMeta = metaB;
     g_masksOn = 1;
     writeDescriptors();      // the atlas handles changed: rebind eval/apply
     g_searchSetsDirty = true; // and the search-eval set
@@ -2438,6 +2453,12 @@ API int fp_set_proposer(const void* blob, int bytes) {
     for (int l = 0; l < layers; l++) {
         PropLayer pl{};
         pl.inC = i32(); pl.outC = i32(); pl.stride = i32();
+        // conv3x3.comp sizes its shared tile for the worst case it was WRITTEN for, stride 2:
+        // shared float tile[(TILE*2+2)^2]. Its staging loop fills tileW*tileW with
+        // tileW = TILE*stride + 2 and no clamp, so a stride-3 layer writes past the workgroup
+        // allocation on any vendor. Every layer the exporter emits today is stride 1 or 2, so this
+        // is a guard rather than a fix — refuse the blob, exactly like the g_propChan check below.
+        if (pl.stride < 1 || pl.stride > 2) { freeProposer(); return 0; }
         if (l == 0) g_propInC = pl.inC;
         size_t wn = (size_t)pl.outC * pl.inC * 9;
         if (!uploadTo((const float*)(p + off), wn, pl.w)) return 0;
@@ -2707,6 +2728,7 @@ API void fp_search_random(unsigned long long seed, const int* ip, const float* f
     // against a GPU that is gone. Same lesson as fp_search_mutate.
     if (g_fatal) { if (!g_lastError) g_lastError = 1052; out_best[0] = 3.4028235e38f; return; }
     if (!g_device || n < 1 || nKinds < 1) { out_best[0] = 3.4028235e38f; return; }
+    if (nKinds > FP_MAX_KINDS) { g_lastError = 1062; out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535; // one eval workgroup per candidate; clamp to the dispatch limit
     g_survN = 0; // a failed or non-coarse search must not leave the previous pool readable
     if (!ensureSearch(n)) { out_best[0] = 3.4028235e38f; return; }
@@ -2796,10 +2818,11 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
                           const float* kinds, const float* kindCDF, const float* gridCDF, float* out_best) {
     g_profScope = PROF_SEARCH;
     int n = ip[0], nKinds = ip[1], gw = ip[2], gh = ip[3];
-    int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6], K = ip[7];
+    int compact = ip[4], shapeCount = ip[5], allowAlpha = ip[6], K = ip[7], aniso = ip[8];
     float maxR = fp[0], alphaMin = fp[1], boundPad = fp[3], boundMix = fp[4], canvasPad = fp[5];
     if (g_fatal) { if (!g_lastError) g_lastError = 1052; out_best[0] = 3.4028235e38f; return; } // see fp_search_random
     if (!g_device || n < 1 || nKinds < 1 || K < 1) { out_best[0] = 3.4028235e38f; return; }
+    if (nKinds > FP_MAX_KINDS) { g_lastError = 1062; out_best[0] = 3.4028235e38f; return; }
     if (n > 65535) n = 65535;
     // K > n (reachable through the expert panel's near-unclamped seed counter) makes nGen == K
     // exceed n; the buffers must be sized for what the DISPATCHES write, not the requested n —
@@ -2831,7 +2854,7 @@ API void fp_search_moment(unsigned long long seed, const int* ip, const float* f
     cmdStageCopies(ups, 3);
     vkCmdBindPipeline(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_msPipe);
     vkCmdBindDescriptorSets(g_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, g_msPL, 0, 1, &g_msSet, 0, nullptr);
-    MomSeedPC mpc{(uint32_t)seed, (uint32_t)(seed >> 32), K, gw, gh, g_w, g_h, g_hasBound, maxR, boundPad, boundMix};
+    MomSeedPC mpc{(uint32_t)seed, (uint32_t)(seed >> 32), K, gw, gh, g_w, g_h, g_hasBound, aniso, maxR, boundPad, boundMix};
     vkCmdPushConstants(g_cmd, g_msPL, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(mpc), &mpc);
     vkCmdDispatch(g_cmd, (uint32_t)((K + 127) / 128), 1, 1);
     cmdBarrierRW();
@@ -3345,9 +3368,15 @@ static void ensureFEPlanes() {
     g_profScope = PROF_TERMSET;
     if (!g_device || g_pn < 1) return;
     size_t npix = (size_t)g_w * g_h;
-    if (g_feDSL == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; g_pfelambda = 0.0; g_pldlambda = 0.0; return; } // lambda MUST die with the failed build: a live lambda with NULL pipelines is a device fault
+    // Guard on the LAST handle the chain creates, never the first: g_feDSL is made at the top of
+    // buildFE, so a failure anywhere after it left the guard satisfied with null pipelines behind
+    // it. Live path: polish.go calls PolishSetFalseEdge then PolishSetLostDetail back to back and
+    // anime has both lambdas > 0 — the first call fails and correctly zeroes both, the second
+    // takes this early-out, binds a null pipeline and leaves g_pldlambda armed. Same shape as the
+    // buildRefine fix.
+    if (g_feSetT == VK_NULL_HANDLE && !buildFE()) { g_lastError = 2006; g_pfelambda = 0.0; g_pldlambda = 0.0; return; } // lambda MUST die with the failed build: a live lambda with NULL pipelines is a device fault
     if (!ensureTermW()) { g_lastError = 2012; g_pfelambda = 0.0; g_pldlambda = 0.0; return; } // same rule for the weight buffer
-    if (g_feTL.buf == VK_NULL_HANDLE) {
+    if (g_feParts.buf == VK_NULL_HANDLE) { // last of the chain, for the same reason
         const VkBufferUsageFlags S = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         const VkMemoryPropertyFlags dl = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         if (!createBufEx(npix * 4, S, dl, false, g_feTL) ||

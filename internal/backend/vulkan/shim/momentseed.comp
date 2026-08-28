@@ -18,7 +18,7 @@ layout(std430, binding = 0) writeonly buffer Sd { float seeds[]; };
 layout(std430, binding = 1) readonly  buffer Gc { float gridCDF[]; };
 layout(std430, binding = 2) readonly  buffer Bd { float boundDist[]; };
 layout(push_constant) uniform PC {
-    uint seedLo, seedHi; int K, gw, gh, W, H, hasBound; float maxR, boundPad, boundMix;
+    uint seedLo, seedHi; int K, gw, gh, W, H, hasBound, aniso; float maxR, boundPad, boundMix;
 } pc;
 
 uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -75,13 +75,22 @@ void main() {
             u20 += REAL(e) * dx * dx; u02 += REAL(e) * dy * dy; u11 += REAL(e) * dx * dy;
         }
         u20 /= m00; u02 /= m00; u11 /= m00;
+        // Cell -> pixel: the grid is gw x gh whatever the image aspect, so a cell is sx by sy
+        // and the covariance must be mapped (S*Sigma*S^T) before it is decomposed. Scaling the
+        // axes by (sx+sy)/2 afterwards reports both the wrong aspect and the wrong angle;
+        // that is what pc.aniso == 0 (FH6_GRIDASPECT=0) restores -- an isotropic covariance
+        // scale leaves the eigenvectors alone, so it is exactly the old "* s" on the axes.
+        // The pin keeps the whole scale on the AXES, where it used to be, so it stays
+        // bit-identical -- scaling a covariance by exactly 1 is exact.
+        float mx = 1.0, my = 1.0, post = 1.0;
+        if (pc.aniso != 0) { mx = sx; my = sy; } else { post = (sx + sy) / 2.0; }
+        u20 *= REAL(mx) * REAL(mx); u02 *= REAL(my) * REAL(my); u11 *= REAL(mx) * REAL(my);
         REAL hlf = (u20 - u02) / REAL(2.0);
         REAL d = REAL(sqrt(float(max(REAL(0.0), hlf * hlf + u11 * u11))));
         REAL lmax = (u20 + u02) / REAL(2.0) + d, lmin = (u20 + u02) / REAL(2.0) - d; if (lmin < REAL(0.0)) lmin = REAL(0.0);
         REAL major = REAL(2.0) * REAL(sqrt(float(lmax))), minor = REAL(2.0) * REAL(sqrt(float(lmin)));
-        float s = (sx + sy) / 2.0;
         scx = float((mcx + REAL(0.5)) * REAL(sx)); scy = float((mcy + REAL(0.5)) * REAL(sy));
-        srx = float(max(major, REAL(0.5)) * REAL(s)); sry = float(max(minor, REAL(0.5)) * REAL(s));
+        srx = float(max(major, REAL(0.5)) * REAL(post)); sry = float(max(minor, REAL(0.5)) * REAL(post));
         // atan(0,0) is undefined in GLSL and a single hot cell makes both arguments exactly zero
         // (u11 = 0 and u20 == u02), so the orientation of an isolated seed was whatever the driver
         // returned — NaN on some, 0 on others, and the candidate pool differed by vendor.

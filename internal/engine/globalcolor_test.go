@@ -266,3 +266,77 @@ func TestGlobalAlphaRespectsTheFloor(t *testing.T) {
 		}
 	}
 }
+
+// The sweep runs top-down, and the layer below the first one it moves is where the composite it
+// reconstructs stops matching the transmittance it uses. The existing scan only checks the TOP
+// layer, which is exactly the one that cannot expose it — nothing above it has moved yet.
+func TestGlobalAlphaSecondLayerMatchesABruteForceScan(t *testing.T) {
+	defer func(prev bool) { model.LinearLight = prev }(model.LinearLight)
+	model.LinearLight = true
+
+	const w, h = 36, 36
+	bg := model.RGBA{R: 0.25, G: 0.4, B: 0.55, A: 1}
+	cols := [][3]float64{{0.9, 0.15, 0.1}, {0.1, 0.8, 0.2}, {0.15, 0.2, 0.85}}
+	target := renderStackTo(gcMakeShapes(cols, 0.7), bg, w, h)
+	weight := make([]float32, w*h)
+	for i := range weight {
+		weight[i] = 1 + float32(i%13)/13
+	}
+	base := make([]float32, w*h*4)
+	for i := 0; i < w*h; i++ {
+		base[i*4+0], base[i*4+1], base[i*4+2], base[i*4+3] = bg.R, bg.G, bg.B, 1
+	}
+	flat := make([]float64, len(cols)*3)
+	for i, c := range cols {
+		flat[i*3+0], flat[i*3+1], flat[i*3+2] = c[0], c[1], c[2]
+	}
+
+	gl := gcBuild(gcMakeShapes(cols, 0.4)[1:], w, h)
+	vcache := make([][]float32, len(gl))
+	for i := range gl {
+		vcache[i] = make([]float32, (gl[i].x1-gl[i].x0+1)*(gl[i].y1-gl[i].y0+1)*3)
+	}
+	trans := make([]float32, w*h)
+	gcAlphaSweep(gl, flat, base, target, weight, vcache, trans, w, h, 0.05)
+
+	top, second := len(gl)-1, len(gl)-2
+	if second < 0 {
+		t.Skip("need at least two layers")
+	}
+	topAlpha := gl[top].alpha
+
+	// Scan the second layer against the stack the sweep actually saw: the top layer at the alpha the
+	// sweep gave it, everything below still at the entry alpha.
+	setAlpha := func(l *gcLayer, a float64) {
+		sc := float32(a / l.alpha)
+		for j := range l.a {
+			l.a[j] *= sc
+		}
+		l.alpha = a
+	}
+	sse := func(a float64) float64 {
+		g := gcBuild(gcMakeShapes(cols, 0.4)[1:], w, h)
+		setAlpha(&g[top], topAlpha)
+		setAlpha(&g[second], a)
+		render := make([]float32, w*h*4)
+		copy(render, base)
+		gcComposite(g, flat, render, w)
+		var e float64
+		for i := 0; i < w*h; i++ {
+			for ch := 0; ch < 3; ch++ {
+				d := float64(render[i*4+ch] - target[i*4+ch])
+				e += float64(weight[i]) * d * d
+			}
+		}
+		return e
+	}
+	var bestA, bestE = 0.0, math.Inf(1)
+	for a := 0.05; a <= 1.0001; a += 0.005 {
+		if e := sse(a); e < bestE {
+			bestE, bestA = e, a
+		}
+	}
+	if got := gl[second].alpha; math.Abs(got-bestA) > 0.01 {
+		t.Errorf("second layer: closed-form alpha = %.4f, brute-force optimum = %.4f", got, bestA)
+	}
+}

@@ -16,6 +16,7 @@ package vulkan
 import (
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
@@ -933,6 +934,11 @@ func (g *Vulkan) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCD
 // covariance-ellipse seeds from the residual grid + a localised refine pool of `n` total
 // candidates, score + argmin, return the single best. ok=false when the export is missing.
 // Mirrors SearchRandom's wire format with K appended to ip; aspectMax is unused (per-seed).
+// gridAnisoOn is the shim half of engine's FH6_GRIDASPECT pin: the error grid is square
+// whatever the image aspect, so momentseed.comp can map its cells through the covariance.
+// Off by default — see the measurement above engine.gridAnisoOn.
+var gridAnisoOn = os.Getenv("FH6_GRIDASPECT") == "1"
+
 func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKind, kindCDF []float32,
 	maxR float32, allowAlpha bool, alphaMin float32, compact bool, shapeCount int,
 	grid []float32, gw, gh int, boundPad, boundMix, canvasPad float32) (model.Candidate, float32, bool) {
@@ -962,7 +968,7 @@ func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKin
 	for i, k := range kinds {
 		kf[i] = float32(k)
 	}
-	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers)}
+	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers), b2i32(gridAnisoOn)}
 	fp := []float32{maxR, alphaMin, 0, boundPad, boundMix, canvasPad}
 	if cap(g.searchOut) < 12 {
 		g.searchOut = make([]float32, 12)

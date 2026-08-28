@@ -126,6 +126,13 @@ func compSeeds(grid []float32, gw, gh, imgW, imgH int, maxR float32, n int, kind
 		if vyy < 0 {
 			vyy = 0
 		}
+		// Cell -> pixel before the decomposition: the grid is square whatever the image aspect,
+		// so scaling the PRINCIPAL axes by sx,sy afterwards would apply an axis-aligned stretch
+		// to a rotated frame — wrong aspect and wrong angle both.
+		px, py, qx, qy := gridCellScale(sx, sy)
+		vxx *= float64(px) * float64(px)
+		vyy *= float64(py) * float64(py)
+		vxy *= float64(px) * float64(py)
 		// Principal axes of the component's error mass. Two standard deviations covers it without
 		// the tail that a full extent would include.
 		tr, det := vxx+vyy, vxx*vyy-vxy*vxy
@@ -135,8 +142,8 @@ func compSeeds(grid []float32, gw, gh, imgW, imgH int, maxR float32, n int, kind
 			l2 = 0
 		}
 		theta := 0.5 * math.Atan2(2*vxy, vxx-vyy) * 180 / math.Pi
-		rx := float32(2*math.Sqrt(l1)) * sx
-		ry := float32(2*math.Sqrt(l2)) * sy
+		rx := float32(2*math.Sqrt(l1)) * qx
+		ry := float32(2*math.Sqrt(l2)) * qy
 		if rx < 1 {
 			rx = 1
 		}

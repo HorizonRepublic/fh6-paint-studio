@@ -142,6 +142,28 @@ func UnpadPrepared(prep *Prepared, pad, w, h int) *Prepared {
 		HasTransparency: !prep.PaddedOpaque, PaddedOpaque: false}
 }
 
+// UnpadGeometry maps a padded run's shapes back into the original canvas: it shifts everything by
+// -pad and then RESTATES the background rectangle as the view.
+//
+// The restate is the part that is easy to forget, and forgetting it produces a document in a
+// different dialect. model.Geometry carries shapes and nothing else, so shapes[0] is the only
+// record of the canvas an export was fitted at, and every reader takes the size from it —
+// TranslateShapes deliberately moves an origin and never a size, so on its own it leaves the rect
+// declaring the PADDED dimensions at (-pad,-pad) and the art lands in the corner of a canvas 20%
+// too large. Both the daemon and the CLI unpad, so both call this.
+func UnpadGeometry(shapes []model.Shape, pad, w, h int) []model.Shape {
+	if pad <= 0 {
+		return shapes
+	}
+	shapes = TranslateShapes(shapes, -float64(pad), -float64(pad))
+	if len(shapes) > 0 && shapes[0].Type == model.TypeRectangle && len(shapes[0].Data) >= 4 {
+		d := shapes[0].Data
+		d[0], d[1] = 0, 0
+		d[2], d[3] = float64(w), float64(h)
+	}
+	return shapes
+}
+
 // TranslateShapes shifts every shape's position by (dx,dy) canvas pixels, in place, returning the
 // slice. Used to map a padded reconstruction's geometry back into the original (un-padded) canvas after
 // a transparent-surround run, so preview/export/inject coordinates land in the original image space.

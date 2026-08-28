@@ -91,10 +91,15 @@ type smoothRegion struct {
 func (r *run) smoothBase() int {
 	w, h := r.w, r.h
 	target := r.be.Target()
+	// A non-nil gate does not imply a hardness map: run.go builds a gate with hard == nil purely
+	// to carry the size-conditioned glow swap when region-kinds is off, and pick/bigGlowSwap both
+	// fall through on that. This pass indexes hard per pixel, so it has to ask for the map itself.
+	// Repro before the second condition: -mode anime -region-kinds=false -big-glow-tau 0.04.
 	hard := []float32(nil)
 	if r.kindGate != nil {
 		hard = r.kindGate.hard
-	} else {
+	}
+	if hard == nil {
 		hard = metric.HardEdgeMap(target, w, h)
 	}
 

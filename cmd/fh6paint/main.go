@@ -383,8 +383,14 @@ func main() {
 	// The env pin wins over both, and it can force the pass OFF as well as on: a control arm needs a
 	// way to disable a preset default without a flag, and "set means pin" is how the other pins here
 	// already behave.
-	if v := os.Getenv("FH6_GEOMREFINE"); v != "" {
-		*geomRefine = v == "1"
+	// 0/1 only, matching preset.geomRefine — "v == \"1\"" made every other value (FH6_GEOMREFINE=true)
+	// force the pass OFF in the CLI while the studio kept the default ON, so the two consumers of one
+	// pin disagreed for every spelling but "1".
+	switch os.Getenv("FH6_GEOMREFINE") {
+	case "0":
+		*geomRefine = false
+	case "1":
+		*geomRefine = true
 	}
 	// Size-conditioned glow-swap defaults (md.BigGlowTau/-Prob). Pulled here for the same reason
 	// every other preset field is: the studio reads ModeDefaults directly, the CLI does not.
@@ -654,8 +660,8 @@ func main() {
 			len(res.Shapes)-1, res.InitialError, res.FinalError, time.Since(start).Seconds())
 		gOutW, gOutH := prep.W, prep.H
 		if padPx > 0 {
-			res.Shapes = imageio.TranslateShapes(res.Shapes, -float64(padPx), -float64(padPx))
 			gOutW, gOutH = origW, origH
+			res.Shapes = imageio.UnpadGeometry(res.Shapes, padPx, gOutW, gOutH)
 		}
 		must(ensureDir(*out))
 		must(imageio.WriteGeometry(*out, model.Geometry{Shapes: res.Shapes}))
@@ -791,8 +797,8 @@ func main() {
 	// rectangle, so shifting them by -padPx yields a clean origin-0 reconstruction at the original dims.
 	outW, outH := prep.W, prep.H
 	if padPx > 0 {
-		res.Shapes = imageio.TranslateShapes(res.Shapes, -float64(padPx), -float64(padPx))
 		outW, outH = origW, origH
+		res.Shapes = imageio.UnpadGeometry(res.Shapes, padPx, outW, outH)
 		applog.Printf("pad-transparent: mapped %d shapes back to %dx%d (un-padded, frame-free)", len(res.Shapes)-1, outW, outH)
 	}
 

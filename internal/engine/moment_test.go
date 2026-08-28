@@ -138,6 +138,42 @@ func TestMomentSeedFromGridMapsToPixels(t *testing.T) {
 	}
 }
 
+func TestMomentSeedFromGridNonSquareImage(t *testing.T) {
+	// The error grid is gridSize×gridSize whatever the target's aspect, so on a 2000×1000
+	// image a 64×64 grid has 31.25×15.625 px cells. A ROUND blob in grid space is a 2:1
+	// ellipse on the image, and a 45° one is not at 45° on the image.
+	const gw, gh, imgW, imgH = 64, 64, 2000, 1000
+	defer func(v bool) { gridAnisoOn = v }(gridAnisoOn)
+
+	// What ships (pin off): a round grid blob comes back round, at the average cell scale.
+	gridAnisoOn = false
+	flat := fillEllipse(gw, gh, 32, 32, 6, 6, 0)
+	if _, _, rx, ry, _, ok := momentSeedFromGrid(flat, gw, gh, imgW, imgH, 1000, 500, 400); !ok || rx != ry {
+		t.Errorf("pin off: (%.1f,%.1f) ok=%v want a round seed", rx, ry, ok)
+	}
+
+	gridAnisoOn = true
+	round := fillEllipse(gw, gh, 32, 32, 6, 6, 0)
+	_, _, rx, ry, _, ok := momentSeedFromGrid(round, gw, gh, imgW, imgH, 1000, 500, 400)
+	if !ok {
+		t.Fatal("ok=false on a valid grid blob")
+	}
+	if a := float64(rx / ry); math.Abs(a-2) > 0.15 {
+		t.Errorf("round grid blob: pixel aspect %.2f (%.1f×%.1f) want ~2.00", a, rx, ry)
+	}
+
+	// Grid covariance of a 45° blob with semi-axes 10,3 maps through S=diag(31.25,15.625)
+	// to θ = ½·atan2(2·5554, 13305−3326) ≈ 24°.
+	tilt := fillEllipse(gw, gh, 32, 32, 10, 3, 45)
+	_, _, _, _, th, ok := momentSeedFromGrid(tilt, gw, gh, imgW, imgH, 1000, 500, 400)
+	if !ok {
+		t.Fatal("ok=false on a valid tilted grid blob")
+	}
+	if th < 16 || th > 32 {
+		t.Errorf("45° grid blob maps to %.1f° want ~24° (an isotropic remap leaves it at 45°)", th)
+	}
+}
+
 func TestMomentPoolSeedIsExactEllipse(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	kinds := []model.ShapeKind{model.KindEllipse, model.KindTriangle, model.KindRectangle}

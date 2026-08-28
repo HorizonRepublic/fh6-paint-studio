@@ -3,9 +3,35 @@ package engine
 import (
 	"math"
 	"math/rand"
+	"os"
 
 	"fh6-paint-studio/internal/model"
 )
+
+// gridAnisoOn maps the error grid's cells to pixels through the covariance. The grid is
+// gridSize×gridSize whatever the target's aspect (Vulkan.ErrorGrid), so on a 2000×1000
+// image its cells are 2:1 and the isotropic remap below it ships every moment seed at the
+// wrong aspect and the wrong angle — a 45° blob in grid space at 26.6° on the image.
+//
+// OFF by default because it MEASURED AS NOISE: n=27 at 1000 shapes / 2000px on a bank
+// whose aspects run 1.08-1.78, mean +0.329%, 11/27 better, sd 2.853%, sign test p=0.442.
+// The seed is refined downstream (device hill-climb, then geometry refine), and that
+// absorbs the seed's aspect and angle error — so the correct fit buys nothing and moving
+// the shipped output for it would only cost a baseline. FH6_GRIDASPECT=1 turns it on;
+// the shim reads the same pin (ip[8]), and compseed.go shares it.
+var gridAnisoOn = os.Getenv("FH6_GRIDASPECT") == "1"
+
+// gridCellScale splits the cell -> pixel scale into the part applied to the COVARIANCE
+// (pre) and the part applied to the fitted AXES (post). The pin path keeps the whole
+// scale in post, which is where it used to be, so it stays bit-identical; multiplying a
+// covariance by exactly 1 is exact, so the fix costs nothing when it is off.
+func gridCellScale(sx, sy float32) (preX, preY, postX, postY float32) {
+	if gridAnisoOn {
+		return sx, sy, 1, 1
+	}
+	s := (sx + sy) / 2
+	return 1, 1, s, s
+}
 
 // momentSemiAxis maps sqrt(eigenvalue) of the residual covariance to an ellipse
 // semi-axis. For a UNIFORM filled ellipse of semi-axes (A,B), the second central
@@ -24,6 +50,16 @@ const momentSemiAxis = 2.0
 // in effect, brute-forcing toward exactly this shape, so it can be computed directly as
 // a near-optimal seed instead of searched over tens of thousands of random candidates.
 func momentEllipse(w []float32, fw, fh int) (cx, cy, rx, ry, thetaDeg float32, ok bool) {
+	return momentEllipseAniso(w, fw, fh, 1, 1)
+}
+
+// momentEllipseAniso is momentEllipse for a window whose cell is sx×sy pixels: the
+// centroid comes back in CELL coordinates (the caller owns the window offset) but the
+// axes and the orientation come back in PIXEL space. Scaling the axes by an average of
+// sx,sy is not the same fit — the covariance itself has to be mapped, S·Σ·Sᵀ, and
+// re-decomposed, or an anisotropic cell reports both the wrong aspect and the wrong
+// angle (a 45° blob in a 2:1 grid is 26.6° on the image).
+func momentEllipseAniso(w []float32, fw, fh int, sx, sy float64) (cx, cy, rx, ry, thetaDeg float32, ok bool) {
 	var m00, m10, m01 float64
 	for y := 0; y < fh; y++ {
 		row := y * fw
@@ -63,6 +99,11 @@ func momentEllipse(w []float32, fw, fh int) (cx, cy, rx, ry, thetaDeg float32, o
 	u02 /= m00
 	u11 /= m00
 
+	// Cell -> pixel: Σ_px = S·Σ_cell·Sᵀ with S = diag(sx,sy).
+	u20 *= sx * sx
+	u02 *= sy * sy
+	u11 *= sx * sy
+
 	// Eigenvalues of the symmetric covariance [[u20,u11],[u11,u02]].
 	half := (u20 - u02) / 2
 	d := math.Sqrt(math.Max(0, half*half+u11*u11))
@@ -86,9 +127,9 @@ func momentEllipse(w []float32, fw, fh int) (cx, cy, rx, ry, thetaDeg float32, o
 // error grid around pixel (px,py) and returns a near-optimal ellipse seed in PIXEL
 // coordinates. The window half-size follows radiusPx (≈ the anneal max radius) so big
 // early shapes fit a wide blob and late detail a tight one. ok=false when the window
-// carries ~no error. Assumes roughly square grid cells (gw/gh ≈ imgW/imgH, true for the
-// proportional error grid); the seed is refined afterwards regardless, so small cell
-// anisotropy is harmless.
+// carries ~no error. The grid is gridSize×gridSize whatever the image aspect, so its
+// cells are as anisotropic as the target and the covariance is mapped to pixels before
+// it is decomposed.
 func momentSeedFromGrid(grid []float32, gw, gh, imgW, imgH int, px, py, radiusPx float32) (cx, cy, rx, ry, theta float32, ok bool) {
 	if gw <= 0 || gh <= 0 || len(grid) < gw*gh {
 		return 0, 0, 0, 0, 0, false
@@ -129,13 +170,13 @@ func momentSeedFromGrid(grid []float32, gw, gh, imgW, imgH int, px, py, radiusPx
 			win[dst+x] = v
 		}
 	}
-	lcx, lcy, lrx, lry, lth, fok := momentEllipse(win, ww, wh)
+	px, py, qx, qy := gridCellScale(sx, sy)
+	lcx, lcy, lrx, lry, lth, fok := momentEllipseAniso(win, ww, wh, float64(px), float64(py))
 	if !fok {
 		return 0, 0, 0, 0, 0, false
 	}
-	s := (sx + sy) / 2 // isotropic axis scale (preserves the fitted angle)
 	return (float32(gx0) + lcx + 0.5) * sx, (float32(gy0) + lcy + 0.5) * sy,
-		lrx * s, lry * s, lth, true
+		lrx * qx, lry * qy, lth, true
 }
 
 // momentPool builds the small candidate pool for one greedy step from the moment seed:
