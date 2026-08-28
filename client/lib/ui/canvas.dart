@@ -101,8 +101,11 @@ class CanvasView extends StatelessWidget {
   /// it, so applying a crop changes the picture immediately instead of only
   /// changing what the next run will fit.
   Rect _view(ui.Image src) {
-    final r = studio.region;
-    if (r == null) {
+    // The result's OWN rectangle first. With no crop of the user's, the daemon still auto-crops to
+    // the content box (whenever it covers under 97% of the file), so "before" drawn from the whole
+    // source wiped across a reconstruction of only part of it.
+    final r = studio.region ?? studio.resultRect;
+    if (r == null || r.length < 4 || r[2] <= 0 || r[3] <= 0) {
       return Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble());
     }
     return Rect.fromLTWH(

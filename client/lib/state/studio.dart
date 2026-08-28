@@ -49,6 +49,13 @@ class Studio extends ChangeNotifier {
   int sourceW = 0;
   int sourceH = 0;
 
+  /// The part of the SOURCE FILE the result on screen actually covers, as [x, y, w, h] in the raw
+  /// file's pixels. Not the same as [region]: with no crop of the user's own, the daemon still
+  /// auto-crops to the content box whenever it covers under 97% of the file, and the compare wipe
+  /// then drew "before" from the WHOLE source while the result was the cropped content — a cutout
+  /// or a letterboxed photo wiped across a picture it no longer lined up with.
+  List<int>? resultRect;
+
   /// The crop, as an absolute rectangle in the RAW file's coordinates:
   /// [x, y, w, h]. Absolute for the same reason the protocol is — a crop
   /// composed onto a previous crop makes "a fraction of what" ambiguous.
@@ -156,6 +163,7 @@ class Studio extends ChangeNotifier {
   EngineClient? get engine => _engine;
 
   bool get isRunning => phase == Phase.running || phase == Phase.loading;
+
   /// Fraction of the WHOLE run, and never decreasing within one.
   ///
   /// The shape ratio only describes placement, so it reached 100% and sat there
@@ -185,8 +193,10 @@ class Studio extends ChangeNotifier {
     _engine!.onDeath = (_) => unawaited(reconnect());
     final v = await _engine!.hello();
     if (v != EngineClient.protocolVersion) {
-      _note('warn',
-          'engine speaks protocol v$v, this client expects v${EngineClient.protocolVersion} — mixed versions? replace both files together');
+      _note(
+        'warn',
+        'engine speaks protocol v$v, this client expects v${EngineClient.protocolVersion} — mixed versions? replace both files together',
+      );
     }
     choices = await _engine!.defaults();
     _defaults = Map<String, dynamic>.of(choices);
@@ -341,6 +351,7 @@ class Studio extends ChangeNotifier {
     sourceW = 0;
     sourceH = 0;
     region = null;
+    resultRect = null;
     geometry = null;
     resultW = 0;
     resultH = 0;
@@ -377,7 +388,8 @@ class Studio extends ChangeNotifier {
         frame.image.dispose(); // the user moved on while this was decoding
         return;
       }
-      sourceImage?.dispose(); // two in-flight decodes of the SAME path: don't leak the first
+      sourceImage
+          ?.dispose(); // two in-flight decodes of the SAME path: don't leak the first
       sourceImage = frame.image;
       sourceW = frame.image.width;
       sourceH = frame.image.height;
@@ -615,6 +627,10 @@ class Studio extends ChangeNotifier {
         geometry = d['geometry'] as Map<String, dynamic>?;
         resultW = (d['width'] as num?)?.toInt() ?? 0;
         resultH = (d['height'] as num?)?.toInt() ?? 0;
+        final sr = d['sourceRect'];
+        resultRect = sr is List && sr.length == 4
+            ? sr.map((v) => (v as num).toInt()).toList()
+            : null;
         selectedRunId = null;
         _stopClock();
         polishEnd = elapsed;
@@ -636,10 +652,10 @@ class Studio extends ChangeNotifier {
         stage = '';
         failure = u.error;
         _note('error', u.error ?? 'failed');
-        // A dead engine reconnects through EngineClient.onDeath now (wired in
-        // connect), which fires for idle deaths too — not just the ones that
-        // happen to arrive on a live run's stream, which is all this string
-        // match ever caught.
+      // A dead engine reconnects through EngineClient.onDeath now (wired in
+      // connect), which fires for idle deaths too — not just the ones that
+      // happen to arrive on a live run's stream, which is all this string
+      // match ever caught.
     }
     notifyListeners();
   }
@@ -650,13 +666,23 @@ class Studio extends ChangeNotifier {
   /// preview flicker backwards.
   bool _decoding = false;
   PreviewFrame? _pendingFrame;
+  int _pendingSeq = 0;
+  int _pendingEpoch = 0;
   void _decode(PreviewFrame f) {
     // A frame arriving mid-decode is stashed, not dropped: the LAST frame of a
     // run is the finished geometry, and dropping it left the canvas one frame
     // behind until an unrelated repaint. Only the newest pending frame is kept —
     // older ones are already stale.
     if (_decoding) {
+      // The stash carries the sequence and epoch it ARRIVED under. It used to be stored bare and
+      // handed to _decode on drain, which re-read the current ones — so a frame stashed before
+      // Stop decoded under the new sequence, passed the guard below and was assigned to preview,
+      // contradicting cancel()'s own contract. Worse leg: fit finishes, the user opens a run from
+      // the rail, and the stash paints the old fit over the loaded one while geometry/resultW —
+      // what Inject and Export read — belong to the run on screen's replacement.
       _pendingFrame = f;
+      _pendingSeq = _runSeq;
+      _pendingEpoch = _openEpoch;
       return;
     }
     _decoding = true;
@@ -688,8 +714,13 @@ class Studio extends ChangeNotifier {
         // frame stashed for the NEW run was being nulled here just because the
         // decode it was waiting behind turned out to be stale.
         final next = _pendingFrame;
+        final nextSeq = _pendingSeq;
+        final nextEpoch = _pendingEpoch;
         _pendingFrame = null;
-        if (next != null && !_disposed) {
+        if (next != null &&
+            !_disposed &&
+            nextSeq == _runSeq &&
+            nextEpoch == _openEpoch) {
           _decode(next);
         } else {
           // The last frame of the run has landed: the picture the library
@@ -732,8 +763,9 @@ class Studio extends ChangeNotifier {
       sourceW = 0;
       sourceH = 0;
       region = null;
+      resultRect = null;
       compare = 1;
-    compareN.value = 1;
+      compareN.value = 1;
 
       // Then put the run's OWN source back if it is still on this machine. The
       // compare wipe — the app's main way of judging a result — was dead for
@@ -756,6 +788,11 @@ class Studio extends ChangeNotifier {
       preview?.dispose();
       preview = frame.image;
       phase = Phase.done;
+      // A run read off disk has no phase times of its own. Leaving the last fit's behind printed
+      // the PREVIOUS run's build/polish split in the activity card under this run's name.
+      elapsed = Duration.zero;
+      buildEnd = null;
+      polishEnd = null;
       ssim = null;
       deltaE = null;
       _note('info', 'opened $sourceName from the library');
@@ -831,8 +868,9 @@ class Studio extends ChangeNotifier {
       sourceW = 0;
       sourceH = 0;
       region = null;
+      resultRect = null;
       compare = 1;
-    compareN.value = 1;
+      compareN.value = 1;
 
       geometry = Map<String, dynamic>.of(doc as Map<String, dynamic>);
       resultW = w;
@@ -843,6 +881,10 @@ class Studio extends ChangeNotifier {
       preview?.dispose();
       preview = img;
       phase = Phase.done;
+      elapsed =
+          Duration.zero; // as openRun: an imported document was not fitted here
+      buildEnd = null;
+      polishEnd = null;
       ssim = null;
       deltaE = null;
       failure = null;
@@ -1384,7 +1426,8 @@ class Studio extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _ticker?.cancel(); // a live 4Hz timer notifying a disposed notifier throws every 250ms
+    _ticker
+        ?.cancel(); // a live 4Hz timer notifying a disposed notifier throws every 250ms
     _ticker = null;
     _runSeq++; // retire in-flight decodes/updates
     _engine?.close();

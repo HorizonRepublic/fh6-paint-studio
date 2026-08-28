@@ -189,6 +189,7 @@ class _EditorViewState extends State<EditorView> {
 
   _Tool _tool = _Tool.select;
   Offset? _dragFrom;
+  Offset? _pivot; // the rotate/scale centre, taken once at _down — see the note there
   bool _marked = false;
 
   /// The previous click, for hand-rolled double-click detection. A real
@@ -614,6 +615,12 @@ class _EditorViewState extends State<EditorView> {
     }
     _dragFrom = docPoint;
     _marked = false;
+    // Captured ONCE, here: layerBounds is an axis-aligned box and turning an asymmetric group
+    // moves it, so a pivot re-read on every pointer event walks away from the point the user
+    // grabbed — a full turn does not come back and small corrections ratchet the layer off.
+    _pivot = ed.groupLayer != null
+        ? ed.layerBounds(ed.groupLayer!)?.center
+        : ed.current?.center;
   }
 
   void _move(Offset docPoint) {
@@ -637,9 +644,9 @@ class _EditorViewState extends State<EditorView> {
       _marked = true;
     }
     final d = docPoint - from;
-    final centre = groupHeld != null
-        ? ed.layerBounds(groupHeld)?.center
-        : s?.center;
+    final centre =
+        _pivot ??
+        (groupHeld != null ? ed.layerBounds(groupHeld)?.center : s?.center);
     if (centre == null) return;
 
     double turn() {
@@ -657,7 +664,7 @@ class _EditorViewState extends State<EditorView> {
     if (groupHeld != null) {
       switch (_held) {
         case Grip.rotate:
-          ed.rotateLayer(groupHeld, turn());
+          ed.rotateLayer(groupHeld, turn(), pivot: centre);
         case Grip.body:
           ed.translateLayer(groupHeld, d.dx, d.dy);
         default:
@@ -2588,6 +2595,13 @@ class _ColorPickerState extends State<_ColorPicker> {
   bool _dragging = false;
   final _hexField = TextEditingController();
   final _hexFocus = FocusNode();
+
+  /// The text the MODEL last put in the hex field. _syncFromShape refuses to refresh the field
+  /// while it holds focus, but the blur listener commits unconditionally — so clicking into hex,
+  /// clicking shape B in the layer list (rows are focusable: false, so focus stays) and tabbing
+  /// away recoloured B with A's hex, with an undo entry. The same mechanism reverted a live
+  /// saturation or hue drag. A commit with nothing edited is not a user decision.
+  String _hexShown = '';
   List<int> _synced = const [-1, -1, -1];
 
   Editor get ed => widget.editor;
@@ -2618,7 +2632,7 @@ class _ColorPickerState extends State<_ColorPicker> {
     _sat = hsv.saturation;
     _val = hsv.value;
     _synced = [c[0], c[1], c[2]];
-    if (!_hexFocus.hasFocus) _hexField.text = _hex(c);
+    if (!_hexFocus.hasFocus) _hexShown = _hexField.text = _hex(c);
   }
 
   void _push({required bool preview}) {
@@ -2627,7 +2641,7 @@ class _ColorPickerState extends State<_ColorPicker> {
     final g = (c.g * 255).round();
     final b = (c.b * 255).round();
     _synced = [r, g, b];
-    if (!_hexFocus.hasFocus) _hexField.text = _hex(_synced);
+    if (!_hexFocus.hasFocus) _hexShown = _hexField.text = _hex(_synced);
     if (preview) {
       ed.previewColor(r, g, b);
     } else {
@@ -2636,13 +2650,15 @@ class _ColorPickerState extends State<_ColorPicker> {
   }
 
   void _commitHex() {
+    if (_hexField.text.trim() == _hexShown.trim()) return; // see _hexShown
     final t = _hexField.text.trim().replaceFirst('#', '');
     final v = t.length == 6 ? int.tryParse(t, radix: 16) : null;
     if (v == null) {
       final c = ed.current?.color;
-      if (c != null) _hexField.text = _hex(c);
+      if (c != null) _hexShown = _hexField.text = _hex(c);
       return;
     }
+    _hexShown = _hexField.text;
     _synced = const [-1, -1, -1]; // force the fields to re-derive
     ed.setColor((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
   }

@@ -467,6 +467,9 @@ class EditShape {
         data[1] = 2 * axis - data[1];
         data[4] = (180 - data[4]) % 360;
       }
+      // The shear is handed too. The rotation above absorbs the reflection of the axes but the
+      // skew field does not, so a mirrored skewed rect came back leaning the same way it went in.
+      if (data.length > 5) data[5] = -data[5];
       return;
     }
     for (var i = 0; i + 1 < data.length; i += 2) {
@@ -720,6 +723,7 @@ class Editor extends ChangeNotifier {
         notifyListeners();
       }
     } catch (e) {
+      if (_disposed) return; // as loadCatalog above; a ChangeNotifier throws after dispose
       error = 'could not load the reference: $e';
       notifyListeners();
     }
@@ -1212,16 +1216,21 @@ class Editor extends ChangeNotifier {
   /// or spin every shape in place without moving. [EditShape.rotateBy] leaves a
   /// shape's own centre where it was, which is what makes the second step a
   /// plain correction rather than a special case per primitive.
-  void rotateLayer(int id, double deg) {
-    final box = layerBounds(id);
-    if (box == null) return;
+  ///
+  /// [pivot] is the point to turn about. The caller passes the one it captured at the START of the
+  /// gesture: layerBounds is the AXIS-ALIGNED box of an asymmetric group, which is not invariant
+  /// under rotation, so recomputing it on every pointer event walked the centre — a full turn did
+  /// not come back where it started and small corrections ratcheted the layer away.
+  void rotateLayer(int id, double deg, {ui.Offset? pivot}) {
+    final centre = pivot ?? layerBounds(id)?.center;
+    if (centre == null) return;
     final t = deg * math.pi / 180;
     final cos = math.cos(t), sin = math.sin(t);
     for (final s in shapesIn(id)) {
-      final was = s.center - box.center;
+      final was = s.center - centre;
       s.rotateBy(deg);
       final want =
-          box.center +
+          centre +
           ui.Offset(was.dx * cos - was.dy * sin, was.dx * sin + was.dy * cos);
       final now = s.center;
       s.translate(want.dx - now.dx, want.dy - now.dy);

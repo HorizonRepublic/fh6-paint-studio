@@ -413,6 +413,12 @@ class _DetailPopoverState extends State<DetailPopover> {
   final _focus = FocusNode();
   late final VoidCallback _focusListener;
 
+  /// The text the MODEL last put in the field. A commit with nothing edited is not a user
+  /// decision, and dispose() commits unconditionally — which notified the studio from inside
+  /// finalizeTree's lockState (a debug/profile-only assert) on every dismiss of an untouched
+  /// popover, and re-picked the same budget besides.
+  late String _asShown = widget.studio.budget.toString();
+
   @override
   void initState() {
     super.initState();
@@ -439,18 +445,22 @@ class _DetailPopoverState extends State<DetailPopover> {
   }
 
   void _commit() {
+    if (_field.text.trim() == _asShown.trim()) return; // see _asShown: no edit, no pick
     final n = int.tryParse(_field.text.replaceAll(RegExp(r'[^0-9]'), ''));
     if (n == null) {
       _field.text = widget.studio.budget.toString();
+      _asShown = _field.text;
       return;
     }
     final clamped = n.clamp(DetailPopover.minShapes, DetailPopover.maxShapes);
     _field.text = clamped.toString();
+    _asShown = _field.text;
     widget.onPick(clamped);
   }
 
   void _pick(int n) {
     _field.text = n.toString();
+    _asShown = _field.text;
     widget.onPick(n);
   }
 
