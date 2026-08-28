@@ -1,5 +1,25 @@
 # Changelog
 
+## [3.0.1](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v3.0.0...v3.0.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **client:** acknowledge and retry the drag band report, re-measure on late fonts ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **client:** pin the caption cluster to the window right edge ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **client:** pressables survive a gesture that outlives them ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **client:** settings sheet and log drawer overflow in wide locales ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **deps:** update dependency desktop_drop to ^0.8.0 ([dd1efe4](https://github.com/HorizonRepublic/fh6-paint-studio/commit/dd1efe45dea3e4eeb3b0ff21bc8841de59497e1e))
+* **deps:** update dependency desktop_drop to ^0.8.0 ([015a09e](https://github.com/HorizonRepublic/fh6-paint-studio/commit/015a09e77b05304772e24f1c3b8f24fd6f897443))
+* **engine:** a device-lost attempt could win best-of with a zero error ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **engine:** gaussian runs shipped an untrained first glow ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **engine:** globalcolor swept layers against stale alphas ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **engine:** solve the delivered background over the pixels it shows ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **service:** carry the auto-crop rect in the done event ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **service:** move library and preset handlers off the fit queue ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **service:** validate a library id before joining it into a path ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+* **vulkan:** dedup shape kinds and fail honestly over the shim cap ([00a47fc](https://github.com/HorizonRepublic/fh6-paint-studio/commit/00a47fce1e1c241f9083f92f00efe03878f9528e))
+
 ## [3.0.0](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v2.2.0...v3.0.0) (2026-08-14)
 
 
