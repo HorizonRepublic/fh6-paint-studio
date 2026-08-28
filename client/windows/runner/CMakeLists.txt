@@ -51,6 +51,8 @@ target_link_options(${BINARY_NAME} PRIVATE
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 # SetWindowSubclass, for making the caption hit test fall through to the parent.
 target_link_libraries(${BINARY_NAME} PRIVATE "comctl32.lib")
+# CoCreateInstance, for the taskbar progress bar (ITaskbarList3).
+target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

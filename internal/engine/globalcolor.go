@@ -153,6 +153,24 @@ func gcBands(h int) [][2]int {
 }
 
 // gcRunBands runs fn once per band, concurrently.
+// gcRunBandsIdx is gcRunBands over precomputed bands, handing each callback its band index so a
+// caller can collect per-band partials without sharing an accumulator.
+func gcRunBandsIdx(bands [][2]int, fn func(bi, y0, y1 int)) {
+	if len(bands) == 1 {
+		fn(0, bands[0][0], bands[0][1])
+		return
+	}
+	var wg sync.WaitGroup
+	for bi, b := range bands {
+		wg.Add(1)
+		go func(bi, y0, y1 int) {
+			defer wg.Done()
+			fn(bi, y0, y1)
+		}(bi, b[0], b[1])
+	}
+	wg.Wait()
+}
+
 func gcRunBands(h int, fn func(y0, y1 int)) {
 	bands := gcBands(h)
 	if len(bands) == 1 {
@@ -183,7 +201,16 @@ func gcReduceBands(h, n int, out []float64, fn func(y0, y1 int, acc []float64)) 
 	parts := make([][]float64, len(bands))
 	var wg sync.WaitGroup
 	for i, b := range bands {
-		parts[i] = make([]float64, n)
+		// Pooled: this runs ~330× per solve with bands × 24KB accumulators — fresh makes were
+		// pure allocator churn. clear() re-zeroes, so the values are exactly what make() gave.
+		buf, _ := gcPartsPool.Get().([]float64)
+		if cap(buf) < n {
+			buf = make([]float64, n)
+		} else {
+			buf = buf[:n]
+			clear(buf)
+		}
+		parts[i] = buf
 		wg.Add(1)
 		go func(i, y0, y1 int) {
 			defer wg.Done()
@@ -195,17 +222,40 @@ func gcReduceBands(h, n int, out []float64, fn func(y0, y1 int, acc []float64)) 
 		for i, v := range p {
 			out[i] += v
 		}
+		gcPartsPool.Put(p) //nolint:staticcheck // slices are pointer-shaped enough here
 	}
 }
+
+var gcPartsPool sync.Pool
 
 // gcCompositeLayer blends one layer's colour over out across rows [y0,y1]. Rows are disjoint in out,
 // so several bands of the SAME layer may run concurrently without a race.
 func gcCompositeLayer(l *gcLayer, cr, cg, cb float32, out []float32, w, y0, y1 int) {
 	bw := l.x1 - l.x0 + 1
+	// The cached branch is nearly every layer (gcBuild's 16MB budget covers ~all bboxes), yet
+	// l.at() paid the nil test plus a full-slice bounds check on EVERY pixel of every layer of
+	// every sweep — ~15M pixel-visits per solver iteration. Hoist the test and sub-slice the row
+	// so the compiler proves the indexing. Same arithmetic, same order.
+	if l.a != nil {
+		for y := y0; y <= y1; y++ {
+			ar := l.a[(y-l.y0)*bw : (y-l.y0)*bw+bw]
+			p := (y*w + l.x0) * 4
+			for i := 0; i < bw; i++ {
+				a := ar[i]
+				if a > 0 {
+					ia := 1 - a
+					out[p+0] = out[p+0]*ia + a*cr
+					out[p+1] = out[p+1]*ia + a*cg
+					out[p+2] = out[p+2]*ia + a*cb
+				}
+				p += 4
+			}
+		}
+		return
+	}
 	for y := y0; y <= y1; y++ {
-		row := (y - l.y0) * bw
 		for x := l.x0; x <= l.x1; x++ {
-			a := l.at(x, y, row)
+			a := float32(l.prep.Coverage(x, y) * l.alpha)
 			if a <= 0 {
 				continue
 			}
@@ -266,20 +316,39 @@ func gcGradient(gl []gcLayer, resid, trans []float32, g []float64, w int) {
 				y1 = by1
 			}
 			var gr, gg, gb float64
-			for y := y0; y <= y1; y++ {
-				row := (y - l.y0) * bw
-				for x := l.x0; x <= l.x1; x++ {
-					a := l.at(x, y, row)
-					if a <= 0 {
-						continue
+			if l.a != nil {
+				// Hoisted cached branch — see gcCompositeLayer. Same arithmetic, same order.
+				for y := y0; y <= y1; y++ {
+					ar := l.a[(y-l.y0)*bw : (y-l.y0)*bw+bw]
+					ti := y*w + l.x0
+					for i2 := 0; i2 < bw; i2++ {
+						a := ar[i2]
+						if a > 0 {
+							phi := float64(a * trans[ti])
+							p := ti * 4
+							gr += phi * float64(resid[p+0])
+							gg += phi * float64(resid[p+1])
+							gb += phi * float64(resid[p+2])
+							trans[ti] *= 1 - a
+						}
+						ti++
 					}
-					ti := y*w + x
-					phi := float64(a * trans[ti])
-					p := ti * 4
-					gr += phi * float64(resid[p+0])
-					gg += phi * float64(resid[p+1])
-					gb += phi * float64(resid[p+2])
-					trans[ti] *= 1 - a
+				}
+			} else {
+				for y := y0; y <= y1; y++ {
+					for x := l.x0; x <= l.x1; x++ {
+						a := float32(l.prep.Coverage(x, y) * l.alpha)
+						if a <= 0 {
+							continue
+						}
+						ti := y*w + x
+						phi := float64(a * trans[ti])
+						p := ti * 4
+						gr += phi * float64(resid[p+0])
+						gg += phi * float64(resid[p+1])
+						gb += phi * float64(resid[p+2])
+						trans[ti] *= 1 - a
+					}
 				}
 			}
 			acc[i*3+0] += gr
@@ -316,17 +385,33 @@ func gcDiag(gl []gcLayer, weight, trans []float32, d []float64, w int) {
 				y1 = by1
 			}
 			var acc float64
-			for y := y0; y <= y1; y++ {
-				row := (y - l.y0) * bw
-				for x := l.x0; x <= l.x1; x++ {
-					a := l.at(x, y, row)
-					if a <= 0 {
-						continue
+			if l.a != nil {
+				// Hoisted cached branch — see gcCompositeLayer. Same arithmetic, same order.
+				for y := y0; y <= y1; y++ {
+					ar := l.a[(y-l.y0)*bw : (y-l.y0)*bw+bw]
+					ti := y*w + l.x0
+					for i2 := 0; i2 < bw; i2++ {
+						a := ar[i2]
+						if a > 0 {
+							phi := float64(a * trans[ti])
+							acc += float64(weight[ti]) * phi * phi
+							trans[ti] *= 1 - a
+						}
+						ti++
 					}
-					ti := y*w + x
-					phi := float64(a * trans[ti])
-					acc += float64(weight[ti]) * phi * phi
-					trans[ti] *= 1 - a
+				}
+			} else {
+				for y := y0; y <= y1; y++ {
+					for x := l.x0; x <= l.x1; x++ {
+						a := float32(l.prep.Coverage(x, y) * l.alpha)
+						if a <= 0 {
+							continue
+						}
+						ti := y*w + x
+						phi := float64(a * trans[ti])
+						acc += float64(weight[ti]) * phi * phi
+						trans[ti] *= 1 - a
+					}
 				}
 			}
 			out[i] += acc
@@ -396,15 +481,29 @@ func absf32(v float32) float32 {
 func gcStep(gl []gcLayer, c []float64, base, target, weight, scratch, resid, trans []float32, g []float64, w, h int) float64 {
 	copy(scratch, base)
 	gcComposite(gl, c, scratch, w)
-	var sse float64
-	for i := 0; i < w*h; i++ {
-		wt := weight[i]
-		p := i * 4
-		for ch := 0; ch < 3; ch++ {
-			d := scratch[p+ch] - target[p+ch]
-			resid[p+ch] = wt * d
-			sse += float64(wt) * float64(d) * float64(d)
+	// Residual in the same row bands as the composite: per-pixel writes are independent, so the
+	// bytes in resid are identical to the serial loop's. Only the SSE reduction order moves, and
+	// that value is informational — it feeds the pass's log line, never a decision (the pass gates
+	// on the GPU rerender). This loop used to be the solver's serial half: ~7.4ms per call x ~300
+	// calls a pass, with the GPU idle throughout.
+	bands := gcBands(h)
+	partial := make([]float64, len(bands))
+	gcRunBandsIdx(bands, func(bi, y0, y1 int) {
+		var s float64
+		for i := y0 * w; i < (y1+1)*w; i++ {
+			wt := weight[i]
+			p := i * 4
+			for ch := 0; ch < 3; ch++ {
+				d := scratch[p+ch] - target[p+ch]
+				resid[p+ch] = wt * d
+				s += float64(wt) * float64(d) * float64(d)
+			}
 		}
+		partial[bi] = s
+	})
+	var sse float64
+	for _, s := range partial {
+		sse += s
 	}
 	gcGradient(gl, resid, trans, g, w)
 	return sse
@@ -513,6 +612,12 @@ func globalColorAlphaSolve(shapes []model.Shape, target, weight []float32, w, h 
 
 	out := make([]model.Shape, len(shapes))
 	out[0] = cloneShape(shapes[0])
+	// The alpha half of the block descent has to LEAVE through the shapes too. gcAlphaSweep solved
+	// A_k and the colour re-solve conditioned on it — but the write-back below used to copy the
+	// INPUT alpha verbatim, shipping colours solved against alphas that were then discarded (an
+	// internally inconsistent stack; the pass's e2e gate is what kept it from regressing).
+	// FH6_GC_ALPHA=0 pins the old copy-through for A/Bs from the studio.
+	exportAlpha := sweeps > 0 && os.Getenv("FH6_GC_ALPHA") != "0"
 	for i, s := range layers {
 		ns := cloneShape(s)
 		if len(ns.Color) >= 3 {
@@ -522,6 +627,15 @@ func globalColorAlphaSolve(shapes []model.Shape, target, weight []float32, w, h 
 			ns.Color[0] = model.EncByte(float32(c[i*3+0]))
 			ns.Color[1] = model.EncByte(float32(c[i*3+1]))
 			ns.Color[2] = model.EncByte(float32(c[i*3+2]))
+		}
+		if exportAlpha && gl[i].live && len(ns.Color) >= 4 {
+			a := int(math.Round(gl[i].alpha * 255))
+			if a < 0 {
+				a = 0
+			} else if a > 255 {
+				a = 255
+			}
+			ns.Color[3] = a
 		}
 		out[i+1] = ns
 	}
@@ -539,7 +653,6 @@ func gcLipschitz(gl []gcLayer, weight []float32, sc []float64, resid, trans []fl
 		v[i] = 1
 	}
 	scratch := make([]float32, w*h*4)
-	zero := make([]float32, w*h*4)
 	cv := make([]float64, n*3)
 	lam := 1.0
 	for it := 0; it < 8; it++ {
@@ -550,7 +663,7 @@ func gcLipschitz(gl []gcLayer, weight []float32, sc []float64, resid, trans []fl
 		for i := range cv {
 			cv[i] = v[i] / sc[i/3]
 		}
-		copy(scratch, zero)
+		clear(scratch) // was a copy() from a 64MB always-zero twin allocated per call
 		gcComposite(gl, cv, scratch, w)
 		for i := 0; i < w*h; i++ {
 			// The Gram is WEIGHTED, so the power iteration must be too: the perceptual weight
@@ -702,6 +815,33 @@ func gcAlphaSweep(gl []gcLayer, c []float64, base, target, weight []float32, vca
 			na := math.Min(1, math.Max(aMin, num/den))
 			if math.Abs(na-l.alpha) > 1e-6 {
 				sc := float32(na / l.alpha)
+				// Carry the update into `cur`. r0 is reconstructed as cur − T·a·(c−V), and T is the
+				// transmittance of the layers ABOVE with their UPDATED alphas — so cur has to be
+				// updated too or the two describe different stacks: built once from the entry
+				// alphas, it made r0 evaluate to A_old + T_old·V + (T_old−T_new)·a·(c−V) instead of
+				// A_new + T_new·V, and every layer below the first one that moved was solved
+				// against a composite that no longer existed. The change is confined to this
+				// layer's bbox and is exact: cur += T·Δa·(c − V).
+				for y := l.y0; y <= l.y1; y++ {
+					row := (y - l.y0) * bw
+					for x := l.x0; x <= l.x1; x++ {
+						d := (row + x - l.x0)
+						aOld := l.a[d]
+						if aOld <= 0 {
+							continue
+						}
+						ti := y*w + x
+						t := trans[ti]
+						if t <= 0 {
+							continue
+						}
+						da := t * aOld * (sc - 1)
+						p, d3 := ti*4, d*3
+						cur[p+0] += da * (float32(cr) - v[d3+0])
+						cur[p+1] += da * (float32(cg) - v[d3+1])
+						cur[p+2] += da * (float32(cb) - v[d3+2])
+					}
+				}
 				for j := range l.a {
 					l.a[j] *= sc
 				}

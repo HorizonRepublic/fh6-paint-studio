@@ -19,6 +19,7 @@ type Options struct {
 	Kinds                         []model.ShapeKind // empty defaults to {KindEllipse}
 	KindWeights                   []float32         // parallel to Kinds; nil = uniform pick
 	TransparentBG                 bool              // true: cutout image — keep background transparent, no bg fill
+	PaddedOpaque                  bool              // TransparentBG is ONLY the keep-inside margin (source was opaque): not a real cutout, so the organic alpha floor still applies
 	Overdraw                      float32           // generate StopAt*Overdraw shapes, then prune to StopAt (>1 enables; 0/1 = off)
 	AllowAlpha                    bool              // allow semi-transparent shapes (alpha ~U(AlphaMin,1)). Forced off for cutouts.
 	AlphaMin                      float32           // lower bound for candidate alpha when AllowAlpha (0 -> 0.3)
@@ -141,6 +142,10 @@ type Result struct {
 	Shapes                   []model.Shape
 	InitialError, FinalError float64
 	Timings                  Timings
+	// DevErr is non-nil when the GPU device was lost mid-run (TDR / driver reset / VRAM
+	// exhaustion): the shapes are whatever was placed before the fault and every score after it
+	// is garbage, so callers must surface the failure instead of presenting the result as done.
+	DevErr error
 }
 
 // Timings is a per-phase wall-clock breakdown of a Run, for benchmark-driven
@@ -283,6 +288,19 @@ type momentSearcher interface {
 		grid []float32, gw, gh int, boundPad, boundMix, canvasPad float32) (model.Candidate, float32, bool)
 }
 
+// mutateSearcher is the optional capability of a backend to run one shape's WHOLE hill-climb
+// mutation phase on-device: rounds x perRound mutants of the incumbent, each round generated,
+// scored and argmin-reduced without returning to the host. The host loop pays one upload and one
+// readback PER ROUND (~39 per shape at the default budget), which makes the mutate phase
+// round-trip-bound; this collapses it to a single call. The device RNG stream differs from the
+// host math/rand, so the path is validated by paired end-to-end quality, never golden-diff.
+// ok=false (older DLL without the export, or a device fault mid-call) -> host fallback.
+type mutateSearcher interface {
+	SearchMutate(seed int64, incumbent model.Candidate, score float32, rounds, perRound int,
+		moveStep, radiusStep float32, allowAlpha bool, alphaMin float32,
+		compact bool, shapeCount int, canvasPad float32) (model.Candidate, float32, bool)
+}
+
 // annealMaxR is the per-shape max radius schedule shared by the host generator
 // (RandomShapes) and the on-device search: shapes shrink as the reconstruction
 // progresses (coarse base first, fine detail later). Kept in one place so the two
@@ -309,7 +327,9 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	// walk them back down to a hard-coded 0.05 — the floor was shipped as a quality default and the
 	// next stage undid it. Cutouts keep the historical bound: their candidates are opaque by
 	// construction, so a floor here would be a different change with no measurement behind it.
-	if opt.PolishOpts.AlphaMin == 0 && opt.AllowAlpha && !opt.TransparentBG {
+	// PaddedOpaque is NOT a real cutout — the client always pads (keep-inside), which set
+	// TransparentBG and silently dropped the shipped 0.30 floor back to 0.05 on every client run.
+	if opt.PolishOpts.AlphaMin == 0 && opt.AllowAlpha && (!opt.TransparentBG || opt.PaddedOpaque) {
 		opt.PolishOpts.AlphaMin = polishAlphaFloor(opt.AlphaMin)
 	}
 	// Polish runs on the device (the only backend). A non-zero false-edge λ needs the device-side
@@ -325,16 +345,34 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		}
 		opt.PolishOpts.TermWeight = tw
 	}
+	// EVERY term degrades the same way now: no export -> drop the term, KEEP the GPU polish.
+	// The old FE/SSIM contract ("route to the CPU polish") dates from the CUDA era — the CPU
+	// polish was DELETED with it, so the old code skipped the ENTIRE polish on a shim without
+	// the export: a silent, massive quality loss for a missing optional feature.
 	feOK := opt.PolishOpts.FalseEdgeLambda == 0
 	if !feOK {
 		if s, ok := be.(interface{ PolishSetFalseEdge(lambda float64) bool }); ok {
 			feOK = s.PolishSetFalseEdge(0) // capability probe; PolishWithBackend sets the real λ after setup
+		}
+		if !feOK {
+			if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() {
+				applog.Printf("polish: device lacks fp_set_polish_false_edge — FE/lost-detail terms disabled (GPU polish kept)")
+				opt.PolishOpts.FalseEdgeLambda, opt.PolishOpts.LostDetailLambda = 0, 0
+				feOK = true
+			}
 		}
 	}
 	ssimOK := opt.PolishOpts.SSIMLambda == 0
 	if !ssimOK {
 		if s, ok := be.(interface{ PolishSetSSIM(lambda float64) bool }); ok {
 			ssimOK = s.PolishSetSSIM(0)
+		}
+		if !ssimOK {
+			if acc, ok := be.(PolishAccel); ok && acc.PolishSupported() {
+				applog.Printf("polish: device lacks fp_set_polish_ssim — SSIM term disabled (GPU polish kept)")
+				opt.PolishOpts.SSIMLambda = 0
+				ssimOK = true
+			}
 		}
 	}
 	eagleOK := opt.PolishOpts.EagleLambda == 0
@@ -359,13 +397,31 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 		pr = PolishWithBackend(shapes, be.Target(), be.Weight(), w, h, opt.Background, opt.TransparentBG, opt.PolishOpts, acc)
 	} else {
 		applog.Printf("polish: device lacks polish support — skipping polish (shapes returned unpolished)")
-		pr = PolishResult{Shapes: shapes}
+		// CLONE, like every other return here: recolorVisible below mutates
+		// pr.Shapes in place, and a gate-rejected recolor would otherwise hand the
+		// caller shapes it had already recoloured, labelled with the pre-recolor
+		// error. This was the one path that still aliased.
+		pr = PolishResult{Shapes: cloneShapes(shapes)}
 	}
-	recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
+	// recolorVisible assumes opaque replace-ownership: it re-solves each shape's colour from the
+	// pixels it "owns", which a translucent shape does not own. The other two call sites
+	// (run.postProcess, backFit) both gate it on !allowAlpha for exactly that reason and say so;
+	// this one did not, so on the two shipped organic presets — which both set AllowAlpha — every
+	// polish was followed by a mis-tinting recolor. Worse, the two are gated as ONE unit below, so
+	// a polish that improved the image was thrown away whenever the recolor after it lost.
+	// The condition is the polish's OWN alpha floor, not the generator's allowAlpha. Those two
+	// disagree on the client's default path: keep-inside pads, so TransparentBG is set and the
+	// generator (run.go) treats the run as a cutout, while line 332 above deliberately excepts
+	// PaddedOpaque and hands the polish a 0.30 floor. So the descent CAN make those shapes
+	// translucent on a run whose generation was opaque — which is exactly when recolorVisible is
+	// wrong, and a gate keyed on allowAlpha would have missed every one of them.
+	// Reading what line 332 set means the two cannot drift apart again.
+	pa := opt.PolishOpts.AlphaMin
+	if !polishRecolorGate || !(pa > 0 && pa < 1) {
+		recolorVisible(pr.Shapes, be.Target(), be.Weight(), w, h, opt.RecolorVarSkip)
+	}
 	_ = be.Reset(initCanvas)
-	for _, s := range pr.Shapes[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, pr.Shapes[1:])
 	g2, _, _, _ := be.ErrorGrid()
 	postErr := sumGrid(g2)
 	if polishDebug {
@@ -384,9 +440,7 @@ func applyPolish(be backend.Backend, shapes []model.Shape, finalErr float64, ini
 	}
 	// Regression — discard polish, re-render the input shapes and keep them.
 	_ = be.Reset(initCanvas)
-	for _, s := range shapes[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, shapes[1:])
 	return shapes, finalErr
 }
 
@@ -402,9 +456,7 @@ func PolishGeometry(be backend.Backend, shapes []model.Shape, opt Options, w, h 
 		initCanvas = make([]float32, w*h*4) // all zero = transparent (cutout)
 	}
 	_ = be.Reset(initCanvas)
-	for _, s := range shapes[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, shapes[1:])
 	grid, _, _, _ := be.ErrorGrid()
 	finalErr := sumGrid(grid)
 	var tm Timings

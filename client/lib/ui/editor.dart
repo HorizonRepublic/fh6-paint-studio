@@ -28,11 +28,18 @@ class EditorView extends StatefulWidget {
     required this.editor,
     required this.studio,
     required this.onClose,
+    required this.onSaved,
   });
 
   final Editor editor;
   final Studio studio;
   final VoidCallback onClose;
+
+  /// Leaving because the work was just STORED. Separate from [onClose], which
+  /// now asks 'discard your edits?' — after a successful save that question is
+  /// both wrong and frightening, since the undo stack is still full and the
+  /// confirm button reads 'delete'.
+  final VoidCallback onSaved;
 
   @override
   State<EditorView> createState() => _EditorViewState();
@@ -133,8 +140,43 @@ class _EditorViewState extends State<EditorView> {
   final _pulse = ValueNotifier<double>(0);
   Timer? _antsTimer;
 
+  /// The one-shot selection flash. Separate from [_pulse] because it answers a
+  /// different question: the ants say "this is selected" for as long as it is,
+  /// the flash says "this, here" once, at the moment you pick it.
+  final _flash = ValueNotifier<double>(0);
+  Timer? _flashTimer;
+  int _flashFor = -1;
+
+  void _syncFlash() {
+    final sel = ed.selected;
+    if (sel == _flashFor) return;
+    _flashFor = sel;
+    _flashTimer?.cancel();
+    _flashTimer = null;
+    if (sel < 0) {
+      _flash.value = 0;
+      return;
+    }
+    var t = 0.0;
+    _flash.value = 1;
+    _flashTimer = Timer.periodic(const Duration(milliseconds: 33), (tm) {
+      t += 33 / 350;
+      if (t >= 1) {
+        tm.cancel();
+        _flashTimer = null;
+        _flash.value = 0;
+        return;
+      }
+      final k = 1 - t; // easeOutCubic decay
+      _flash.value = k * k * k;
+    });
+  }
+
   void _syncAnts() {
-    final want = ed.current != null || ed.groupLayer != null;
+    // Not while the bank is open: it covers the selection, so the 30 Hz timer
+    // would only be driving a repaint under a live-blurred panel — re-running
+    // that σ22 backdrop 30×/s for nothing the whole time the bank is browsed.
+    final want = (ed.current != null || ed.groupLayer != null) && !_bankOpen;
     if (want && _antsTimer == null) {
       _antsTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
         _pulse.value = (_pulse.value + 33 / 700) % 1.0;
@@ -147,6 +189,7 @@ class _EditorViewState extends State<EditorView> {
 
   _Tool _tool = _Tool.select;
   Offset? _dragFrom;
+  Offset? _pivot; // the rotate/scale centre, taken once at _down — see the note there
   bool _marked = false;
 
   /// The previous click, for hand-rolled double-click detection. A real
@@ -221,9 +264,25 @@ class _EditorViewState extends State<EditorView> {
   @override
   void dispose() {
     _antsTimer?.cancel();
+    _flashTimer?.cancel();
+    // Would otherwise fire ed.commit() into a closed editor.
+    _nudgeSettle?.cancel();
     _pulse.dispose();
+    _flash.dispose();
     super.dispose();
   }
+
+  /// True while a text field owns the keyboard.
+  ///
+  /// Flutter dispatches keys from the focused leaf UP to the root, and
+  /// `DefaultTextEditingShortcuts` lives near the root inside WidgetsApp — so
+  /// this CallbackShortcuts, being far closer to the focus, wins EVERY key it
+  /// binds before the text field ever sees it. With Backspace bound to delete
+  /// and the arrows bound to nudge, fixing a typo in the bank's search box or
+  /// the inspector's hex field silently deleted or moved the selected shape
+  /// instead of editing the text.
+  static bool get _typing =>
+      FocusManager.instance.primaryFocus?.context?.widget is EditableText;
 
   @override
   Widget build(BuildContext context) {
@@ -232,6 +291,7 @@ class _EditorViewState extends State<EditorView> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyZ, control: true): () {
+          if (_typing) return; // the field's own undo
           if (ed.canUndo) ed.undo();
         },
         const SingleActivator(
@@ -239,15 +299,87 @@ class _EditorViewState extends State<EditorView> {
           control: true,
           shift: true,
         ): () {
+          if (_typing) return;
           if (ed.canRedo) ed.redo();
         },
         const SingleActivator(LogicalKeyboardKey.keyY, control: true): () {
+          if (_typing) return;
           if (ed.canRedo) ed.redo();
         },
-        const SingleActivator(LogicalKeyboardKey.delete): ed.deleteSelected,
+        const SingleActivator(LogicalKeyboardKey.delete): _deleteKey,
+        const SingleActivator(LogicalKeyboardKey.backspace): _deleteKey,
+        const SingleActivator(LogicalKeyboardKey.keyD, control: true): () {
+          if (_typing) return;
+          ed.duplicateSelected();
+        },
+        // Nudge. Precise placement is what a shape editor is for, and by hand
+        // the pointer cannot reliably do one pixel. Shift is the coarse step,
+        // the pairing every editor uses.
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _nudge(-1, 0),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () => _nudge(1, 0),
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () => _nudge(0, -1),
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () => _nudge(0, 1),
+        const SingleActivator(LogicalKeyboardKey.arrowLeft, shift: true): () =>
+            _nudge(-10, 0),
+        const SingleActivator(LogicalKeyboardKey.arrowRight, shift: true): () =>
+            _nudge(10, 0),
+        const SingleActivator(LogicalKeyboardKey.arrowUp, shift: true): () =>
+            _nudge(0, -10),
+        const SingleActivator(LogicalKeyboardKey.arrowDown, shift: true): () =>
+            _nudge(0, 10),
+        // Escape backs out of the innermost thing: the bank if it is open,
+        // otherwise the selection. It reached nothing here before — the shell's
+        // handler does not run while the editor owns the screen.
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (_bankOpen) {
+            setState(() {
+              _bankOpen = false;
+              _syncAnts();
+            });
+          } else if (ed.selected >= 0 || ed.groupLayer != null) {
+            ed.groupLayer = null;
+            ed.select(-1);
+          }
+        },
       },
       child: Focus(autofocus: true, child: _body(context)),
     );
+  }
+
+  /// Coalesces a burst of arrow keys into ONE undo step, the same discipline a
+  /// drag follows: a held arrow key is one act of moving, not forty.
+  Timer? _nudgeSettle;
+
+  void _deleteKey() {
+    if (_typing) return; // Backspace/Delete belong to the caret in a text field
+    ed.deleteSelected();
+  }
+
+  void _nudge(double dx, double dy) {
+    if (_typing) return; // the arrows are moving a caret, not a shape
+    final layer = ed.groupLayer;
+    // `selected > 0`, not `>= 0`: index 0 is the background rect, and undoing
+    // the first placed shape can leave the selection resting on it — arrow keys
+    // then slid the canvas backing and left a transparent band down one edge.
+    if (layer == null && ed.selected <= 0) return;
+    if (_nudgeSettle == null) ed.mark();
+    _nudgeSettle?.cancel();
+    _nudgeSettle = Timer(const Duration(milliseconds: 400), () {
+      _nudgeSettle = null;
+      ed.commit();
+    });
+
+    if (layer != null) {
+      ed.translateLayer(layer, dx, dy);
+    } else {
+      ed.current?.translate(dx, dy);
+      for (final i in ed.extra) {
+        if (i > 0 && i < ed.shapes.length && i != ed.selected) {
+          ed.shapes[i].translate(dx, dy);
+        }
+      }
+    }
+    ed.live(); // queues its own guarded draft render
   }
 
   Widget _body(BuildContext context) {
@@ -255,6 +387,7 @@ class _EditorViewState extends State<EditorView> {
       animation: ed,
       builder: (context, _) {
         _syncAnts();
+        _syncFlash();
         return _stack(context);
       },
     );
@@ -276,6 +409,7 @@ class _EditorViewState extends State<EditorView> {
             tool: _tool,
             hover: _hover,
             pulse: _pulse,
+            flash: _flash,
             zoom: _zoom,
             pan: _pan,
             group: ed.groupLayer == null
@@ -318,6 +452,7 @@ class _EditorViewState extends State<EditorView> {
               if (t == _Tool.place) {
                 _bankOpen = !_bankOpen;
                 if (_bankOpen) ed.loadCatalog();
+                _syncAnts(); // pause/resume the ants under the bank overlay
                 return;
               }
               _tool = t;
@@ -331,7 +466,10 @@ class _EditorViewState extends State<EditorView> {
             bottom: 24,
             child: _Bank(
               editor: ed,
-              onClose: () => setState(() => _bankOpen = false),
+              onClose: () => setState(() {
+                _bankOpen = false;
+                _syncAnts(); // resume the ants now the selection is visible again
+              }),
               onPick: (k) => setState(() {
                 ed.pickedKind = k;
                 if (_doubleTapped('kind$k')) _placeKindCentered(k);
@@ -347,11 +485,15 @@ class _EditorViewState extends State<EditorView> {
         Positioned(
           left: 92,
           top: 8,
-          right: 312,
+          // Same right edge as the canvas and the onion pill below it. It was
+          // 312 against their 300, so three panels stacked down the screen ended
+          // on two different vertical lines.
+          right: 300,
           child: _Bar(
             editor: ed,
             studio: widget.studio,
             onClose: widget.onClose,
+            onSaved: widget.onSaved,
           ),
         ),
         // The onion-skin control, centred at the foot of the canvas where no
@@ -382,6 +524,9 @@ class _EditorViewState extends State<EditorView> {
     final path = await pickImage();
     if (path == null) return;
     await ed.setReference(path);
+    // The picker and the decode are both awaited, and the editor can be gone by the time they
+    // answer — setState on a disposed State throws.
+    if (!mounted) return;
     // Loading a reference is a request to see it: turn the ghost on if it was
     // off, and leave a strength the user already set alone.
     setState(() => _onion = _onion == 0 ? 0.6 : _onion);
@@ -470,6 +615,12 @@ class _EditorViewState extends State<EditorView> {
     }
     _dragFrom = docPoint;
     _marked = false;
+    // Captured ONCE, here: layerBounds is an axis-aligned box and turning an asymmetric group
+    // moves it, so a pivot re-read on every pointer event walks away from the point the user
+    // grabbed — a full turn does not come back and small corrections ratchet the layer off.
+    _pivot = ed.groupLayer != null
+        ? ed.layerBounds(ed.groupLayer!)?.center
+        : ed.current?.center;
   }
 
   void _move(Offset docPoint) {
@@ -493,9 +644,9 @@ class _EditorViewState extends State<EditorView> {
       _marked = true;
     }
     final d = docPoint - from;
-    final centre = groupHeld != null
-        ? ed.layerBounds(groupHeld)?.center
-        : s?.center;
+    final centre =
+        _pivot ??
+        (groupHeld != null ? ed.layerBounds(groupHeld)?.center : s?.center);
     if (centre == null) return;
 
     double turn() {
@@ -513,7 +664,7 @@ class _EditorViewState extends State<EditorView> {
     if (groupHeld != null) {
       switch (_held) {
         case Grip.rotate:
-          ed.rotateLayer(groupHeld, turn());
+          ed.rotateLayer(groupHeld, turn(), pivot: centre);
         case Grip.body:
           ed.translateLayer(groupHeld, d.dx, d.dy);
         default:
@@ -687,6 +838,7 @@ class _Canvas extends StatelessWidget {
     required this.tool,
     required this.hover,
     required this.pulse,
+    required this.flash,
     required this.zoom,
     required this.pan,
     required this.group,
@@ -705,6 +857,7 @@ class _Canvas extends StatelessWidget {
   final _Tool tool;
   final Grip hover;
   final ValueListenable<double> pulse;
+  final ValueListenable<double> flash;
 
   /// The box around a whole selected LAYER, when one is picked as a group.
   final Rect? group;
@@ -823,13 +976,22 @@ class _Canvas extends StatelessWidget {
                           if (source != null && onion > 0)
                             RepaintBoundary(
                               child: IgnorePointer(
-                                child: Opacity(
-                                  opacity: onion.clamp(0.0, 1.0),
-                                  child: RawImage(
-                                    image: source,
-                                    fit: BoxFit.fill,
-                                    filterQuality: FilterQuality.medium,
+                                // Alpha via a modulate colour, not Opacity: an
+                                // Opacity widget pushes a saveLayer the size of
+                                // the whole zoomed canvas (thousands of px² at
+                                // ×8) and rebuilds one per onion-slider tick;
+                                // modulating the image's own alpha needs no layer.
+                                child: RawImage(
+                                  image: source,
+                                  fit: BoxFit.fill,
+                                  filterQuality: FilterQuality.medium,
+                                  color: Color.fromRGBO(
+                                    255,
+                                    255,
+                                    255,
+                                    onion.clamp(0.0, 1.0),
                                   ),
+                                  colorBlendMode: BlendMode.modulate,
                                 ),
                               ),
                             ),
@@ -851,6 +1013,7 @@ class _Canvas extends StatelessWidget {
                                       editor.shapes[i],
                                 ],
                                 pulse: pulse,
+                                flash: flash,
                                 tick: editor.canvasTick,
                               ),
                             ),
@@ -905,9 +1068,13 @@ class _Onion extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  '＋',
-                  style: T.text(13, color: hover ? T.tealBright : T.dim),
+                // Was U+FF0B, the FULLWIDTH plus — a whole em of advance for a
+                // glyph the size of the text beside it, so the label never sat
+                // where the padding said it would.
+                Icon2(
+                  Ico.plus,
+                  color: hover ? T.tealBright : T.dim,
+                  size: 11,
                 ),
                 const SizedBox(width: 7),
                 Text(
@@ -937,6 +1104,7 @@ class _Onion extends StatelessWidget {
                 onTap: () => onChanged(on ? 0 : 0.55),
                 builder: (context, hover, down) => AnimatedContainer(
                   duration: Motion.fast,
+                  curve: Motion.curve,
                   width: 30,
                   height: 26,
                   alignment: Alignment.center,
@@ -1004,21 +1172,44 @@ class _Onion extends StatelessWidget {
 class _Checker extends CustomPainter {
   const _Checker();
 
+  static const _cell = 9.0;
+  static ui.Image? _tile;
+
+  /// One 2×2-cell tile, built once and tiled with a repeating shader. The
+  /// painter is sized to the WHOLE zoomed document (the Positioned parent), so
+  /// the old per-cell loop was ~478k drawRects re-run on every zoom tick at ×8;
+  /// a single tiled drawRect is O(1) in the document size.
+  static ui.Image _buildTile() {
+    final rec = ui.PictureRecorder();
+    final c = ui.Canvas(rec);
+    c.drawRect(
+      const Rect.fromLTWH(0, 0, _cell * 2, _cell * 2),
+      Paint()..color = const Color(0xFF2B2E33),
+    );
+    final light = Paint()..color = const Color(0xFF3A3D42);
+    c.drawRect(const Rect.fromLTWH(0, 0, _cell, _cell), light);
+    c.drawRect(const Rect.fromLTWH(_cell, _cell, _cell, _cell), light);
+    return rec.endRecording().toImageSync((_cell * 2).toInt(), (_cell * 2).toInt());
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
-    const cell = 9.0;
-    canvas.drawRect(Offset.zero & size, Paint()..color = const Color(0xFF2B2E33));
-    final light = Paint()..color = const Color(0xFF3A3D42);
-    for (var yi = 0; yi * cell < size.height; yi++) {
-      for (var xi = 0; xi * cell < size.width; xi++) {
-        if ((xi + yi).isEven) {
-          canvas.drawRect(
-            Rect.fromLTWH(xi * cell, yi * cell, cell, cell),
-            light,
-          );
-        }
-      }
-    }
+    final tile = _tile ??= _buildTile();
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()
+        // filterQuality none: the tile is an exact pixel grid, and at 125%/150%
+        // scaling the default bilinear resample turned a crisp checker into a
+        // soft moire. Nearest keeps the cells as hard as the old per-cell rects.
+        ..filterQuality = FilterQuality.none
+        ..shader = ui.ImageShader(
+          tile,
+          TileMode.repeated,
+          TileMode.repeated,
+          Matrix4.identity().storage,
+          filterQuality: FilterQuality.none,
+        ),
+    );
   }
 
   @override
@@ -1103,7 +1294,17 @@ class _Handles extends CustomPainter {
     required this.extras,
     required this.pulse,
     required this.tick,
-  }) : super(repaint: Listenable.merge([pulse, tick]));
+    required this.flash,
+  }) : super(repaint: Listenable.merge([pulse, tick, flash]));
+
+  /// A one-shot envelope, 1 → 0 over ~350ms, restarted whenever the selection
+  /// changes. The shape's own flash used to ride the marching-ants pulse: an
+  /// endless 1s sine flooding the selected shape with up to 45% white, forever,
+  /// in the one tool whose entire job is judging colour against the artwork —
+  /// and phase-free, so clicking a shape could produce no visible flash at all.
+  /// Now it fires AT the moment of selection, says "these pixels", and stops;
+  /// the two-tone ants remain the steady-state indicator.
+  final ValueListenable<double> flash;
 
   /// The gesture-rate repaint driver; the frame reads the shape's LIVE data
   /// at paint time, so a repaint alone tracks the hand.
@@ -1155,8 +1356,10 @@ class _Handles extends CustomPainter {
     // The selected shape itself flashes, like the game's own editor. The whole
     // point of the fit is that shapes dissolve into the picture, so the frame
     // alone says "somewhere in this box" while the flash says "these pixels".
-    if (s != null && g == null) {
-      final blink = (0.5 - 0.5 * math.cos(pulse.value * 2 * math.pi)) * dim;
+    // Skipped entirely once the envelope has decayed — the steady state is now
+    // no flood at all, only the ants.
+    if (s != null && g == null && flash.value > 0.001) {
+      final blink = flash.value * dim;
       final path = _pathOf(s);
       if (path != null) {
         canvas.drawPath(
@@ -1487,6 +1690,7 @@ class _Tools extends StatelessWidget {
                 onTap: () => onPick(t),
                 builder: (context, hover, down) => AnimatedContainer(
                   duration: Motion.fast,
+                  curve: Motion.curve,
                   width: 34,
                   height: 34,
                   margin: const EdgeInsets.symmetric(vertical: 1),
@@ -1546,11 +1750,13 @@ class _Bar extends StatelessWidget {
     required this.editor,
     required this.studio,
     required this.onClose,
+    required this.onSaved,
   });
 
   final Editor editor;
   final Studio studio;
   final VoidCallback onClose;
+  final VoidCallback onSaved;
 
   @override
   Widget build(BuildContext context) => Glass(
@@ -1583,7 +1789,10 @@ class _Bar extends StatelessWidget {
           _Icon(
             '↶',
             on: false,
-            tip: '${editor.canUndo ? '' : ''}${context.s('undo')}  Ctrl+Z',
+            // (An abandoned `canUndo ? '' : ''` used to sit here — a half-done
+            // attempt at a disabled state. Pressable now dims any control whose
+            // onTap is null, so undo and redo grey out on their own.)
+            tip: '${context.s('undo')}  Ctrl+Z',
             onTap: editor.canUndo ? editor.undo : null,
           ),
           const SizedBox(width: 6),
@@ -1605,12 +1814,15 @@ class _Bar extends StatelessWidget {
                 height: editor.height,
                 name: editor.referenceName,
               );
-              // Persist it so it lands in Runs — an edit is not saved by the
-              // engine the way a finished fit is.
-              await studio.saveToLibrary(
+              final ok = await studio.saveToLibrary(
                 studio.sourceName ?? editor.referenceName ?? 'Untitled',
               );
-              onClose();
+              // Only leave if it actually landed. It used to close either way,
+              // so a save that failed (no disk, engine restarting) looked
+              // exactly like one that worked — the editor shut and Runs was
+              // empty. The work itself survives on the canvas via adoptEdited,
+              // but the user had no way to know that.
+              if (ok) onSaved();
             },
           ),
           const SizedBox(width: 6),
@@ -1937,6 +2149,12 @@ class _ShapeRow extends StatelessWidget {
     return Pressable(
       // Ctrl+click joins the move-group, Shift+click takes the whole run
       // from the primary; a plain click selects alone.
+      // Draws its own frozen dim below, so Pressable must not add a second one:
+      // 0.4 x 0.4 = 0.16 made locked/hidden rows all but invisible. Also not a
+      // Tab stop — a virtualized list of up to 3000 rows would otherwise create
+      // and destroy a focus node per scroll frame.
+      dimWhenDisabled: false,
+      focusable: false,
       onTap: frozen
           ? null
           : () {
@@ -1953,6 +2171,7 @@ class _ShapeRow extends StatelessWidget {
         opacity: frozen ? 0.4 : 1,
         child: AnimatedContainer(
           duration: Motion.fast,
+          curve: Motion.curve,
           height: 26,
           // Indented under its layer: the indent IS the statement that this
           // shape belongs to that layer and moves with it.
@@ -1999,12 +2218,23 @@ class _ShapeRow extends StatelessWidget {
 }
 
 class _Icon extends StatelessWidget {
-  const _Icon(this.glyph, {required this.on, required this.tip, this.onTap});
+  const _Icon(
+    this.glyph, {
+    required this.on,
+    required this.tip,
+    this.onTap,
+    this.ico,
+  });
 
   final String glyph;
   final bool on;
   final String tip;
   final VoidCallback? onTap;
+
+  /// When set, the icon is DRAWN and [glyph] is ignored. Used wherever the
+  /// glyph was an emoji: those painted in colour and ignored the tint, so a
+  /// hidden layer and a visible one looked identical apart from the picture.
+  final Ico? ico;
 
   @override
   Widget build(BuildContext context) => Tooltip(
@@ -2013,6 +2243,7 @@ class _Icon extends StatelessWidget {
       onTap: onTap,
       builder: (context, hover, down) => AnimatedContainer(
         duration: Motion.fast,
+        curve: Motion.curve,
         width: 22,
         height: 22,
         alignment: Alignment.center,
@@ -2020,10 +2251,12 @@ class _Icon extends StatelessWidget {
           color: hoverOver(const Color(0x00000000), hover, down),
           borderRadius: BorderRadius.circular(6),
         ),
-        child: Text(
-          glyph,
-          style: T.text(10, color: on ? T.tealBright : T.soft),
-        ),
+        child: ico != null
+            ? Icon2(ico!, color: on ? T.tealBright : T.soft)
+            : Text(
+                glyph,
+                style: T.text(10, color: on ? T.tealBright : T.soft),
+              ),
       ),
     ),
   );
@@ -2068,6 +2301,7 @@ class _Action extends StatelessWidget {
     onTap: onTap,
     builder: (context, hover, down) => AnimatedContainer(
       duration: Motion.fast,
+      curve: Motion.curve,
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: danger
@@ -2077,6 +2311,12 @@ class _Action extends StatelessWidget {
       ),
       child: Text(
         label,
+        // The one place Btn's lesson never reached: these sit in a fixed 123px
+        // grid cell, and "Duplizieren"/"Дублювати" are wider than the English
+        // the grid was measured with.
+        maxLines: 1,
+        softWrap: false,
+        overflow: TextOverflow.ellipsis,
         style: T.text(
           11.5,
           color: danger ? T.danger : (hover ? T.title : T.dim),
@@ -2133,6 +2373,9 @@ class _BankState extends State<_Bank> {
 
     return Glass(
       radius: 13,
+      // The bank covers the canvas almost entirely and scrolls a grid, so the
+      // live blur re-ran over a strip of edge on every scroll frame.
+      live: false,
       child: SizedBox(
         width: 320,
         child: Column(
@@ -2289,6 +2532,7 @@ class _BankTile extends StatelessWidget {
       onSecondaryTap: onPlace,
       builder: (context, hover, down) => AnimatedContainer(
         duration: Motion.fast,
+        curve: Motion.curve,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: const Color(0xFF15171A),
@@ -2320,6 +2564,7 @@ class _Chip extends StatelessWidget {
     onTap: onTap,
     builder: (context, hover, down) => AnimatedContainer(
       duration: Motion.fast,
+      curve: Motion.curve,
       padding: const EdgeInsets.symmetric(horizontal: 9),
       alignment: Alignment.center,
       decoration: BoxDecoration(
@@ -2350,6 +2595,13 @@ class _ColorPickerState extends State<_ColorPicker> {
   bool _dragging = false;
   final _hexField = TextEditingController();
   final _hexFocus = FocusNode();
+
+  /// The text the MODEL last put in the hex field. _syncFromShape refuses to refresh the field
+  /// while it holds focus, but the blur listener commits unconditionally — so clicking into hex,
+  /// clicking shape B in the layer list (rows are focusable: false, so focus stays) and tabbing
+  /// away recoloured B with A's hex, with an undo entry. The same mechanism reverted a live
+  /// saturation or hue drag. A commit with nothing edited is not a user decision.
+  String _hexShown = '';
   List<int> _synced = const [-1, -1, -1];
 
   Editor get ed => widget.editor;
@@ -2380,7 +2632,7 @@ class _ColorPickerState extends State<_ColorPicker> {
     _sat = hsv.saturation;
     _val = hsv.value;
     _synced = [c[0], c[1], c[2]];
-    if (!_hexFocus.hasFocus) _hexField.text = _hex(c);
+    if (!_hexFocus.hasFocus) _hexShown = _hexField.text = _hex(c);
   }
 
   void _push({required bool preview}) {
@@ -2389,7 +2641,7 @@ class _ColorPickerState extends State<_ColorPicker> {
     final g = (c.g * 255).round();
     final b = (c.b * 255).round();
     _synced = [r, g, b];
-    if (!_hexFocus.hasFocus) _hexField.text = _hex(_synced);
+    if (!_hexFocus.hasFocus) _hexShown = _hexField.text = _hex(_synced);
     if (preview) {
       ed.previewColor(r, g, b);
     } else {
@@ -2398,13 +2650,15 @@ class _ColorPickerState extends State<_ColorPicker> {
   }
 
   void _commitHex() {
+    if (_hexField.text.trim() == _hexShown.trim()) return; // see _hexShown
     final t = _hexField.text.trim().replaceFirst('#', '');
     final v = t.length == 6 ? int.tryParse(t, radix: 16) : null;
     if (v == null) {
       final c = ed.current?.color;
-      if (c != null) _hexField.text = _hex(c);
+      if (c != null) _hexShown = _hexField.text = _hex(c);
       return;
     }
+    _hexShown = _hexField.text;
     _synced = const [-1, -1, -1]; // force the fields to re-derive
     ed.setColor((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
   }
@@ -2595,6 +2849,7 @@ class _LayerRow extends StatelessWidget {
       onTap: () => editor.setActiveLayer(layer.id),
       builder: (context, hover, down) => AnimatedContainer(
         duration: Motion.fast,
+        curve: Motion.curve,
         height: 30,
         margin: const EdgeInsets.only(bottom: 2),
         padding: const EdgeInsets.only(left: 6, right: 2),
@@ -2612,6 +2867,7 @@ class _LayerRow extends StatelessWidget {
               onTap: onToggleOpen,
               builder: (context, h, d) => AnimatedRotation(
                 duration: Motion.fast,
+                curve: Motion.curve,
                 turns: open ? 0.25 : 0,
                 child: Text('▸', style: T.text(10, color: T.soft)),
               ),
@@ -2638,26 +2894,30 @@ class _LayerRow extends StatelessWidget {
             // Selecting the layer as one body — this is what "drag it all
             // together" means, and it is off unless asked for.
             _Icon(
-              '⛶',
+              '',
+              ico: Ico.group,
               on: grouped,
               tip: context.s('groupSelect'),
               onTap: () => editor.toggleGroup(layer.id),
             ),
             _Icon(
-              layer.hidden ? '🚫' : '👁',
+              '',
+              ico: layer.hidden ? Ico.eyeOff : Ico.eye,
               on: layer.hidden,
               tip: context.s('hideLayer'),
               onTap: () => editor.setLayerHidden(layer.id, !layer.hidden),
             ),
             _Icon(
-              layer.locked ? '🔒' : '🔓',
+              '',
+              ico: layer.locked ? Ico.lock : Ico.unlock,
               on: layer.locked,
               tip: context.s('lockLayer'),
               onTap: () => editor.setLayerLocked(layer.id, !layer.locked),
             ),
             if (editor.current != null && !layer.locked)
               _Icon(
-                '↴',
+                '',
+                ico: Ico.moveTo,
                 on: false,
                 tip: context.s('moveHere'),
                 onTap: () => editor.assignSelectedTo(layer.id),
@@ -2666,7 +2926,8 @@ class _LayerRow extends StatelessWidget {
             // layer — so this is not a way to lose work by accident. The last
             // layer cannot go, because every shape has to be in one.
             _Icon(
-              '✕',
+              '',
+              ico: Ico.close,
               on: false,
               tip: context.s('delete'),
               onTap: editor.layers.length > 1

@@ -73,6 +73,20 @@ try {
     if (Test-Path (Join-Path $built 'data')) { Remove-Item -Recurse -Force (Join-Path $built 'data') }
     Push-Location (Join-Path $root 'client')
     try {
+        # The SDK version is part of what we ship: an unpinned "stable" once swapped the whole UI
+        # runtime between two releases (2.2.0 on 3.44.9/Skia, 3.0.0 on 3.47.0/Impeller) and users
+        # reported extreme lag. Warn on drift from the CI pin rather than fail -- a local cut may be
+        # a deliberate experiment, but it must never be a silent one.
+        $pinned = '3.47.0'
+        # Probed inside try/catch: under $ErrorActionPreference='Stop' a native command's stderr
+        # redirect wraps each line in an ErrorRecord that Stop promotes to TERMINATING -- and
+        # `flutter --version` writes to stderr on mundane days (tool rebuild after an SDK update,
+        # startup-lock waits). A version PROBE must never be what kills the release build.
+        $sdk = ''
+        try { $sdk = (& flutter --version 2>$null | Select-Object -First 1) -replace '^Flutter\s+(\S+).*$', '$1' } catch {}
+        if ($sdk -ne $pinned) {
+            Write-Warning "local Flutter is $sdk but the release pin is $pinned (see release-build.yml) -- this build's UI runtime differs from CI's"
+        }
         # --build-name carries the release version into the runner's version resource; without it
         # the shipped exe claims pubspec's placeholder 1.0.0 forever.
         & flutter build windows --release --build-name=$Version --build-number=0
@@ -83,7 +97,7 @@ try {
     $stage = Join-Path $Out "fh6-paint-studio"
     if (Test-Path $stage) {
         # Probe for a running copy BEFORE deleting anything. A Remove-Item that dies halfway on a
-        # locked engined.exe leaves a gutted folder whose exe starts nothing — silently.
+        # locked engined.exe leaves a gutted folder whose exe starts nothing -- silently.
         $locked = Get-ChildItem $stage -Recurse -File | Where-Object {
             try {
                 $h = [IO.File]::Open($_.FullName, 'Open', 'ReadWrite', 'None'); $h.Close(); $false
@@ -99,8 +113,8 @@ try {
     # from a build two versions old. A `*.exe` copy picks that up, and the only thing that kept it
     # out of the release was the explicit copy two lines later happening to overwrite it. Name what
     # ships instead of naming what to sweep.
-    # The folder a user opens holds the exe, the README, and ONE directory. Everything else —
-    # Flutter's runtime, data\, the engine service, the licences — lives inside bin\: the runner
+    # The folder a user opens holds the exe, the README, and ONE directory. Everything else --
+    # Flutter's runtime, data\, the engine service, the licences -- lives inside bin\: the runner
     # delay-loads its DLLs and points the loader there before the first call needs one
     # (client/windows/runner), the client looks for engined in bin\engine first, and engined finds
     # fh6vk.dll beside itself because a process's own directory heads the DLL search order.
@@ -176,8 +190,10 @@ try {
     # every glyph in the interface is drawn. Flutter emits the font anyway because the material
     # package declares it in FontManifest, and the icon tree-shaker does not subset a font nothing
     # references. Removing the declaration with it keeps the manifest honest.
-    Remove-Item -Recurse -Force (Join-Path $stage 'data\flutter_assets\fonts') -ErrorAction SilentlyContinue
-    $fm = Join-Path $stage 'data\flutter_assets\FontManifest.json'
+    # NB data\ lives under bin\ since the delay-loaded layout -- these paths must follow it, or the
+    # strip silently no-ops and the font ships anyway (which is exactly what 3.0.0 did).
+    Remove-Item -Recurse -Force (Join-Path $binDir 'data\flutter_assets\fonts') -ErrorAction SilentlyContinue
+    $fm = Join-Path $binDir 'data\flutter_assets\FontManifest.json'
     # WriteAllText with a BOM-less encoding, not Set-Content -Encoding utf8: Windows PowerShell
     # writes a BOM, and Dart's jsonDecode throws on one. The app would fail to start.
     if (Test-Path $fm) { [IO.File]::WriteAllText($fm, '[]', (New-Object Text.UTF8Encoding $false)) }
@@ -217,19 +233,36 @@ try {
 
     # 7) Reduce bin\ to EXACTLY the runnable prod layout, so the app runs and injects from the familiar
     # place without unpacking the archive. The shim and engined builds drop intermediates here
-    # (.obj/.exp/.lib/.res, loose exes, the CLI, test logs) that have no business in a prod folder — the
+    # (.obj/.exp/.lib/.res, loose exes, the CLI, test logs) that have no business in a prod folder -- the
     # user opens bin\ expecting what a release drop looks like: the launcher and its bin\ runtime, and
     # nothing else. Everything still needed to run, and to reuse the shim on the next -SkipDLL build,
     # lives inside bin\bin\. Staging has already consumed bin\engined.exe and bin\fh6vk.dll by now.
     # Wrapped so a locked bin\ (the app left running) warns instead of failing the finished release.
+    # Probe the locks BEFORE deleting anything: the old order removed what it could,
+    # died on the still-running exe, and left bin\ half-emptied and unrunnable.
     $binRoot = Join-Path $root 'bin'
-    try {
-        Get-ChildItem $binRoot -Force | Remove-Item -Recurse -Force
-        Copy-Item (Join-Path $stage 'FH6 Paint Studio.exe') $binRoot
-        Copy-Item (Join-Path $stage 'bin') $binRoot -Recurse
-        Write-Host "bin\ is now the runnable prod layout" -ForegroundColor Green
-    } catch {
-        Write-Host "Could not refresh bin\ (is the app running?): $_" -ForegroundColor Yellow
+    $lockedFile = $null
+    foreach ($f in @((Join-Path $binRoot 'FH6 Paint Studio.exe'),
+                     (Join-Path $binRoot 'bin\engine\engined.exe'))) {
+        if (Test-Path $f) {
+            try {
+                $h = [IO.File]::Open($f, 'Open', 'ReadWrite', 'None'); $h.Close()
+            } catch {
+                $lockedFile = $f; break
+            }
+        }
+    }
+    if ($lockedFile) {
+        Write-Host "bin\ is in use ($(Split-Path $lockedFile -Leaf) locked - app still running?); left untouched. The release itself is complete." -ForegroundColor Yellow
+    } else {
+        try {
+            Get-ChildItem $binRoot -Force | Remove-Item -Recurse -Force
+            Copy-Item (Join-Path $stage 'FH6 Paint Studio.exe') $binRoot
+            Copy-Item (Join-Path $stage 'bin') $binRoot -Recurse
+            Write-Host "bin\ is now the runnable prod layout" -ForegroundColor Green
+        } catch {
+            Write-Host "Could not refresh bin\: $_" -ForegroundColor Yellow
+        }
     }
 
     $size = [math]::Round((Get-Item $archive).Length / 1MB, 1)

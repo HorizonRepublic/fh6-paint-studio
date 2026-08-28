@@ -54,13 +54,19 @@ jobs:
           cache: true
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
-      # The client is Flutter. Pinned to stable rather than a version: the app uses nothing newer
-      # than the current stable API, and pinning a patch release means a broken build the day it is
-      # yanked. The cache is worth having — a cold Flutter SDK download is minutes.
+      # The client is Flutter, PINNED to an exact version. "channel: stable" once let two releases
+      # three days apart ship different UI runtimes: v2.2.0 built on 3.44.9, v3.0.0 on 3.47.0 —
+      # which flipped Windows rendering from Skia to Impeller-on-Vulkan, and users reported extreme
+      # UI lag on machines where the dev box showed none. The runtime is part of what we ship;
+      # bumping the pin is a deliberate change with its own testing, not a side effect of the
+      # release date. The renderer itself is forced back to Skia in the runner (main.cpp,
+      # set_impeller_switch) so an SDK bump can never flip it again silently.
+      # The cache is worth having — a cold Flutter SDK download is minutes.
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.47.0
           cache: true
       # Vulkan shim toolchain (glslang + headers + volk) assembled into third_party\vulkan so
       # build-vulkan.ps1 can compile fh6vk.dll; MSVC (set up above) compiles the shim + volk.

@@ -37,12 +37,14 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
 # Map each .comp to its C array variable name (the shim #includes <name>.spv.h).
 Write-Host "Compiling shaders -> SPIR-V ..." -ForegroundColor Cyan
 $shaders = [ordered]@{
+    'refine'          = 'refine_spv'
     'eval'            = 'eval_spv'
     'apply'          = 'apply_spv'
     'grid'            = 'grid_spv'
     'gen'             = 'gen_spv'
     'prepadj'         = 'prepadj_spv'
     'argmin'          = 'argmin_spv'
+    'mutate'          = 'mutate_spv'
     'momentseed'      = 'momentseed_spv'
     'genmoment'       = 'genmoment_spv'
     'polish_forward_tiled' = 'pt_forward_spv'
@@ -83,6 +85,20 @@ $shaders = [ordered]@{
 foreach ($s in $shaders.Keys) {
     & $glsl -V --target-env vulkan1.2 (Join-Path $shim "$s.comp") --vn $shaders[$s] -o (Join-Path $shim "$s.spv.h")
     if ($LASTEXITCODE -ne 0) { throw "glslangValidator failed on $s.comp" }
+}
+
+# fp32 variants of every REAL-typed shader (see the FH6_FP32 guard in the sources): devices
+# without shaderFloat64 get these pipelines instead of a startup failure. Variable naming: the
+# fp64 array `foo_spv` pairs with `foo_f32_spv`, which is what shim.cpp's RSPV macro pastes.
+$fp64Shaders = @('eval','grid','momentseed','polish_forward_tiled','polish_hard_tiled',
+    'polish_dcinit','polish_loss','polish_dcwalk_tiled','polish_backward_reduce',
+    'polish_backward_combine','fe_dir','fe_adj','ssim_h','ssim_myinit','ssim_map','ssim_gh',
+    'ssim_adj','eagle_scharr','eagle_var','eagle_boxx','eagle_boxy','eagle_hpfin','eagle_loss',
+    'eagle_sign','eagle_um','eagle_varadj','eagle_scharradj')
+foreach ($s in $fp64Shaders) {
+    $v32 = ($shaders[$s] -replace '_spv$','') + '_f32_spv'
+    & $glsl -V --target-env vulkan1.2 -DFH6_FP32=1 (Join-Path $shim "$s.comp") --vn $v32 -o (Join-Path $shim "${s}_f32.spv.h")
+    if ($LASTEXITCODE -ne 0) { throw "glslangValidator failed on $s.comp (fp32 variant)" }
 }
 
 # --- compile shim.cpp + volk.c -> bin\fh6vk.dll (volk loads vulkan-1.dll at runtime; no import lib) ---

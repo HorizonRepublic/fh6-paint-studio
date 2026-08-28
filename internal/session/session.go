@@ -74,6 +74,12 @@ type Run struct {
 	PadPx        int
 	ViewW, ViewH int
 
+	// SrcRect is the part of the SOURCE FILE the run was fitted to, in the raw file's own pixels:
+	// x, y, w, h. For an explicit region it is that region; for the default path it is what the
+	// auto-crop kept, which is not the whole file whenever the content box covers under 97% of it.
+	// The client needs it to line the compare wipe up — it draws "before" from the full source.
+	SrcRect [4]int
+
 	// Ink is the hybrid budget held back from the fill and appended as FDoG lines on completion.
 	Ink int
 
@@ -98,18 +104,22 @@ func Prepare(req Request) (*Run, error) {
 		prep *imageio.Prepared
 		err  error
 	)
+	var crop [4]int
 	if req.Region != nil {
 		prep, err = imageio.LoadAbsRegion(req.Path, fit, *req.Region)
+		crop = [4]int{req.Region.Min.X, req.Region.Min.Y, req.Region.Dx(), req.Region.Dy()}
 	} else {
 		// Auto-crop uniform margins to the content bbox before the downscale, identical to the CLI's
 		// default: content fills the render, so more detail and more shapes land per feature.
-		prep, _, err = imageio.LoadAutoCropped(req.Path, fit)
+		var rect image.Rectangle
+		prep, rect, err = imageio.LoadAutoCropped(req.Path, fit)
+		crop = [4]int{rect.Min.X, rect.Min.Y, rect.Dx(), rect.Dy()}
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	run := &Run{Prep: *prep, ViewW: prep.W, ViewH: prep.H}
+	run := &Run{Prep: *prep, ViewW: prep.W, ViewH: prep.H, SrcRect: crop}
 	if fit > display && (prep.W > display || prep.H > display) {
 		run.Notes = append(run.Notes, fmt.Sprintf("hi-res fit: engine input %dx%d (display stays at %dpx)", prep.W, prep.H, display))
 	}
@@ -117,7 +127,17 @@ func Prepare(req Request) (*Run, error) {
 	// Always pad when asked, never gated on how transparent the image is: content can touch an edge
 	// even when the middle is transparent, and a cutout silhouette touches its bbox by construction
 	// after the auto-crop. Quality-neutral, because the empty margin draws no shapes.
-	if req.KeepInside {
+	//
+	// Except in pixel mode, where it is not neutral at all — it BREAKS the mode. Pixel art bypasses
+	// the engine for an exact rectangle decomposition, and that starts by recovering the sprite's
+	// logical pixel size as the GCD of every colour-change boundary. The surround introduces two
+	// boundaries of its own, at the margin, and gcd(step, pad) is 1 for almost any pad — so the step
+	// collapses to 1, the decomposition explodes to one rectangle per screen pixel, and the run dies
+	// with "pixel art needs N rectangles … simplify the art", blaming the user for a margin the app
+	// added. Keep-inside is the client's DEFAULT, so picking Pixel art there failed outright.
+	// Nothing is lost by skipping it: an exact decomposition cannot spill outside the content in the
+	// first place, which is the only thing the surround is for.
+	if req.KeepInside && preset.PresetMode(req.Choices.Mode) != "pixel" {
 		padded, padPx := imageio.PadTransparent(&run.Prep, PadFrac)
 		run.Prep, run.PadPx = *padded, padPx
 		run.Notes = append(run.Notes, fmt.Sprintf("keep-inside: transparent surround %dpx (%dx%d), bounding shapes on all edges", padPx, run.Prep.W, run.Prep.H))
@@ -191,7 +211,21 @@ func (r *Run) finish(e runner.Done, onEvent func(runner.Event)) runner.Done {
 	shapes, canvas := e.Result.Shapes, e.Canvas
 
 	if r.Ink > 0 {
-		if lines := hybrid.Ink(&r.Prep, r.Ink, false); len(lines) > 0 {
+		// On the CONTENT rectangle, never on the padded canvas. The keep-inside surround is
+		// transparent black and the ink engine's luma ignores alpha, so the margin presents a
+		// maximum-contrast step exactly on the content border — and the FDoG answers it with a frame
+		// around the whole decal, spending a chunk of the ink budget on an outline nobody drew.
+		// Measured on a synthetic mid-grey field with one blob: 8 of 20 lines land on the margin ring
+		// with the surround, 0 without it. The lines come back in view coordinates and are shifted
+		// into the padded frame so everything below — the score, then the unpad — is unchanged.
+		src := &r.Prep
+		if r.PadPx > 0 {
+			src = imageio.UnpadPrepared(&r.Prep, r.PadPx, r.ViewW, r.ViewH)
+		}
+		if lines := hybrid.Ink(src, r.Ink, false); len(lines) > 0 {
+			if r.PadPx > 0 {
+				lines = imageio.TranslateShapes(lines, float64(r.PadPx), float64(r.PadPx))
+			}
 			shapes = append(shapes, lines...)
 			canvas = imageio.RenderFH6Image(shapes, r.Prep.HasTransparency, r.Prep.W, r.Prep.H, 2)
 			onEvent(runner.Log{Line: fmt.Sprintf("hybrid: +%d FDoG lines on top of the fill", len(lines))})
@@ -202,21 +236,21 @@ func (r *Run) finish(e runner.Done, onEvent func(runner.Event)) runner.Done {
 	if canvas != nil && canvas.Bounds().Dx() == r.Prep.W && canvas.Bounds().Dy() == r.Prep.H {
 		src := imageio.EncodeForDisplay(r.Prep.Pixels)
 		got := nrgbaToFloat(canvas)
-		de, _ := metric.DeltaE76(src, got, r.Prep.W, r.Prep.H)
+		de := metric.DeltaE76Mean(src, got, r.Prep.W, r.Prep.H) // bit-identical mean, minus the discarded-p95 sort
 		q = &runner.Quality{DeltaE: de, SSIM: metric.SSIM(src, got, r.Prep.W, r.Prep.H)}
 		onEvent(runner.Log{Line: fmt.Sprintf("quality: ΔE76 %.2f · SSIM %.3f", q.DeltaE, q.SSIM)})
 	}
 
 	w, h := r.Prep.W, r.Prep.H
 	if r.PadPx > 0 {
-		shapes = imageio.TranslateShapes(shapes, -float64(r.PadPx), -float64(r.PadPx))
+		shapes = imageio.UnpadGeometry(shapes, r.PadPx, r.ViewW, r.ViewH)
 		canvas = imageio.UnpadCanvas(canvas, r.PadPx, r.ViewW, r.ViewH)
 		w, h = r.ViewW, r.ViewH
 	}
 
 	res := e.Result
 	res.Shapes = shapes
-	return runner.Done{Result: res, Canvas: canvas, Backend: e.Backend, Width: w, Height: h, Quality: q}
+	return runner.Done{Result: res, Canvas: canvas, Backend: e.Backend, Width: w, Height: h, Quality: q, SrcRect: r.SrcRect}
 }
 
 func (r *Run) unpad(img *image.NRGBA) *image.NRGBA {

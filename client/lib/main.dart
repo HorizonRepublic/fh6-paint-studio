@@ -1,7 +1,7 @@
 /// FH6 Paint Studio — the Flutter client.
 ///
-/// The engine is a separate process this app talks to over a loopback socket,
-/// so nothing here touches the GPU, decodes an image, or writes to the game's
+/// The engine is a separate process this app talks to over its stdio pipes, so
+/// nothing here touches the GPU, decodes an image, or writes to the game's
 /// memory. That is what keeps the client free of FFI: every capability lives
 /// behind `internal/ipc` on the Go side.
 library;
@@ -53,15 +53,33 @@ class StudioApp extends StatefulWidget {
   State<StudioApp> createState() => _StudioAppState();
 }
 
-class _StudioAppState extends State<StudioApp> {
+class _StudioAppState extends State<StudioApp> with WidgetsBindingObserver {
   final studio = Studio();
   String? connectError;
   Lang lang = languages.first;
   Prefs? _prefs;
 
+  /// The window's idea of itself, in the log. The empty-screen dead-buttons
+  /// defect looked exactly like a DPI mismatch between layout and hit-testing,
+  /// and this line is what tells the two apart in a user's log.
+  void _logMetrics(String tag) {
+    // Explicit numbers: toString of Size is tree-shaken out of release builds.
+    final v = WidgetsBinding.instance.platformDispatcher.views.first;
+    AppLog.write(
+      'debug',
+      '$tag: phys=${v.physicalSize.width}x${v.physicalSize.height} '
+      'dpr=${v.devicePixelRatio}',
+    );
+  }
+
+  @override
+  void didChangeMetrics() => _logMetrics('metrics');
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _logMetrics('frame1'));
     // The language is restored before the engine is reached, so the failure
     // screen is already in the user's language if the engine never starts.
     Prefs.load().then((p) {
@@ -79,9 +97,18 @@ class _StudioAppState extends State<StudioApp> {
     // Connecting is the app's first act, and its failure is the one the user
     // most needs explained: without the engine there is nothing this window can
     // do, so the reason has to reach the screen rather than a log file.
-    studio.connect(engineExecutable()).catchError((Object e) {
-      AppLog.write('error', 'engine did not start: $e');
-      if (mounted) setState(() => connectError = '$e');
+    _connect();
+  }
+
+  void _connect() {
+    final exe = engineExecutable();
+    setState(() => connectError = null);
+    studio.connect(exe).catchError((Object e) {
+      AppLog.write('error', 'engine did not start ($exe): $e');
+      // The path is part of the diagnosis: engineExecutable() has three
+      // fallbacks, and "which one did it pick" is most of the answer when the
+      // engine is missing or has been quarantined by an antivirus.
+      if (mounted) setState(() => connectError = '$e\n\n$exe');
     });
   }
 
@@ -92,6 +119,7 @@ class _StudioAppState extends State<StudioApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     studio.dispose();
     super.dispose();
   }
@@ -110,7 +138,7 @@ class _StudioAppState extends State<StudioApp> {
           backgroundColor: T.desk,
           body: connectError == null
               ? Shell(studio: studio, lang: lang, onLanguage: _setLanguage)
-              : _NoEngine(message: connectError!),
+              : _NoEngine(message: connectError!, onRetry: _connect),
         ),
       ),
     );
@@ -118,8 +146,13 @@ class _StudioAppState extends State<StudioApp> {
 }
 
 class _NoEngine extends StatelessWidget {
-  const _NoEngine({required this.message});
+  const _NoEngine({required this.message, required this.onRetry});
   final String message;
+
+  /// Without this the screen is a dead end: the usual cause is an antivirus
+  /// holding the engine on first launch, which the user fixes in another window
+  /// and then has no way to act on but restarting the app.
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) => Center(
@@ -139,6 +172,19 @@ class _NoEngine extends StatelessWidget {
             message,
             textAlign: TextAlign.center,
             style: T.monoText(11.5, color: T.hint),
+          ),
+          const SizedBox(height: 20),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Btn(
+                context.s('retry'),
+                kind: BtnKind.primary,
+                onTap: onRetry,
+              ),
+              const SizedBox(width: 8),
+              Btn(context.s('openLogFolder'), onTap: AppLog.reveal),
+            ],
           ),
         ],
       ),

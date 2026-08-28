@@ -120,6 +120,7 @@ class _StylePopoverState extends State<StylePopover> {
     final current = studio.mode;
     final saved = studio.userPresets;
     return Glass(
+      live: false,
       child: SizedBox(
         width: 268,
         child: Column(
@@ -410,38 +411,56 @@ class _DetailPopoverState extends State<DetailPopover> {
     text: widget.studio.budget.toString(),
   );
   final _focus = FocusNode();
+  late final VoidCallback _focusListener;
+
+  /// The text the MODEL last put in the field. A commit with nothing edited is not a user
+  /// decision, and dispose() commits unconditionally — which notified the studio from inside
+  /// finalizeTree's lockState (a debug/profile-only assert) on every dismiss of an untouched
+  /// popover, and re-picked the same budget besides.
+  late String _asShown = widget.studio.budget.toString();
 
   @override
   void initState() {
     super.initState();
     // Committing on focus loss as well as on Enter: a user who types a number
     // and clicks Generate meant that number.
-    _focus.addListener(() {
+    _focusListener = () {
       if (!_focus.hasFocus) _commit();
-      setState(() {}); // the field's border shows focus
-    });
+      if (mounted) setState(() {}); // the field's border shows focus
+    };
+    _focus.addListener(_focusListener);
   }
 
   @override
   void dispose() {
-    _field.dispose();
+    // Remove the listener and drop the focus node BEFORE the controller: a bare
+    // addListener could not be removed, so disposing the node fired the listener
+    // into _commit — reading an already-disposed controller — on every dismiss.
+    _focus.removeListener(_focusListener);
+    _commit(); // preserve a typed-but-uncommitted budget on Esc/close (the field
+    // commits on blur, and closing IS a blur); the controller is still alive here.
     _focus.dispose();
+    _field.dispose();
     super.dispose();
   }
 
   void _commit() {
+    if (_field.text.trim() == _asShown.trim()) return; // see _asShown: no edit, no pick
     final n = int.tryParse(_field.text.replaceAll(RegExp(r'[^0-9]'), ''));
     if (n == null) {
       _field.text = widget.studio.budget.toString();
+      _asShown = _field.text;
       return;
     }
     final clamped = n.clamp(DetailPopover.minShapes, DetailPopover.maxShapes);
     _field.text = clamped.toString();
+    _asShown = _field.text;
     widget.onPick(clamped);
   }
 
   void _pick(int n) {
     _field.text = n.toString();
+    _asShown = _field.text;
     widget.onPick(n);
   }
 
@@ -453,6 +472,7 @@ class _DetailPopoverState extends State<DetailPopover> {
     final named = detailStops.where((s) => s.$1 == budget).firstOrNull?.$2;
 
     return Glass(
+      live: false,
       child: SizedBox(
         width: detailPopoverWidth,
         child: Column(

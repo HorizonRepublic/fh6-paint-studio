@@ -9,6 +9,7 @@ import (
 
 	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/userpreset"
 )
 
@@ -282,6 +283,16 @@ func (c *Client) PresetList() ([]userpreset.Preset, error) {
 	}
 	err := c.Call("presets.list", nil, &out)
 	return out.Presets, err
+}
+
+// KnobDefaults reports the concrete values the given mode's "default" resolves to, classified
+// against the image at path when one is given (flat's depth and the alpha floor depend on it).
+func (c *Client) KnobDefaults(mode, path string) (preset.Choices, error) {
+	var out struct {
+		Choices preset.Choices `json:"choices"`
+	}
+	err := c.Call("presets.knobDefaults", map[string]any{"mode": mode, "path": path}, &out)
+	return out.Choices, err
 }
 
 // PresetSave stores one and returns it with the id the daemon assigned.

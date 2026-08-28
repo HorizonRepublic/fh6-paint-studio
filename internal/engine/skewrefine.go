@@ -65,7 +65,17 @@ const (
 	refineMinGain = 0.002
 	// refineStride caps the pixels sampled per shape, as looFitContrib does.
 	refineStride = 4096
-	refineTile   = 64
+)
+
+// refineScaleGain: scale each shape's gain by step² so the cross-shape conflict sort compares
+// true pixel units. MEASURED 2026-08-16, n=27 paired: mean +0.72% WORSE, 22/27 (REJECT) — the
+// "wrong" unscaled ordering is accidentally protective (it prioritises small, safe moves; large
+// shapes' exact-at-judgment gains compose worse across overlapping accepts). Default stays the
+// shipped unscaled sort; FH6_SKEW_SCALE=1 keeps the experiment reachable.
+var refineScaleGain = os.Getenv("FH6_SKEW_SCALE") == "1"
+
+const (
+	refineTile = 64
 	// refineSweeps is how many times the parameter list is walked. Parameters interact — moving a
 	// centre changes the best width — but the second sweep finds far less than the first, and a third
 	// costs another full pass for almost nothing.
@@ -119,6 +129,31 @@ type skewRefinePass struct{ early bool }
 // gets one fitted to where it now is. FH6_REFINE_LATE=1 puts it back for an A/B.
 var refineEarly = os.Getenv("FH6_REFINE_LATE") != "1"
 
+// refineFloor / refineSweepsN: the two knobs that decide how much of this pass actually runs.
+// The floor stops a round whose accepted gain falls under a fraction of the first round's, and
+// the sweep count is how many times the parameter list is walked before a shape is committed.
+// Both were fixed at values chosen to bound wall time — but this pass is the single largest CPU
+// block of a run (measured: localRefine is 50% of the CPU samples, 16% of the wall), which means
+// it is also where more spending has the most room to buy quality. FH6_REFINE_FLOOR and
+// FH6_REFINE_SWEEPS make that measurable without a rebuild.
+var refineFloor = func() float64 {
+	if v := os.Getenv("FH6_REFINE_FLOOR"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f < 1 {
+			return f
+		}
+	}
+	return refineRoundFloor
+}()
+
+var refineSweepsN = func() int {
+	if v := os.Getenv("FH6_REFINE_SWEEPS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 8 {
+			return n
+		}
+	}
+	return refineSweeps
+}()
+
 // refineRoundsOverride lets an A/B move the round count without a rebuild.
 var refineRoundsOverride = func() int {
 	if v := os.Getenv("FH6_REFINE_ROUNDS"); v != "" {
@@ -136,7 +171,7 @@ func (p skewRefinePass) enabled(opt Options) bool {
 func (skewRefinePass) apply(r *run) {
 	r.setStatus("Refining geometry…")
 	before := r.finalErr
-	shapes, changed := localRefine(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.GeomRefine)
+	shapes, changed := localRefine(r.be, r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.GeomRefine)
 	if changed == 0 {
 		return
 	}
@@ -160,9 +195,7 @@ func (skewRefinePass) apply(r *run) {
 
 func rerenderStack(r *run, shapes []model.Shape) {
 	_ = r.be.Reset(r.initCanvas)
-	for _, s := range shapes[1:] {
-		_ = r.be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(r.be, shapes[1:])
 }
 
 // skewEligible reports whether a shear gives this kind a shape it cannot already reach.
@@ -241,7 +274,7 @@ func refineAxes(k model.ShapeKind, p [6]float32, geom bool) []refineAxis {
 
 // localRefine searches every shape against the frozen stack and returns the updated shapes plus how
 // many moved.
-func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom bool) ([]model.Shape, int) {
+func localRefine(dev any, shapes []model.Shape, target, weight []float32, w, h int, geom bool) ([]model.Shape, int) {
 	n := len(shapes)
 	if n < 2 {
 		return shapes, 0
@@ -313,6 +346,9 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 		C            []float32 // 3 per sample
 		dev          []float32 // 1 per sample: the shipped geometry's own worst-channel miss
 		cov          []float32 // 1 per sample: how much the shipped geometry itself covered
+		tgt          []float32 // 3 per sample: the target, gathered once per shape
+		wt           []float64 // 1 per sample: the resolved pixel weight, ditto
+		eZero        []float64 // 1 per sample: the error term when the trial covers NOTHING here
 		intruded     float64   // filled by trialErr: px of new paint this trial put on clean ground
 	}
 	build := func(ctx *winCtx, i int, b [4]int, step int) {
@@ -328,13 +364,33 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 			ctx.dev = make([]float32, need)
 			ctx.cov = make([]float32, need)
 		}
+		if cap(ctx.tgt) < need*3 {
+			ctx.tgt = make([]float32, need*3)
+			ctx.wt = make([]float64, need)
+			ctx.eZero = make([]float64, need)
+		}
 		ctx.nx, ctx.ny, ctx.step, ctx.b = nx, ny, step, b
 		ctx.below, ctx.C, ctx.T = ctx.below[:need*3], ctx.C[:need*3], ctx.T[:need]
 		ctx.dev, ctx.cov = ctx.dev[:need], ctx.cov[:need]
+		ctx.tgt, ctx.wt, ctx.eZero = ctx.tgt[:need*3], ctx.wt[:need], ctx.eZero[:need]
 		si := 0
 		for y := b[1]; y <= b[3]; y += step {
 			trow := (y / refineTile) * tw
 			for x := b[0]; x <= b[2]; x += step {
+				// Gather the target and weight for this sample once. Every trial of this shape used
+				// to re-read them through strided indices into two canvas-sized arrays — with
+				// step>1 that is a fresh cache line per sample per trial, and it was 15-25% of the
+				// pass. Same values, same order: the score is byte-identical.
+				{
+					idx := y*w + x
+					q := idx * 4
+					ctx.tgt[si*3+0], ctx.tgt[si*3+1], ctx.tgt[si*3+2] = target[q], target[q+1], target[q+2]
+					if refineUnweighted {
+						ctx.wt[si] = 1
+					} else {
+						ctx.wt[si] = float64(weight[idx])
+					}
+				}
 				var br, bg, bb float32
 				var cr, cg, cb float32
 				tt := float32(1)
@@ -365,6 +421,20 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 				ctx.below[si*3+0], ctx.below[si*3+1], ctx.below[si*3+2] = br, bg, bb
 				ctx.C[si*3+0], ctx.C[si*3+1], ctx.C[si*3+2] = cr, cg, cb
 				ctx.T[si] = tt
+				// The zero-coverage error term, precomputed with trialErr's exact arithmetic at
+				// c==0 (a=0 leaves the blend at `below`, so f = T*below + C). A trial only pays
+				// full evaluation inside its own bbox; every sample it cannot touch adds this
+				// SAME value at the SAME position in the sum — byte-identical, most of the
+				// window's Coverage() calls gone.
+				{
+					fr := tt*br + cr
+					fg := tt*bg + cg
+					fb := tt*bb + cb
+					dr := float64(fr) - float64(ctx.tgt[si*3+0])
+					dg := float64(fg) - float64(ctx.tgt[si*3+1])
+					db := float64(fb) - float64(ctx.tgt[si*3+2])
+					ctx.eZero[si] = ctx.wt[si] * (dr*dr + dg*dg + db*db)
+				}
 				si++
 			}
 		}
@@ -374,13 +444,29 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 	// catches first: a pass monotone in the total will happily trade a new visible blemish on clean
 	// ground for a diffuse gain elsewhere. Measured — the owner spotted exactly that, two pale smudges
 	// pushed onto img_24's white background, in a run the metric called 4.58% better.
-	trialErr := func(ctx *winCtx, sub *raster.Prepared, alpha float32, col [4]float32, setDev bool) float64 {
+	// bb is the TRIAL geometry's own bbox: outside it Coverage is exactly zero (every kind's
+	// falloff has finite support inside raster.BBox), so those samples contribute ctx.eZero —
+	// the identical value the full expression yields at c==0, added in the identical order.
+	// The intrusion veto cannot fire at c==0 either, so skipping it there changes nothing.
+	trialErr := func(ctx *winCtx, sub *raster.Prepared, alpha float32, col [4]float32, setDev bool, bb [4]int) float64 {
 		var e float64
 		ctx.intruded = 0
 		area := float64(ctx.step * ctx.step) // each sample stands for this many pixels
 		si := 0
 		for y := ctx.b[1]; y <= ctx.b[3]; y += ctx.step {
+			if y < bb[1] || y > bb[3] {
+				for x := ctx.b[0]; x <= ctx.b[2]; x += ctx.step {
+					e += ctx.eZero[si]
+					si++
+				}
+				continue
+			}
 			for x := ctx.b[0]; x <= ctx.b[2]; x += ctx.step {
+				if x < bb[0] || x > bb[2] {
+					e += ctx.eZero[si]
+					si++
+					continue
+				}
 				c := float32(sub.Coverage(x, y))
 				a := c * alpha
 				inv := 1 - a
@@ -391,15 +477,10 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 				fr := tt*xr + ctx.C[si*3+0]
 				fg := tt*xg + ctx.C[si*3+1]
 				fb := tt*xb + ctx.C[si*3+2]
-				idx := y*w + x
-				q := idx * 4
-				wt := 1.0
-				if !refineUnweighted {
-					wt = float64(weight[idx])
-				}
-				dr := float64(fr) - float64(target[q])
-				dg := float64(fg) - float64(target[q+1])
-				db := float64(fb) - float64(target[q+2])
+				wt := ctx.wt[si]
+				dr := float64(fr) - float64(ctx.tgt[si*3+0])
+				dg := float64(fg) - float64(ctx.tgt[si*3+1])
+				db := float64(fb) - float64(ctx.tgt[si*3+2])
 				e += wt * (dr*dr + dg*dg + db*db)
 				if setDev {
 					// dev is only consumed here, on the once-per-shape context build; computing it on
@@ -435,10 +516,163 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 	changed := 0
 	firstGain := 0.0
 
+	// The device path. This pass was the largest CPU block of a run — 50% of the samples, 16% of the
+	// wall, already goroutine-parallel — so the answer was never more cores. One workgroup per shape
+	// runs the whole coordinate descent on the GPU (refine.comp); the host keeps the kinds the
+	// shader does not frame (triangles, lines, bank words) and the conflict filter, which is a
+	// sequential decision over the finished gains and belongs here.
+	//
+	// It is NOT bit-identical: the device sums the window through a tree where the host sums it
+	// serially in float64, so a marginal accept can flip. Every accept is still gated on lowering
+	// the shape's exact local error, so the pass can only pick a different subset of improvements.
+	// The stack, flattened once: the shader reads it as plain arrays and it does not change while
+	// the rounds run (only the shapes the filter commits do, and those are re-flattened below).
+	flatP := make([]float32, n*6)
+	flatCol := make([]float32, n*4)
+	flatKind := make([]int32, n)
+	flatBox := make([]int32, n*4)
+	reflatten := func() {
+		for i := range gs {
+			copy(flatP[i*6:], gs[i].p[:])
+			copy(flatCol[i*4:], gs[i].col[:])
+			flatKind[i] = int32(gs[i].kind)
+			for k := 0; k < 4; k++ {
+				flatBox[i*4+k] = int32(gs[i].bbox[k])
+			}
+		}
+	}
+	reflatten()
+	// The tile index as CSR. `tiles` is rebuilt per round as a slice of slices; the shader wants
+	// one offset array and one flat index array.
+	tileOff := make([]int32, len(tiles)+1)
+	var tileIdx []int32
+	flattenTiles := func() {
+		tileIdx = tileIdx[:0]
+		for t, lst := range tiles {
+			tileOff[t] = int32(len(tileIdx))
+			tileIdx = append(tileIdx, lst...)
+		}
+		tileOff[len(tiles)] = int32(len(tileIdx))
+	}
+	flattenTiles()
+
+	devRefine := deviceRefiner(dev)
+	gpuRound := func(pending []int) []int {
+		if devRefine == nil {
+			return pending
+		}
+		reflatten()
+		flattenTiles()
+		jobShape := make([]int32, 0, len(pending))
+		jobWin := make([]int32, 0, len(pending)*6)
+		jobAxes := make([]float32, 0, len(pending)*24)
+		jobNAx := make([]int32, 0, len(pending))
+		slot := make([]int, 0, len(pending)) // job -> shape index, for writing the results back
+		host := pending[:0:0]
+		maxNeed := 0
+		for _, i := range pending {
+			g := &gs[i]
+			axes := refineAxes(g.kind, g.p, geom)
+			b := windows[i]
+			if !refineOnDevice(g.kind) || len(axes) == 0 || len(axes) > 6 || g.col[3] <= 0 ||
+				b[2] < b[0] || b[3] < b[1] {
+				host = append(host, i)
+				continue
+			}
+			area := (b[2] - b[0] + 1) * (b[3] - b[1] + 1)
+			step := 1
+			if area > refineStride {
+				if sN := int(math.Sqrt(float64(area) / float64(refineStride))); sN > 1 {
+					step = sN
+				}
+			}
+			nx := (b[2]-b[0])/step + 1
+			ny := (b[3]-b[1])/step + 1
+			need := nx * ny
+			// Tiny windows stay on the host. A workgroup that cannot fill its own lanes spends more
+			// on the reduction tree than on the arithmetic, and the host loop over a couple of hundred
+			// samples is genuinely quick — measured, offloading everything was 2.3x SLOWER than not.
+			if need < refineDevMinSamples {
+				host = append(host, i)
+				continue
+			}
+			if need > maxNeed {
+				maxNeed = need
+			}
+			slot = append(slot, i)
+			jobShape = append(jobShape, int32(i))
+			jobWin = append(jobWin, int32(b[0]), int32(b[1]), int32(b[2]), int32(b[3]), int32(step), int32(need))
+			jobNAx = append(jobNAx, int32(len(axes)))
+			for k := 0; k < 6; k++ {
+				if k < len(axes) {
+					a := axes[k]
+					jobAxes = append(jobAxes, float32(a.slot), float32(a.step), float32(a.lo), float32(a.hi))
+				} else {
+					jobAxes = append(jobAxes, 0, 0, 0, 0) // step 0 = the shader skips the slot
+				}
+			}
+		}
+		if len(slot) == 0 {
+			return host
+		}
+		// The context slab is njobs * ctxCap * 14 floats and it is the whole memory cost of the
+		// pass, so the round is handed over in chunks small enough that a 4GB card is never asked
+		// for something it does not have.
+		perJob := maxNeed * 14 * 4
+		chunk := len(slot)
+		if perJob > 0 {
+			if c := refineDevBudget / perJob; c < chunk {
+				chunk = maxInt(1, c)
+			}
+		}
+		outP := make([]float32, chunk*6)
+		outGain := make([]float32, chunk)
+		for off := 0; off < len(slot); off += chunk {
+			cnt := minInt(chunk, len(slot)-off)
+			jb := &vulkanRefineJobs{
+				n: len(gs), shapeP: flatP, shapeCol: flatCol, shapeKind: flatKind, shapeBox: flatBox,
+				tileOff: tileOff, tileIdx: tileIdx, tw: tw, th: th, tile: refineTile,
+				jobShape: jobShape[off : off+cnt], jobWin: jobWin[off*6 : (off+cnt)*6],
+				jobAxes: jobAxes[off*24 : (off+cnt)*24], jobNAx: jobNAx[off : off+cnt],
+				ctxCap: maxNeed, sweeps: refineSweepsN, unweighted: refineUnweighted,
+				minGain: refineMinGain, intrudeMax: refineIntrudeMax, cleanDev: refineCleanDev,
+				shrink: refineShrink, minStepFrac: refineMinStep,
+			}
+			if devRefine(jb, outP[:cnt*6], outGain[:cnt]) < 0 {
+				srdbg("device refine refused — falling back to the host for the rest of the run")
+				devRefine = nil
+				// Earlier chunks of THIS round may already have written results. The round is about
+				// to be redone entirely on the host, so drop them: leaving them mixes two verdicts
+				// in one round, and a shape the host declines would keep a device move that nothing
+				// re-checked.
+				for _, i := range pending {
+					touched[i], gain[i] = false, 0
+				}
+				return pending
+			}
+			for j := 0; j < cnt; j++ {
+				if outGain[j] <= 0 {
+					continue
+				}
+				i := slot[off+j]
+				var np [6]float32
+				copy(np[:], outP[j*6:j*6+6])
+				sc := 1.0
+				if refineScaleGain {
+					st := float64(jobWin[(off+j)*6+4])
+					sc = st * st
+				}
+				moved[i], touched[i], gain[i] = np, true, float64(outGain[j])*sc
+			}
+		}
+		return host
+	}
+
 	for round := 0; round < refineRoundsOverride && len(pending) > 0; round++ {
 		for _, i := range pending {
 			touched[i], gain[i] = false, 0
 		}
+		hostPending := gpuRound(pending)
 		var wg sync.WaitGroup
 		jobs := make(chan int, runtime.NumCPU()*2)
 		for wk := 0; wk < runtime.NumCPU(); wk++ {
@@ -467,7 +701,8 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 					cur := g.p
 					score := func(p [6]float32) float64 {
 						pr := raster.Prep(g.kind, p)
-						e := trialErr(&ctx, &pr, g.col[3], g.col, false)
+						bx0, by0, bx1, by1 := raster.BBox(g.kind, p, w, h)
+						e := trialErr(&ctx, &pr, g.col[3], g.col, false, [4]int{bx0, by0, bx1, by1})
 						if refineDebug {
 							atomic.AddInt64(&refineTried, 1)
 						}
@@ -480,12 +715,12 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 						return e
 					}
 					basePrep := raster.Prep(g.kind, cur)
-					base := trialErr(&ctx, &basePrep, g.col[3], g.col, true)
+					base := trialErr(&ctx, &basePrep, g.col[3], g.col, true, b) // full window: this pass fills dev/cov
 					if base <= 0 {
 						continue
 					}
 					best := base
-					for sweep := 0; sweep < refineSweeps; sweep++ {
+					for sweep := 0; sweep < refineSweepsN; sweep++ {
 						improvedAny := false
 						for _, ax := range axes {
 							v, e2, ok := searchAxis(score, cur, ax, best)
@@ -500,12 +735,23 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 						}
 					}
 					if base-best >= refineMinGain*base {
-						moved[i], touched[i], gain[i] = cur, true, base-best
+						// Scale to TRUE pixel units (one strided sample stands for step² pixels;
+						// looFitContrib does the same). Without it the cross-shape conflict sort
+						// deflated large shapes' gains up to step²× against small ones, so they
+						// systematically lost the disjointness race — and roundGain (the round
+						// floor's signal) summed mismatched units. The accept test above is a
+						// RATIO of same-window sums, so it is unaffected either way.
+						// FH6_SKEW_SCALE=0 pins the old unscaled ordering for A/Bs.
+						sc := 1.0
+						if refineScaleGain {
+							sc = float64(step * step)
+						}
+						moved[i], touched[i], gain[i] = cur, true, (base-best)*sc
 					}
 				}
 			}()
 		}
-		for _, i := range pending {
+		for _, i := range hostPending {
 			jobs <- i
 		}
 		close(jobs)
@@ -562,9 +808,9 @@ func localRefine(shapes []model.Shape, target, weight []float32, w, h int, geom 
 		}
 		if round == 0 {
 			firstGain = roundGain
-		} else if roundGain < refineRoundFloor*firstGain {
+		} else if roundGain < refineFloor*firstGain {
 			srdbg("round %d earned %.1f, under %.0f%% of the first round's %.1f — stopping",
-				round, roundGain, refineRoundFloor*100, firstGain)
+				round, roundGain, refineFloor*100, firstGain)
 			pending = blocked
 			break
 		}

@@ -6,6 +6,7 @@ import (
 
 	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
 )
 
@@ -26,6 +27,11 @@ const gaussLRScale = 4.0
 // (engine.Run) is entirely untouched — this is an additive parallel path.
 func GenerateGaussian(be backend.Backend, opt Options) Result {
 	t0 := time.Now()
+	// The other entry point (Run) releases the hard-edge memo on the way out; this one is a run too.
+	// The memo keys on the TARGET SLICE'S ADDRESS, so leaving it armed past the run both pins a
+	// w*h plane for the process's life and lets a later target allocated at the same address with
+	// the same dimensions read a map built for a different picture.
+	defer metric.ReleaseMaps()
 	w, h := opt.Width, opt.Height
 	target, weight := be.Target(), be.Weight()
 	bg := opt.Background
@@ -36,9 +42,20 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 
 	glows := gaussInitGlows(target, w, h, n)
 	shapes := make([]model.Shape, 0, len(glows)+1)
-	if !opt.TransparentBG {
-		shapes = append(shapes, gaussBgRect(bg, w, h))
+	// The rect is prepended even when the background is transparent — at alpha 0, so it composites
+	// as nothing and the canvas is what it always was. Skipping it put a GLOW at index 0, and
+	// index 0 is the one slot the whole pipeline treats as "not a shape": PolishWithBackend builds
+	// its parameter set from shapes[1:] and returns shapes[0] verbatim, so that first glow was
+	// never trained and was not in the training canvas either — yet it was composited back into
+	// the result at its grid-init values, meaning the best-hard point was chosen for a different
+	// image than the one delivered. Keep-inside makes TransparentBG true on every client run, so
+	// the "Soft glow" style hit this every time. It also restores the shapes[0]==background
+	// invariant that cmd/fh6paint and the unpad path rely on.
+	bgAlpha := 255
+	if opt.TransparentBG {
+		bgAlpha = 0
 	}
+	shapes = append(shapes, gaussBgRect(bg, w, h, bgAlpha))
 	shapes = append(shapes, glows...)
 	initErr := gaussRenderErr(be, shapes, w, h)
 
@@ -46,6 +63,7 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 	if po.Iters <= 0 {
 		po = DefaultPolishOptions()
 	}
+	po.Cancel = opt.Cancel // Stop must interrupt the training loop (it IS the whole run here)
 	po.EarlyStopMargin = 0 // from-scratch training: run the full iteration budget (no plateau cut)
 	po.LRPos *= gaussLRScale
 	po.LRRad *= gaussLRScale
@@ -71,12 +89,16 @@ func GenerateGaussian(be backend.Backend, opt Options) Result {
 	}
 
 	finalErr := gaussRenderErr(be, shapes, w, h)
-	return Result{
+	res := Result{
 		Shapes:       shapes,
 		InitialError: initErr,
 		FinalError:   finalErr,
 		Timings:      Timings{Total: time.Since(t0), Polish: time.Since(t0), PolishIters: po.Iters, PolishPre: initErr, PolishPost: finalErr},
 	}
+	if dl, ok := be.(interface{ DeviceLost() bool }); ok && dl.DeviceLost() {
+		res.DevErr = errDeviceLost
+	}
+	return res
 }
 
 // gaussInitGlows tiles ~n glows on a square grid, each coloured by its cell's mean target colour and
@@ -118,9 +140,9 @@ func gaussInitGlows(target []float32, w, h, n int) []model.Shape {
 	return out
 }
 
-func gaussBgRect(c model.RGBA, w, h int) model.Shape {
+func gaussBgRect(c model.RGBA, w, h, alpha int) model.Shape {
 	return model.Shape{Type: model.TypeRectangle, Data: []float64{0, 0, float64(w), float64(h)},
-		Color: []int{model.EncByte(c.R), model.EncByte(c.G), model.EncByte(c.B), 255}}
+		Color: []int{model.EncByte(c.R), model.EncByte(c.G), model.EncByte(c.B), alpha}}
 }
 
 // gaussRenderErr composites the shapes over a transparent canvas via the backend (the bg rect, if any,
@@ -129,10 +151,11 @@ func gaussRenderErr(be backend.Backend, shapes []model.Shape, w, h int) float64 
 	canvas := make([]float32, w*h*4)
 	_ = be.Reset(canvas)
 	for _, s := range shapes {
-		c := model.Candidate{Kind: model.KindFromType(s.Type), P: model.ParamsFromShape(s)}
-		if len(s.Color) >= 4 {
-			c.Color = model.RGBA{R: float32(s.Color[0]) / 255, G: float32(s.Color[1]) / 255, B: float32(s.Color[2]) / 255, A: float32(s.Color[3]) / 255}
-		}
+		// shapeToCandidate, not /255: the bytes were written by EncByte, which is
+		// LinearToSRGB under the default LinearLight — decoding them linearly
+		// gamma-shifted every colour, so both the reported error and the canvas
+		// this leaves behind were computed from the wrong values.
+		c := shapeToCandidate(s)
 		_ = be.Apply(c)
 	}
 	out := make([]float32, w*h*4)

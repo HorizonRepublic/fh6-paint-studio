@@ -131,8 +131,14 @@ void main() {
     float aBase = clamp(pc.ca, 0.0, 1.0);
     bool grad = isGradKind(pc.kind);
     int threads = int(gl_NumWorkGroups.x * gl_WorkGroupSize.x);
+    // Strength-reduced (x,y): same pixel per tt as the % and / it replaces, without the two
+    // ~20-instruction emulated integer divisions per pixel (see eval.comp).
+    int cxi = int(gl_GlobalInvocationID.x) % cols, cyi = int(gl_GlobalInvocationID.x) / cols;
+    int dq = threads / cols, dr = threads % cols;
     for (int tt = int(gl_GlobalInvocationID.x); tt < total; tt += threads) {
-        int x = xMin + tt % cols, y = yMin + tt / cols;
+        int x = xMin + cxi, y = yMin + cyi;
+        cxi += dr; cyi += dq;
+        if (cxi >= cols) { cxi -= cols; cyi++; }
         float a = aBase;
         if (grad) { // per-pixel falloff: aEff = A * cov(x)
             float cov = gradCov(pc.kind, P, x, y);

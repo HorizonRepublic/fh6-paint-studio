@@ -6,9 +6,12 @@ import (
 	"image"
 	"os"
 
+	"fh6-paint-studio/internal/imageio"
 	"fh6-paint-studio/internal/library"
 	"fh6-paint-studio/internal/maskbank"
+	"fh6-paint-studio/internal/metric"
 	"fh6-paint-studio/internal/model"
+	"fh6-paint-studio/internal/preset"
 	"fh6-paint-studio/internal/userpreset"
 )
 
@@ -79,9 +82,9 @@ func (s *Server) libraryMethod(req Request) bool {
 		handle(func(st *library.Store) (any, error) {
 			var p LibraryImageParams
 			_ = json.Unmarshal(req.Params, &p)
-			path := st.ThumbPath(p.ID)
-			if p.Which == "preview" {
-				path = st.PreviewPath(p.ID)
+			path, err := st.ImagePath(p.ID, p.Which)
+			if err != nil {
+				return nil, err
 			}
 			// PNG bytes straight off disk: every client already decodes PNG, and re-encoding here
 			// would only lose the thumbnail's already-chosen quality.
@@ -146,6 +149,33 @@ func (s *Server) libraryMethod(req Request) bool {
 	return true
 }
 
+// contentDescriptor mirrors what Resolve will see for this source: the palette colour count and
+// whether the image is a genuine cutout (not a keep-inside pad margin). Decoded at the studio's
+// display resolution so the classification matches the old in-process panel. One-entry cache — the
+// panel asks again on every open, the answer only changes with the file.
+func (s *Server) contentDescriptor(path string) (colors int, cutout bool) {
+	if path == "" {
+		return 0, false
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	s.descMu.Lock()
+	defer s.descMu.Unlock()
+	if s.descPath == path && s.descMod.Equal(st.ModTime()) {
+		return s.descColors, s.descCutout
+	}
+	prep, err := imageio.Load(path, 1100)
+	if err != nil {
+		return 0, false
+	}
+	colors = metric.ContentClass(prep.Pixels, prep.W, prep.H).Colors
+	cutout = prep.HasTransparency && !prep.PaddedOpaque
+	s.descPath, s.descMod, s.descColors, s.descCutout = path, st.ModTime(), colors, cutout
+	return colors, cutout
+}
+
 func (s *Server) presetStore() (*userpreset.Store, error) {
 	s.presetOnce.Do(func() {
 		root, err := userpreset.DefaultRoot()
@@ -177,6 +207,26 @@ func (s *Server) presetMethod(req Request) bool {
 	}
 
 	switch req.Method {
+	case "presets.knobDefaults":
+		// The concrete values behind "default", for the expert panel. Needs no store — but it does
+		// need the image when one is open: flat's polish depth and kind mix depend on the palette
+		// size, and a cutout drops the alpha floor, so defaults shown without looking at the image
+		// would disagree with what the engine actually runs.
+		var p struct {
+			Mode    string `json:"mode"`
+			Path    string `json:"path"`
+			Quality string `json:"quality"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		colors, cutout := s.contentDescriptor(p.Path)
+		ch := preset.ModeKnobDefaults(p.Mode, colors, cutout)
+		// The search counts are the quality tier's; when the panel holds a quality override the
+		// numbers it shows as "default" must come from THAT tier, not the studio's baked one.
+		if p.Quality != "" && p.Quality != ch.Quality {
+			ch.Quality = p.Quality
+			ch.Random, ch.Mutated, ch.SampleBudget, ch.MaxNoImprove = preset.PresetCounts(p.Quality)
+		}
+		s.reply(req.ID, map[string]any{"choices": ch})
 	case "presets.list":
 		handle(func(st *userpreset.Store) (any, error) {
 			ps, err := st.List()

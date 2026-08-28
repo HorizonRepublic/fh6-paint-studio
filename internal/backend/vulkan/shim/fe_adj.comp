@@ -1,12 +1,19 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // fe_adj.comp — gather form of the CPU adjoint scatter (engine feState.adjoint): each pixel
 // collects the Sobel-stencil weights of its 8 neighbours' directions. dir is 0 on the border
 // ring and on inactive pixels, so only canvas-edge bounds checks are needed.
 
 layout(local_size_x = 256) in;
-layout(std430, binding = 3) readonly buffer Db { double dir[]; };
-layout(std430, binding = 4)          buffer Ab { double adj[]; };
+layout(std430, binding = 3) readonly buffer Db { REAL dir[]; };
+layout(std430, binding = 4)          buffer Ab { REAL adj[]; };
 layout(push_constant) uniform PC { int w, h; float feLambda; } pc;
 
 void main() {
@@ -15,14 +22,14 @@ void main() {
     if (i >= N) return;
     int x = i % pc.w, y = i / pc.w;
     int w = pc.w;
-    double a = 0.0LF;
+    REAL a = REAL(0.0);
     if (x + 1 < pc.w && y + 1 < pc.h) { a += -dir[(i + w + 1) * 2] - dir[(i + w + 1) * 2 + 1]; }
-    if (y + 1 < pc.h)                 { a += -2.0LF * dir[(i + w) * 2 + 1]; }
+    if (y + 1 < pc.h)                 { a += -REAL(2.0) * dir[(i + w) * 2 + 1]; }
     if (x > 0 && y + 1 < pc.h)        { a += dir[(i + w - 1) * 2] - dir[(i + w - 1) * 2 + 1]; }
-    if (x + 1 < pc.w)                 { a += -2.0LF * dir[(i + 1) * 2]; }
-    if (x > 0)                        { a += 2.0LF * dir[(i - 1) * 2]; }
+    if (x + 1 < pc.w)                 { a += -REAL(2.0) * dir[(i + 1) * 2]; }
+    if (x > 0)                        { a += REAL(2.0) * dir[(i - 1) * 2]; }
     if (x + 1 < pc.w && y > 0)        { a += -dir[(i - w + 1) * 2] + dir[(i - w + 1) * 2 + 1]; }
-    if (y > 0)                        { a += 2.0LF * dir[(i - w) * 2 + 1]; }
+    if (y > 0)                        { a += REAL(2.0) * dir[(i - w) * 2 + 1]; }
     if (x > 0 && y > 0)               { a += dir[(i - w - 1) * 2] + dir[(i - w - 1) * 2 + 1]; }
     adj[i] = a;
 }

@@ -2,7 +2,9 @@ package engine
 
 import (
 	"math"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 
 	"fh6-paint-studio/internal/backend"
@@ -45,7 +47,19 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 	for i := range owner {
 		owner[i] = -1
 	}
-	for j := len(shapes) - 1; j >= 0; j-- {
+	// The engine's background rect (TypeRectangle, the only user of that type) is not a shape
+	// this pass may touch. Every render rebuilds from initCanvas and applies shapes[1:], so a
+	// repainted shapes[0] never reaches the score — but imageio.RenderFH6 and inject.Inject BOTH
+	// read it, so recolouring it made the preview and the in-game decal sit on a background the
+	// engine never optimised against. Its ownership was fictitious anyway: KindFromType(1) has no
+	// case and falls through to KindEllipse, so Data=[0,0,w,h] was rasterised as an ellipse
+	// CENTRED at the top-left corner with radii w,h — it claimed a quarter-ellipse (~78.5% of the
+	// canvas) and the bottom-right corner was owned by nothing.
+	last := 0
+	if len(shapes) > 0 && shapes[0].Type == model.TypeRectangle {
+		last = 1
+	}
+	for j := len(shapes) - 1; j >= last; j-- {
 		kind := model.KindFromType(shapes[j].Type)
 		p := model.ParamsFromShape(shapes[j])
 		if !opaqueShape(shapes[j]) {
@@ -134,7 +148,7 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 		}
 		wg.Wait()
 	}
-	for j := range shapes {
+	for j := last; j < len(shapes); j++ {
 		if sumW[j] <= 0 || !opaqueShape(shapes[j]) {
 			continue
 		}
@@ -166,6 +180,31 @@ func recolorVisible(shapes []model.Shape, target, weight []float32, w, h int, va
 func opaqueShape(s model.Shape) bool {
 	return len(s.Color) >= 4 && s.Color[3] >= 255 && !raster.IsGradient(model.KindFromType(s.Type))
 }
+
+// rankFixOn gates the 2026-08-16 ranking-correctness pair as ONE pin (FH6_RANKFIX=0 = the old
+// behaviour): (1) pruneOccluded treating an alpha-255 glow/disk as a solid occluder, (2) the
+// contribution rankings mixing raw sRGB colour bytes with the linear-light target.
+var rankFixOn = os.Getenv("FH6_RANKFIX") != "0"
+
+// blendContribFix: shapeContributionsBlend prices a gradient by its per-pixel falloff rather than
+// as a uniform fill over its whole footprint, and composites the layer beneath with ITS alpha
+// instead of treating it as opaque. FH6_BFCONTRIB=0 restores the old ranking.
+var blendContribFix = os.Getenv("FH6_BFCONTRIB") != "0"
+
+// paddedAlphaFix would make the generator treat a keep-inside padded run as ORGANIC, matching the
+// alpha floor applyPolish already gives it (engine.go:332) — closing what looks like a plain
+// inconsistency: today the same run is a cutout for generation and organic for polish.
+//
+// MEASURED 2026-08-17 and REJECTED. Paired A/B on the padded path (-pad-transparent 0.1, which is
+// what the client's keep-inside does), n=27: mean +2.321% WORSE on anime and +1.855% on photo,
+// 12 of 27 better, sign test p=0.70. So the "inconsistency" is the better configuration, not a
+// bug to close: opaque candidates against a padded frame beat translucent ones, and it is the
+// polish's floor exception that is the odd one out. Left OFF; FH6_PADALPHA=1 re-opens it.
+var paddedAlphaFix = os.Getenv("FH6_PADALPHA") == "1"
+
+// polishRecolorGate: applyPolish skips recolorVisible when the preset allows translucent shapes,
+// matching the two other call sites. FH6_PRECOLOR=0 restores the unconditional recolor.
+var polishRecolorGate = os.Getenv("FH6_PRECOLOR") != "0"
 
 // pickBest evaluates a candidate batch and returns the lowest-score candidate
 // (with the backend's optimal color merged in) and its RAW score. When penalty is
@@ -256,7 +295,16 @@ func planHillClimb(budget int) (rounds, perRound int) {
 	// and halving the round count halves the host round-trips per shape — the mutate phase is
 	// bound by host round-trip latency, not GPU compute. div=256 (≈19 rounds) is too coarse,
 	// so 128 is the sweet spot.
-	rounds = budget / 128
+	// NB that trade was measured when every round paid a host round trip. With the on-device
+	// hill climb (fp_search_mutate) the rounds are free of that cost, so the depth/breadth
+	// knee may sit elsewhere — FH6_HC_DIV overrides the divisor for paired A/Bs only.
+	div := 128
+	if v := os.Getenv("FH6_HC_DIV"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 8 {
+			div = n
+		}
+	}
+	rounds = budget / div
 	if rounds < 1 {
 		rounds = 1
 	}
@@ -297,7 +345,11 @@ func pruneOccluded(shapes []model.Shape, w, h int) []model.Shape {
 			}
 		}
 		keep[j] = visible
-		opaque := len(s.Color) >= 4 && s.Color[3] >= 255
+		// opaqueShape, NOT a bare byte-alpha test: a glow/disk at alpha 255 still shows what is
+		// UNDER its transparent skirt (the falloff hits 0 at the rim), and moment-seeded glows
+		// carry alpha 1 by construction — the inline test marked everything beneath their whole
+		// ellipse bbox as hidden and DELETED visible shapes. FH6_RANKFIX=0 pins the old behaviour.
+		opaque := rankFixOn && opaqueShape(s) || !rankFixOn && len(s.Color) >= 4 && s.Color[3] >= 255
 		if visible && opaque {
 			for y := yMin; y <= yMax; y++ {
 				for x := xMin; x <= xMax; x++ {

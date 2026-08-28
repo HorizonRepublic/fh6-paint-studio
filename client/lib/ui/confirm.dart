@@ -54,11 +54,19 @@ class ConfirmDialog extends StatelessWidget {
       children: [
         // The scrim dismisses, which is the safe answer to every question this
         // dialog asks.
+        //
+        // It fades WITH the dialog. Snapping two thirds of the window to black
+        // in one frame while the card eases in over 150ms is the most abrupt
+        // thing the app does, and it does it just as the user is being asked
+        // about something irreversible — the moment attention is highest.
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: onDismiss,
-            child: const ColoredBox(color: Color(0xAA050607)),
+            child: const PopIn(
+              from: Offset.zero,
+              child: ColoredBox(color: Color(0xAA050607)),
+            ),
           ),
         ),
         Center(
@@ -66,6 +74,8 @@ class ConfirmDialog extends StatelessWidget {
             from: const Offset(0, 10),
             child: Glass(
               radius: 16,
+              // The scrim under it is already 67% opaque.
+              live: false,
               child: SizedBox(
                 width: 400,
                 child: Padding(

@@ -85,3 +85,28 @@ func TestUnpadCanvas(t *testing.T) {
 		t.Fatalf("dst(0,0) = %v, want the padded src(2,2) red", r)
 	}
 }
+
+func TestUnpadGeometryRestatesTheBackground(t *testing.T) {
+	shapes := []model.Shape{
+		{Type: model.TypeRectangle, Data: []float64{0, 0, 120, 120}, Color: []int{1, 2, 3, 255}},
+		{Type: model.TypeRotatedEllipse, Data: []float64{50, 60, 5, 6, 0, 0}},
+	}
+	got := UnpadGeometry(shapes, 10, 100, 100)
+	if d := got[0].Data; d[0] != 0 || d[1] != 0 || d[2] != 100 || d[3] != 100 {
+		t.Errorf("background %v want [0 0 100 100]", d)
+	}
+	if d := got[1].Data; d[0] != 40 || d[1] != 50 {
+		t.Errorf("ellipse centre (%v,%v) want (40,50)", d[0], d[1])
+	}
+
+	// No background rect (the gaussian mode does not prepend one): shift, never restate — writing
+	// a canvas size into a glow's parameters would resize the glow.
+	glows := []model.Shape{{Type: model.TypeGradGlow, Data: []float64{50, 60, 5, 6, 0, 0}}}
+	if d := UnpadGeometry(glows, 10, 100, 100)[0].Data; d[0] != 40 || d[2] != 5 {
+		t.Errorf("glow %v want [40 50 5 6 ...] — untouched apart from the shift", d)
+	}
+
+	if d := UnpadGeometry(shapes, 0, 100, 100)[0].Data; d[2] != 100 {
+		t.Error("pad 0 should be a no-op on an already-unpadded stack")
+	}
+}

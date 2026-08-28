@@ -28,6 +28,9 @@ class AboutSheet extends StatelessWidget {
   Widget build(BuildContext context) => Center(
     child: Glass(
       radius: 16,
+      // Sits on a 75%-opaque scrim: the blur behind it is not visible, and a
+      // BackdropFilter can never be raster-cached.
+      live: false,
       child: SizedBox(
         width: 420,
         child: Column(

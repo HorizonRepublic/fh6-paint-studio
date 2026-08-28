@@ -175,6 +175,11 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		prep.Pixels = binar // local copy only — md/sp/weight below now fit the clean mono mask
 		prep.HasTransparency = true
 		monoLock, transparent, resolved, flatMode = &lc, true, "flat", true
+		// cs was measured on the ORIGINAL pixels, and cs.Colors is what picks the flat sub-preset
+		// (vector vs textured). After binarization the target is two colours — a clean vector mask —
+		// so leaving the old palette count in place tuned the mono run for artwork that no longer
+		// exists. Re-measure what the engine will actually fit.
+		cs = metric.ContentClass(prep.Pixels, w, h)
 	}
 
 	// All benchmark-hardwired per-mode constants come from ModeDefaultsFor (the single source of truth
@@ -225,6 +230,7 @@ func Resolve(prep imageio.Prepared, c Choices) Resolved {
 		Kinds:         ParseKinds(sp.kindsCSV),
 		KindWeights:   sp.kindWeights,
 		TransparentBG: prep.HasTransparency,
+		PaddedOpaque:  prep.PaddedOpaque,
 		Overdraw:      float32(overdraw),
 		AllowAlpha:    sp.allowAlpha,
 		AlphaMin:      sp.alphaMin,
@@ -567,19 +573,36 @@ func PerceptualWeightExp() (expo, eps float64) {
 
 // DarkFrac measures the fraction of pixels whose LINEAR luma sits below 0.02 — the dark-dominance
 // feature DarkWeightParams keys on. pixels is the linear RGBA plane (len w*h*4).
+//
+// FULLY TRANSPARENT pixels are not counted, in either the numerator or the denominator. A pixel with
+// no alpha has no luma to be dark, and counting it as black broke the feature on the path the product
+// actually uses: the keep-inside surround is transparent black and it is 31% of a padded square
+// canvas, 38% of a padded 16:9 one. The threshold was calibrated at 0.35 on UNPADDED images ("dark
+// arts sit at 0.43-0.63, everything else <= 0.24"), and the CLI — which is what every A/B runs
+// through — does not pad. So the margin alone pushed every client run over the line and every one of
+// them got the strong shadow pair, including the light art the measurement says pays ΔE 2.09 -> 2.51
+// for it. The same arithmetic hit a genuine cutout source, where the transparency is the user's own.
+// An image with no transparent pixels is bit-identical either way, so the calibration is untouched.
 func DarkFrac(pixels []float32) float64 {
 	n := len(pixels) / 4
 	if n == 0 {
 		return 0
 	}
-	dark := 0
+	dark, opaque := 0, 0
 	for i := 0; i < n; i++ {
+		if pixels[i*4+3] <= 0 {
+			continue
+		}
+		opaque++
 		y := 0.2126*pixels[i*4] + 0.7152*pixels[i*4+1] + 0.0722*pixels[i*4+2]
 		if y < 0.02 {
 			dark++
 		}
 	}
-	return float64(dark) / float64(n)
+	if opaque == 0 {
+		return 0
+	}
+	return float64(dark) / float64(opaque)
 }
 
 // BuildWeightMap produces the per-pixel saliency weight.
@@ -809,7 +832,7 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// Monotone geometry refine — see the anime case for the mechanism and the numbers. Photo is
 		// 12 of 12 pairs better, mean -3.708%, and it only becomes a win once the pass runs BEFORE the
 		// colour solve: in the later position photo lost 7 of 12.
-		d.GeomRefine = true
+		d.GeomRefine = geomRefine(true)
 		// Region-gated kinds for photo too (2026-07-20): the smooth-glow swap rides the kind gate,
 		// and photo's soft backgrounds (bokeh/sky) are exactly where the translucent-facet
 		// patchwork lives. Measured on img_10 photo @native: ΔE 3.25→3.16, p95 −3%, SSIM +0.008
@@ -829,6 +852,18 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// Wall pays about +27%. FH6_LOO_ROUNDS overrides for A/Bs.
 		// LOO refit (see the anime case below for the measured rationale) — photo shares it.
 		d.LooRefit = looRounds(4)
+		// Merge consolidation inside those rounds (mergerefit.go): near-duplicate pairs — same kind,
+		// near-same colour, high overlap — collapse into one moment-fitted shape, and the round's own
+		// regrow + re-polish + end-to-end gate re-spends the freed slot. Anime has had this since
+		// 2026-07-20 (see the anime arm); photo never did, and photo is where the translucent-stack
+		// convergence it consolidates is thickest.
+		//
+		// Measured 2026-08-17, paired A/B at 1000 shapes / 2000px, 4 photo images x 3 seeds:
+		// mean -1.260% SSE, 10 of 12 better. The wins run to -2.98% (img_10 s3, img_32 s2 -2.49%,
+		// img_12 s3 -2.32%); the two losses are +0.11% and +0.80%. Wall +2.8%.
+		// The same run's 15 anime pairs came back bit-identical, which is NOT evidence about anime —
+		// both arms already had the flag on there. FH6_MERGEREFIT=0 pins it off.
+		d.MergeRefit = os.Getenv("FH6_MERGEREFIT") != "0"
 		// Global joint colour re-solve (2026-08-05): after the LOO refit, every layer's RGB is
 		// re-solved AT ONCE for the frozen geometry, instead of each shape keeping the colour the
 		// greedy fitted against a canvas that later shapes have since overwritten. Compositing is
@@ -956,7 +991,7 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// 27 and lost outright on photo, because a shape moved after the colours are solved keeps a
 		// colour fitted to where it used to be. FH6_REFINE_LATE=1 restores the old order,
 		// FH6_GEOMREFINE=0/1 pins the pass off or on.
-		d.GeomRefine = true
+		d.GeomRefine = geomRefine(true)
 		// LOO refit (2026-07-20, the owner's "shapes are wasted" complaint measured and fixed):
 		// after the polish, 17-25% of shapes are individually harmful-or-neutral in the FINAL
 		// stack (greedy scores at placement; later shapes overpaint). Two exact-LOO prune→regrow→
@@ -1013,7 +1048,10 @@ func ModeDefaultsFor(resolvedMode string, palette int, transparent bool) ModeDef
 		// convergence greedy leaves in smooth cel) into one moment-fitted shape; the freed slots
 		// regrow on the residual under the round's e2e gate. Measured: img_10 SSE −1.7/−3.0% with
 		// false-edge −5% and SSIM +0.005 on BOTH seeds; img_5/img_24 parity (few mergeable pairs).
-		d.MergeRefit = true
+		// Behind the SAME pin photo uses: the pin was added with photo's default and left anime
+		// hard-coded, so FH6_MERGEREFIT=0 turned the pass off on half the presets and an A/B from
+		// the studio — which has no flags — silently compared anime-with against anime-with.
+		d.MergeRefit = os.Getenv("FH6_MERGEREFIT") != "0"
 		// Saliency quota (built 2026-06-11, defaulted 2026-07-20 on the owner's "eyes break the
 		// image" complaint): the final 15% of the budget places shapes ONLY inside the top-detail
 		// cells, so eyes/faces can't be outbid by big soft regions. Measured: img_10 iris/pupil
@@ -1129,6 +1167,12 @@ func ModeKnobDefaults(mode string, colors int, cutout bool) Choices {
 	c.AlphaMin = float64(md.AlphaMin)
 	c.PolishIters = md.PolishIters
 	c.PolishTau1 = md.PolishTau1
+	// RampWeight was left at DefaultChoices' -1 sentinel while the mode actually runs md.RampWeight
+	// (1.5 on anime). The panel clamps for DISPLAY only, so the slider read 0.00 with no override
+	// dot — asserting that OFF was the default — and the first nudge upward committed a value BELOW
+	// the real one, cutting the boost the user was trying to raise. Every knob this function reports
+	// has to be the concrete number the run will use; that is the whole point of it.
+	c.RampWeight = md.RampWeight
 	c.Random, c.Mutated, c.SampleBudget, c.MaxNoImprove = random, mutated, sampleBudget, maxNI
 	return c
 }
@@ -1307,8 +1351,14 @@ func ParseKinds(csv string) []model.ShapeKind {
 		"triangle":  model.KindTriangle,
 	}
 	var out []model.ShapeKind
+	seen := map[model.ShapeKind]bool{}
 	for _, part := range strings.Split(csv, ",") {
-		if k, ok := m[strings.TrimSpace(strings.ToLower(part))]; ok {
+		// Deduplicated: a repeated kind only doubles its share of the CDF, which -kind-weights
+		// already expresses, and the list is copied into a fixed 8-float device buffer — nine
+		// entries ("ellipse,rectangle,triangle" typed three times) wrote 36 bytes into 32 and
+		// corrupted the neighbouring suballocation on every placed shape.
+		if k, ok := m[strings.TrimSpace(strings.ToLower(part))]; ok && !seen[k] {
+			seen[k] = true
 			out = append(out, k)
 		}
 	}
@@ -1356,6 +1406,20 @@ func globalColorIters(def int) int {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
+	}
+	return def
+}
+
+// geomRefine resolves the monotone geometry refine's default. FH6_GEOMREFINE=0/1 pins it either
+// way. The pin was implemented in cmd/fh6paint alone, so it worked for every A/B run through the
+// CLI and did nothing at all in the studio — where the owner has no flags and the pin is the ONLY
+// way to turn the pass off. The preset is the one place both consumers read.
+func geomRefine(def bool) bool {
+	switch os.Getenv("FH6_GEOMREFINE") {
+	case "0":
+		return false
+	case "1":
+		return true
 	}
 	return def
 }

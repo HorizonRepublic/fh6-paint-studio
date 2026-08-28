@@ -91,10 +91,15 @@ type smoothRegion struct {
 func (r *run) smoothBase() int {
 	w, h := r.w, r.h
 	target := r.be.Target()
+	// A non-nil gate does not imply a hardness map: run.go builds a gate with hard == nil purely
+	// to carry the size-conditioned glow swap when region-kinds is off, and pick/bigGlowSwap both
+	// fall through on that. This pass indexes hard per pixel, so it has to ask for the map itself.
+	// Repro before the second condition: -mode anime -region-kinds=false -big-glow-tau 0.04.
 	hard := []float32(nil)
 	if r.kindGate != nil {
 		hard = r.kindGate.hard
-	} else {
+	}
+	if hard == nil {
 		hard = metric.HardEdgeMap(target, w, h)
 	}
 
@@ -214,8 +219,8 @@ func (r *run) smoothBase() int {
 		if len(rg.cells) < smoothMinCells {
 			continue // children of a split can be small — keep scanning the queue
 		}
-		sel := buildCellSel(rg.cells, cw, w, h)
-		stack, delta, soft := r.smoothClaimStack(canvasBuf, weight, &rg, sel)
+		sel, selBB := buildCellSel(rg.cells, cw, w, h)
+		stack, delta, soft := r.smoothClaimStack(canvasBuf, weight, &rg, sel, selBB)
 		if stack == nil {
 			why := "no earning stack"
 			if depth < smoothMaxSplit && len(rg.cells) >= 2*smoothMinCells {
@@ -354,26 +359,42 @@ func (rg *smoothRegion) split(cw int) (smoothRegion, smoothRegion) {
 	return a, b
 }
 
-// buildCellSel rasterizes cell membership into a per-pixel selection mask for the region-local solve.
-func buildCellSel(cells []int, cw, w, h int) []bool {
+// buildCellSel rasterizes cell membership into a per-pixel selection mask for the region-local
+// solve, plus the region's pixel bbox so the scans below touch only its rows instead of the
+// whole canvas (a region used to cost one full-frame sweep per queue entry).
+func buildCellSel(cells []int, cw, w, h int) ([]bool, [4]int) {
 	sel := make([]bool, w*h)
+	bb := [4]int{w, h, -1, -1}
 	for _, ci := range cells {
 		x0, y0 := (ci%cw)*smoothCell, (ci/cw)*smoothCell
-		for y := y0; y < y0+smoothCell && y < h; y++ {
+		x1, y1 := minInt(x0+smoothCell, w)-1, minInt(y0+smoothCell, h)-1
+		if x0 < bb[0] {
+			bb[0] = x0
+		}
+		if y0 < bb[1] {
+			bb[1] = y0
+		}
+		if x1 > bb[2] {
+			bb[2] = x1
+		}
+		if y1 > bb[3] {
+			bb[3] = y1
+		}
+		for y := y0; y <= y1; y++ {
 			row := y * w
-			for x := x0; x < x0+smoothCell && x < w; x++ {
+			for x := x0; x <= x1; x++ {
 				sel[row+x] = true
 			}
 		}
 	}
-	return sel
+	return sel, bb
 }
 
 // smoothClaimStack greedily grows the best jointly-solved stack for a region: every round re-solves
 // ALL colours with each menu candidate appended and keeps the argmin, accepting only rounds that
 // deepen the stack's ΔSSE by ≥ smoothLayerFrac. Returns the final candidates (colours solved),
 // the stack's exact ΔSSE, and the share of it carried by the gradient layers.
-func (r *run) smoothClaimStack(canvas, weight []float32, rg *smoothRegion, sel []bool) ([]model.Candidate, float64, float64) {
+func (r *run) smoothClaimStack(canvas, weight []float32, rg *smoothRegion, sel []bool, selBB [4]int) ([]model.Candidate, float64, float64) {
 	target := r.be.Target()
 	w, h := r.w, r.h
 	menu := r.smoothMenu(rg)
@@ -381,7 +402,7 @@ func (r *run) smoothClaimStack(canvas, weight []float32, rg *smoothRegion, sel [
 		return nil, 0, 0
 	}
 
-	before := regionSSE(canvas, target, weight, sel)
+	before := regionSSE(canvas, target, weight, sel, w, selBB)
 	if before <= 0 {
 		return nil, 0, 0
 	}
@@ -485,20 +506,30 @@ func (r *run) smoothClaimStack(canvas, weight []float32, rg *smoothRegion, sel [
 }
 
 // regionSSE returns the weighted SSE between canvas and target over the selected pixels.
-func regionSSE(canvas, target, weight []float32, sel []bool) float64 {
+// regionSSE scans only the region's bbox rows; pixels are visited in the SAME ascending index
+// order as the old full-canvas sweep (everything outside the bbox is sel=false anyway), so the
+// float sum is bit-identical — just without touching megabytes of guaranteed-false mask.
+func regionSSE(canvas, target, weight []float32, sel []bool, w int, bb [4]int) float64 {
 	var s float64
-	for i, in := range sel {
-		if !in {
-			continue
-		}
-		wgt := float64(weight[i])
-		if wgt <= 0 {
-			continue
-		}
-		p := i * 4
-		for c := 0; c < 4; c++ {
-			d := float64(canvas[p+c] - target[p+c])
-			s += wgt * d * d
+	if bb[2] < bb[0] || bb[3] < bb[1] {
+		return 0
+	}
+	for y := bb[1]; y <= bb[3]; y++ {
+		row := y * w
+		for x := bb[0]; x <= bb[2]; x++ {
+			i := row + x
+			if !sel[i] {
+				continue
+			}
+			wgt := float64(weight[i])
+			if wgt <= 0 {
+				continue
+			}
+			p := i * 4
+			for c := 0; c < 4; c++ {
+				d := float64(canvas[p+c] - target[p+c])
+				s += wgt * d * d
+			}
 		}
 	}
 	return s

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -84,6 +85,7 @@ type run struct {
 	devProp    deviceProposer
 	propEvery  int
 	devMoment  momentSearcher
+	devMutate  mutateSearcher
 
 	// Generation strategy: random / moment / hybrid (selected once from the options).
 	src shapeSource
@@ -100,6 +102,7 @@ type run struct {
 	persist    *persistCtx
 	salient    []bool // lazy saliency-quota cell mask (see saliency.go)
 	glyphs     bool   // glyph-dictionary proposer active (Options.GlyphDict + a mask-capable backend)
+	batch      *batchEnv
 	initialErr float64
 	finalErr   float64
 
@@ -117,6 +120,12 @@ func Run(be backend.Backend, opt Options) Result {
 	runStart := time.Now()
 	r := newRun(be, opt)
 	defer r.eta.stop()
+	// Disarm the survivor export before anything else touches the backend: the post-passes run
+	// their own searches and would keep paying for a pool nobody reads.
+	defer r.batch.close()
+	// The hard-edge memo holds a full w*h plane plus a pointer into this run's target. Both are
+	// dead the moment the run is, and engined/the studio outlive many runs.
+	defer metric.ReleaseMaps()
 	if opt.LiveBatch > 0 {
 		r.live() // EXPERIMENTAL co-adaptation scheduler for the structural base...
 		if len(r.shapes)-1 < r.genTarget {
@@ -132,10 +141,14 @@ func Run(be backend.Backend, opt Options) Result {
 		if r.opt.ShadePrepass && r.glyphs {
 			r.phase("Claiming shading…")
 			r.timePass(&r.tm.ShadePre, func() { r.shadePrepass() })
+		} else if r.opt.ShadePrepass {
+			applog.Printf("shade prepass: SKIPPED — backend has no mask-word support (a shipped default silently not reaching the run)")
 		}
 		if r.opt.GlyphPrepass && r.glyphs {
 			r.phase("Claiming words…")
 			r.timePass(&r.tm.GlyphPre, func() { r.glyphPrepass() })
+		} else if r.opt.GlyphPrepass {
+			applog.Printf("glyph prepass: SKIPPED — backend has no mask-word support")
 		}
 		r.phase("Placing shapes…")
 		r.greedy()
@@ -143,10 +156,45 @@ func Run(be backend.Backend, opt Options) Result {
 	if r.opt.CompSeeds > 0 {
 		applog.Printf("comp-seeds: %d proposed, %d won the step", r.compSeedTried, r.compSeedWon)
 	}
+	if r.deviceLost() {
+		// The greedy aborted on a dead device; the post-pipeline would grind for minutes against
+		// error-returning GPU calls before DevErr surfaced. Report now.
+		r.tm.Total = time.Since(runStart)
+		return Result{Shapes: r.shapes, InitialError: r.initialErr, FinalError: r.finalErr,
+			Timings: r.tm, DevErr: errDeviceLost}
+	}
 	r.postProcess()
 	r.refine()
 	r.tm.Total = time.Since(runStart)
-	return Result{Shapes: r.shapes, InitialError: r.initialErr, FinalError: r.finalErr, Timings: r.tm}
+	res := Result{Shapes: r.shapes, InitialError: r.initialErr, FinalError: r.finalErr, Timings: r.tm}
+	if r.deviceLost() {
+		res.DevErr = errDeviceLost
+	}
+	return res
+}
+
+// errDeviceLost is what a run reports after the GPU context died under it (Windows TDR, a driver
+// reset, or VRAM exhaustion killing the device). The message is user-facing via the runner's
+// Failed event, so it says what to actually do about it.
+var errDeviceLost = errors.New("the GPU device was lost during generation (driver reset / TDR watchdog). " +
+	"This usually means the card ran out of memory or was too busy — close other GPU-heavy apps " +
+	"(the game, browsers), lower the generation resolution, and try again")
+
+// deviceLost reports the backend's sticky device-loss flag; false on backends without it.
+func (r *run) deviceLost() bool {
+	dl, ok := r.be.(interface{ DeviceLost() bool })
+	return ok && dl.DeviceLost()
+}
+
+// masksReady reports whether the mask-word passes can actually run: they need both an option that
+// wants words and a backend that can score them. Kept as a function of (be, opt) alone so the ETA
+// plan and the run itself cannot disagree about which phases exist.
+func masksReady(be backend.Backend, opt Options) bool {
+	if !opt.GlyphDict && !opt.GlyphPrepass && !opt.ShadePrepass && !opt.SmoothBase {
+		return false
+	}
+	dme, ok := be.(deviceMaskEvaluator)
+	return ok && dme.MasksOnDevice()
 }
 
 // newRun builds the run state: it normalises the options, initialises the backend canvas and the
@@ -155,7 +203,12 @@ func Run(be backend.Backend, opt Options) Result {
 // on-device search handles. It consumes no randomness — the RNG is first used in the greedy loop.
 func newRun(be backend.Backend, opt Options) *run {
 	var tm Timings
-	eta := newETA(opt, time.Now(), opt.OnPhase)
+	// Resolve mask support BEFORE planning the phases. The shade and word pre-passes each announce
+	// themselves only when the backend can score mask words, but the plan used to list them on the
+	// option alone — so on a backend without the atlas the run entered one phase fewer than planned
+	// and the bar could never reach 100%. That is the "crawls, then jumps" report.
+	glyphs := masksReady(be, opt)
+	eta := newETA(opt, glyphs, time.Now(), opt.OnPhase)
 	// The polish counts its own iterations, and so does every re-polish a later pass runs, so routing
 	// it here gives the estimate a live signal through the longest phases without each pass wiring one.
 	if eta != nil {
@@ -169,6 +222,9 @@ func newRun(be backend.Backend, opt Options) *run {
 			}
 		}
 	}
+	// Stop must reach the polish loops too — they are most of a run's wall time (see
+	// PolishOptions.Cancel). Every re-polish (LOO, backfit) inherits it through r.opt.
+	opt.PolishOpts.Cancel = opt.Cancel
 	rng := rand.New(rand.NewSource(seed(opt.Seed)))
 	w, h := opt.Width, opt.Height
 	if opt.RandomSamples < 1 {
@@ -220,7 +276,13 @@ func newRun(be backend.Backend, opt Options) *run {
 
 	// Semi-transparent shapes: alpha ~U(alphaMin,1). Forced opaque for cutouts
 	// (the reconstructed object must stay alpha=1 so the cutout silhouette is solid).
-	allowAlpha := opt.AllowAlpha && !opt.TransparentBG
+	// PaddedOpaque is NOT a real cutout — it is the keep-inside margin the client adds to every
+	// run, and the source under it was opaque. Without the exception the generator treated every
+	// default client run as a cutout (opaque candidates, opaque prune, colour re-solve) while
+	// applyPolish's alpha floor (engine.go:332) already excepted it and handed the descent a 0.30
+	// floor: the same run was opaque for generation and organic for polish. FH6_PADALPHA=0 pins
+	// the old, inconsistent behaviour.
+	allowAlpha := opt.AllowAlpha && (!opt.TransparentBG || (opt.PaddedOpaque && paddedAlphaFix))
 	alphaMin := resolveAlphaMin(opt.AlphaMin)
 
 	// Early-stop budget: how many consecutive non-improving shapes before we give
@@ -243,7 +305,8 @@ func newRun(be backend.Backend, opt Options) *run {
 	// re-score the survivors at the full budget. Set unconditionally (enable OR disable) so a
 	// reused backend never carries stale coarse state from a prior run.
 	if cs, ok := be.(coarseSearcher); ok {
-		cs.SetCoarse(opt.CoarseSearch, opt.CoarseBudget, opt.CoarseK)
+		// FH6_COARSE=0 pins the filter off for A/Bs from the studio, which has no flags.
+		cs.SetCoarse(opt.CoarseSearch && os.Getenv("FH6_COARSE") != "0", opt.CoarseBudget, opt.CoarseK)
 		cs.SetCoarseFP16(opt.CoarseFP16)
 	}
 
@@ -408,6 +471,15 @@ func newRun(be backend.Backend, opt Options) *run {
 			devMoment = m
 		}
 	}
+	// On-device hill climb: the whole mutate phase (rounds x perRound) in one submit instead of one
+	// upload + readback per round. Same neighbourhood as MutateShape, device RNG stream — validated
+	// by paired end-to-end quality, not golden-diff. FH6_DEV_MUTATE=0 pins it off for A/Bs.
+	var devMutate mutateSearcher
+	if opt.OnDeviceSearch && os.Getenv("FH6_DEV_MUTATE") != "0" {
+		if m, ok := be.(mutateSearcher); ok {
+			devMutate = m
+		}
+	}
 	// Region gate × device generators: upload the map (fp_set_kind_gate) when supported, else
 	// disable the gate (see the comment above). ALWAYS clear a stale map when the gate is off —
 	// a pooled backend must not carry the previous run's gate.
@@ -510,22 +582,31 @@ func newRun(be backend.Backend, opt Options) *run {
 	tm.Maps = mapsDur
 	tm.Setup = time.Since(setupStart) - mapsDur
 
-	glyphs := false
-	if opt.GlyphDict || opt.GlyphPrepass || opt.ShadePrepass || opt.SmoothBase {
-		if dme, ok := be.(deviceMaskEvaluator); ok && dme.MasksOnDevice() {
-			glyphs = true
+	// Batch placement is opt-in (FH6_BATCHK): it changes which shapes get placed, so it stays off
+	// until the owner has judged full frames. The pool it reads is the coarse filter's survivor
+	// set, so it needs that filter on.
+	var batch *batchEnv
+	if bk, bgain := batchKFromEnv(); bk > 1 && opt.CoarseSearch && os.Getenv("FH6_COARSE") != "0" {
+		pool := opt.CoarseK
+		if pool < 1 {
+			pool = 2048 // fp_set_coarse's own default when the option is unset
+		}
+		batch = newBatchEnv(be, bk, pool, bgain)
+		if batch != nil {
+			applog.Printf("batch placement: up to %d shapes per round (gain fraction %.2f)", bk, bgain)
 		}
 	}
 
 	return &run{
 		be: be, opt: opt, rng: rng, w: w, h: h, tm: tm, eta: eta,
+		batch: batch,
 		kinds: kinds, kindWeights: kindWeights, kindCDF: kindCDF,
 		allowAlpha: allowAlpha, alphaMin: alphaMin, maxNI: maxNI, genTarget: genTarget,
 		moveStep: moveStep, radiusStep: radiusStep, rounds: rounds, perRound: perRound,
 		detailStart: detailStart,
 		orient:      orient, coh: coh, aspectCap: aspectCap, detailGrid: detailGrid, boundCtx: boundCtx, kindGate: kg,
 		devProp: devProp, propEvery: opt.ProposerEvery,
-		devSearch: devSearch, devMoment: devMoment, src: newShapeSource(opt),
+		devSearch: devSearch, devMoment: devMoment, devMutate: devMutate, src: newShapeSource(opt),
 		initCanvas: initCanvas, shapes: shapes, grid: grid, gw: gw, gh: gh,
 		sampler: sampler, persist: persist, glyphs: glyphs, initialErr: initialErr,
 		fobaNext: opt.FoBaEvery,
@@ -556,10 +637,24 @@ func (r *run) greedy() {
 		if r.opt.Cancel != nil && r.opt.Cancel() {
 			break
 		}
+		// A lost device (TDR/driver reset) makes every Evaluate come back as an error, which reads
+		// as "no improving candidate" — the loop would spin through maxNI expensive host-side
+		// generations against a dead GPU. Abort instead; Run() turns this into Result.DevErr.
+		if r.deviceLost() {
+			applog.Printf("greedy: GPU device lost at shape %d — aborting the run", len(r.shapes)-1)
+			break
+		}
 		if r.devProp != nil {
 			if placed := len(r.shapes) - 1; placed%propEvery == 0 {
 				prog := float32(placed) / float32(maxInt(r.genTarget, 1))
-				r.devProp.SetProposerEnabled(true, prog, float32(r.opt.ProposerFrac), float32(jitterOr(r.opt.ProposerJitter)))
+				// The SAME resolved fraction newRun installed: passing the raw option here used to
+				// overwrite the 0.5 fallback with 0 on the FIRST iteration (placed=0 hits the
+				// refresh), silently disabling the proposer for the whole run.
+				frac := float32(r.opt.ProposerFrac)
+				if frac <= 0 {
+					frac = 0.5
+				}
+				r.devProp.SetProposerEnabled(true, prog, frac, float32(jitterOr(r.opt.ProposerJitter)))
 				r.devProp.RunProposer(prog)
 			}
 		}
@@ -616,10 +711,33 @@ func (r *run) greedy() {
 			}
 		}
 		noImprove = 0
+		// Batch placement (batchplace.go): the survivor pool this search already priced at the
+		// full budget still holds winners whose boxes miss this one, and disjoint boxes have
+		// exactly additive ΔSSE. Take them now instead of paying another 50k-candidate search.
+		var extras []model.Candidate
+		var extraScores []float32
+		if r.batch != nil {
+			if room := r.genTarget - (len(r.shapes) - 1) - 1; room > 0 {
+				extras, extraScores = r.batch.extras(best, bestScore, r.w, r.h, r.opt.MinShapeGain)
+				if len(extras) > room {
+					extras, extraScores = extras[:room], extraScores[:room]
+				}
+				if r.batch.refine && len(extras) > 0 {
+					r.refineExtras(extras, extraScores)
+				}
+			}
+		}
 		t0 := time.Now()
-		_ = r.be.Apply(best)
+		if len(extras) > 0 {
+			r.batchApply(best, extras)
+		} else {
+			_ = r.be.Apply(best)
+		}
 		r.tm.Apply += time.Since(t0)
 		r.shapes = append(r.shapes, best.ToShape(float64(bestScore)))
+		for i, c := range extras {
+			r.shapes = append(r.shapes, c.ToShape(float64(extraScores[i])))
+		}
 		t0 = time.Now()
 		r.grid, r.gw, r.gh, _ = r.be.ErrorGrid()
 		r.tm.ErrorGrid += time.Since(t0)
@@ -646,6 +764,8 @@ func (r *run) greedy() {
 	if r.opt.FoBaEvery > 0 {
 		applog.Printf("foba: %d shapes dropped mid-greedy in total", r.fobaDropped)
 	}
+	// Only the greedy reads the survivor pool; the post-passes would keep paying for the copy.
+	r.batch.close()
 }
 
 // searchOne finds the best candidate for the next shape. It delegates the candidate generation and
@@ -678,16 +798,39 @@ func (r *run) searchOne(progress float32, sampGrid []float32, penalty func(model
 		}
 		r.tm.Evaluate += time.Since(t0)
 	}
-	for i := 0; i < r.rounds && bestScore < 0; i++ {
-		t0 := time.Now()
-		mut := MutateShape(r.rng, best, r.perRound, float32(w), float32(h), r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin)
-		clampCandidatesToCanvas(mut, float32(w), float32(h), r.opt.CanvasPad)
-		r.tm.Mutate += time.Since(t0)
-		t0 = time.Now()
-		mb, ms := pickBest(r.be, mut, penalty)
-		r.tm.Evaluate += time.Since(t0)
-		if ms < bestScore {
-			best, bestScore = mb, ms
+	if r.rounds > 0 && bestScore < 0 {
+		// Device path first: all rounds in one submit. Masks stay on the host loop — the device
+		// eval rejects word candidates, so a mask incumbent would come back unimproved.
+		if r.devMutate != nil && !model.IsMask(best.Kind) {
+			t0 := time.Now()
+			mb, ms, ok := r.devMutate.SearchMutate(r.rng.Int63(), best, bestScore, r.rounds, r.perRound,
+				r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin, r.opt.CompactPenalty, len(r.shapes)-1, r.opt.CanvasPad)
+			r.tm.Evaluate += time.Since(t0)
+			if ok {
+				if ms < bestScore {
+					best, bestScore = mb, ms
+				}
+				return best, bestScore
+			}
+			if r.deviceLost() {
+				// ok=false because the GPU died, not because the export is missing. Falling into
+				// the host rounds below would grind thousands of Evaluate calls against a dead
+				// device before the loop's own check aborts the run.
+				return best, bestScore
+			}
+			r.devMutate = nil // older DLL without the export — host rounds for the rest of the run
+		}
+		for i := 0; i < r.rounds && bestScore < 0; i++ {
+			t0 := time.Now()
+			mut := MutateShape(r.rng, best, r.perRound, float32(w), float32(h), r.moveStep, r.radiusStep, r.allowAlpha, r.alphaMin)
+			clampCandidatesToCanvas(mut, float32(w), float32(h), r.opt.CanvasPad)
+			r.tm.Mutate += time.Since(t0)
+			t0 = time.Now()
+			mb, ms := pickBest(r.be, mut, penalty)
+			r.tm.Evaluate += time.Since(t0)
+			if ms < bestScore {
+				best, bestScore = mb, ms
+			}
 		}
 	}
 	return best, bestScore
@@ -724,9 +867,7 @@ func (r *run) postProcess() {
 	// Re-render the canvas (from the same init) with the new colors so FinalError
 	// reflects the re-solve.
 	_ = r.be.Reset(r.initCanvas)
-	for _, s := range r.shapes[1:] {
-		_ = r.be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(r.be, r.shapes[1:])
 
 	r.grid, _, _, _ = r.be.ErrorGrid()
 	r.finalErr = sumGrid(r.grid)
@@ -740,10 +881,23 @@ func (r *run) postProcess() {
 func (r *run) refine() {
 	if r.opt.Cancel != nil && r.opt.Cancel() {
 		// Stopped early — keep the finalized partial result (prune + recolor + re-render from
-		// postProcess) and skip the heavy refinement.
+		// postProcess) and skip the heavy refinement. lockColors + clampToBudget still run below
+		// via the finaliser: a cancelled MONO run must not ship un-snapped colours, and the 3000
+		// ceiling holds regardless of how the run ended.
+		r.lockColors()
+		r.clampToBudget()
 		return
 	}
 	for _, p := range postPasses() {
+		// Between-pass Stop AND device-loss: without these, cancel was checked ONCE before the
+		// refinement, and a TDR mid-polish let LOO/standout grind a dead GPU for minutes before
+		// Result.DevErr surfaced.
+		if r.opt.Cancel != nil && r.opt.Cancel() {
+			break
+		}
+		if r.deviceLost() {
+			break
+		}
 		if !p.enabled(r.opt) {
 			continue
 		}
@@ -753,6 +907,9 @@ func (r *run) refine() {
 		}
 		p.apply(r)
 	}
+	// The background shows through whatever the passes left uncovered, so it is solved once the
+	// stack has stopped moving — and before lockColors, which must still have the last word.
+	r.solveBackground()
 	// MONO mode: snap every shape to the exact lock colour LAST, after polish/back-fit/standout have
 	// finished moving colours — guaranteeing one pure brand colour in the output.
 	r.lockColors()
@@ -771,13 +928,40 @@ func (r *run) refine() {
 // Only the OVER case is corrected here. Coming in under budget is also real — anime measured 987 of
 // 1000 — but topping that back up means placing shapes the passes decided were not worth having, which
 // is a quality change and has to be measured, not slipped in behind a bug fix.
+// stackHasAlpha reports whether any placed shape is semi-transparent. The background (index 0) is
+// excluded: a cutout's background is alpha 0 by construction and says nothing about the shapes.
+func stackHasAlpha(shapes []model.Shape) bool {
+	for i := 1; i < len(shapes); i++ {
+		if c := shapes[i].Color; len(c) >= 4 && c[3] < 255 {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *run) clampToBudget() {
 	if r.opt.StopAt < 1 || len(r.shapes) <= r.opt.StopAt+1 {
 		return
 	}
 	over := len(r.shapes) - (r.opt.StopAt + 1)
-	r.shapes = pruneToBudget(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt,
-		r.opt.Background, r.opt.TransparentBG)
+	// The rank has to match the stack. pruneToBudget's opaque replace-ownership model gives a
+	// semi-transparent shape contribution 0, so on a translucent stack it ranks nothing and the
+	// shapes it drops are whatever the sort happened to order first.
+	//
+	// The test is the STACK ITSELF, not a flag. Keyed on r.allowAlpha this was false exactly where
+	// it needed to be true: keep-inside pads, PadTransparent sets HasTransparency, so TransparentBG
+	// is set and run.go's allowAlpha resolves to false — while applyPolish deliberately EXCEPTS
+	// PaddedOpaque and hands the descent a 0.30 alpha floor, so the stack it produced is translucent.
+	// engine.go's recolor gate carries the same warning about the same two flags; keying on the
+	// flag here would have repeated the bug it describes, on the client's default path. Asking the
+	// shapes cannot drift from what the passes actually did to them.
+	if stackHasAlpha(r.shapes) {
+		r.shapes = PruneToBudgetBlend(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt+1,
+			r.opt.Background, r.opt.TransparentBG)
+	} else {
+		r.shapes = pruneToBudget(r.shapes, r.be.Target(), r.be.Weight(), r.w, r.h, r.opt.StopAt,
+			r.opt.Background, r.opt.TransparentBG)
+	}
 	r.finalErr = rerender(r.be, r.initCanvas, r.shapes)
 	applog.Printf("clamp: %d layers over the budget, pruned to %d", over, len(r.shapes))
 }

@@ -138,3 +138,22 @@ func TestListMissingRoot(t *testing.T) {
 		t.Fatalf("List on missing root = %v, %v (want nil,nil)", l, err)
 	}
 }
+
+func TestImagePathRejectsTraversal(t *testing.T) {
+	st := &Store{Root: t.TempDir()}
+	for _, id := range []string{"../secret", `..\secret`, "a/b", "..", ".", "", "C:secret"} {
+		if p, err := st.ImagePath(id, "preview"); err == nil {
+			t.Errorf("ImagePath(%q) returned %q; want an error", id, p)
+		}
+	}
+	p, err := st.ImagePath("run-1", "preview")
+	if err != nil {
+		t.Fatalf("valid id rejected: %v", err)
+	}
+	if want := st.PreviewPath("run-1"); p != want {
+		t.Errorf("preview path %q want %q", p, want)
+	}
+	if p, _ := st.ImagePath("run-1", "thumb"); p != st.ThumbPath("run-1") {
+		t.Errorf("thumb path %q want %q", p, st.ThumbPath("run-1"))
+	}
+}

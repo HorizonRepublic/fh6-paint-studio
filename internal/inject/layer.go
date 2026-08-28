@@ -124,9 +124,11 @@ func ShapeToLayer(s model.Shape, cm CanvasMap) (LayerWrite, bool) {
 		lw.Word = WordTriangle
 	case model.TypeGradGlow: // soft radial gradient: ellipse footprint, gradient scale base
 		lw.placeBase(cm, p[0], p[1], p[2], p[3], p[4], GradScaleBase)
+		lw.Skew = -p[5] // the editor offers the skew grip on radial kinds and the preview shears — the inject must match
 		lw.Word = WordGradGlow
 	case model.TypeGradDisk: // radial gradient with opaque core + soft rim
 		lw.placeBase(cm, p[0], p[1], p[2], p[3], p[4], GradScaleBase)
+		lw.Skew = -p[5]
 		lw.Word = WordGradDisk
 	default: // TypeLine or unknown — no in-game primitive
 		return lw, false

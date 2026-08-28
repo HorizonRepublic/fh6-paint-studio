@@ -1,5 +1,12 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // ssim_adj.comp — vertical box-correlation + per-pixel combine: adj(q) = (T1 + 2x·T2 + y·T3)/N
 // (engine ssimState.adjoint / shim.cu ssAdjKernel). Feeds the dcinit dC luma seed (binding 11
 // of the shared polish set).
@@ -7,8 +14,8 @@
 layout(local_size_x = 256) in;
 layout(std430, binding = 1) readonly buffer Tb { float tl[]; };
 layout(std430, binding = 2) readonly buffer Lb { float rl[]; };
-layout(std430, binding = 6) readonly buffer HGb { double hg[]; };
-layout(std430, binding = 7)          buffer Ab { double adj[]; };
+layout(std430, binding = 6) readonly buffer HGb { REAL hg[]; };
+layout(std430, binding = 7)          buffer Ab { REAL adj[]; };
 layout(push_constant) uniform PC { int w, h, mw, mh, writeG; float lambda; } pc;
 
 void main() {
@@ -18,12 +25,12 @@ void main() {
     int p0 = qy - 7; if (p0 < 0) p0 = 0;
     int p1 = qy; if (p1 > pc.mh - 1) p1 = pc.mh - 1;
     int whm = pc.w * pc.mh;
-    double t1 = 0.0LF, t2 = 0.0LF, t3 = 0.0LF;
+    REAL t1 = REAL(0.0), t2 = REAL(0.0), t3 = REAL(0.0);
     for (int py = p0; py <= p1; py++) {
         int row = py * pc.w;
         t1 += hg[row + qx];
         t2 += hg[whm + row + qx];
         t3 += hg[2 * whm + row + qx];
     }
-    adj[i] = (t1 + 2.0LF * double(rl[i]) * t2 + double(tl[i]) * t3) * 0.015625LF;
+    adj[i] = (t1 + REAL(2.0) * REAL(rl[i]) * t2 + REAL(tl[i]) * t3) * REAL(0.015625);
 }

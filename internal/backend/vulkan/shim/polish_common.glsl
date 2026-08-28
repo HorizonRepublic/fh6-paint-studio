@@ -1,8 +1,8 @@
 // Shared geometry + SDF-gradient math for the Vulkan joint-polish shaders. Mirrors
 // internal/engine/polish.go + polish_sdf.go (the golden reference). Geometry runs in
-// float32 (GLSL has no double trig/sqrt); per-shape gradient sums accumulate in double
+// float32 (GLSL has no REAL trig/sqrt); per-shape gradient sums accumulate in REAL
 // in the backward shader. The polish golden-diff allows 1.5% rel, which absorbs this —
-// the same float32-hot-path / double-final recipe the CUDA backend passes with.
+// the same float32-hot-path / REAL-final recipe the CUDA backend passes with.
 //
 // Kinds handled by the polish: 0=ellipse 1=rectangle 2=triangle (optGeo, trainable geometry),
 // 3=line (hard inside, colour/alpha only), 4=glow and 5=disk (per-pixel radial alpha; the glow
@@ -179,42 +179,42 @@ float rectSDFG(float P[6], float px, float py, out float g[6]) {
 // triangleSDFGrad: IQ 2D triangle SDF + gradient wrt all 6 vertex coords. Computed in
 // DOUBLE (no trig here, only the one sqrt is float-then-promoted): the nearest-edge
 // selection + winding sign are precision-sensitive on the medial axis, so float32 drifts
-// past the gradient tolerance — double matches the float64 reference.
+// past the gradient tolerance — REAL matches the float64 reference.
 float triangleSDFG(float Pf[6], float pxf, float pyf, out float g[6]) {
     for (int i = 0; i < 6; i++) g[i] = 0.0;
-    double ax = double(Pf[0]), ay = double(Pf[1]), bx = double(Pf[2]), by = double(Pf[3]), cx = double(Pf[4]), cy = double(Pf[5]);
-    double px = double(pxf), py = double(pyf);
-    double e0x = bx - ax, e0y = by - ay, e1x = cx - bx, e1y = cy - by, e2x = ax - cx, e2y = ay - cy;
-    double v0x = px - ax, v0y = py - ay, v1x = px - bx, v1y = py - by, v2x = px - cx, v2y = py - cy;
-    double d0 = max(e0x * e0x + e0y * e0y, 1e-12LF);
-    double d1 = max(e1x * e1x + e1y * e1y, 1e-12LF);
-    double d2 = max(e2x * e2x + e2y * e2y, 1e-12LF);
-    double t0 = clamp((v0x * e0x + v0y * e0y) / d0, 0.0LF, 1.0LF);
-    double t1 = clamp((v1x * e1x + v1y * e1y) / d1, 0.0LF, 1.0LF);
-    double t2 = clamp((v2x * e2x + v2y * e2y) / d2, 0.0LF, 1.0LF);
-    double pq0x = v0x - e0x * t0, pq0y = v0y - e0y * t0;
-    double pq1x = v1x - e1x * t1, pq1y = v1y - e1y * t1;
-    double pq2x = v2x - e2x * t2, pq2y = v2y - e2y * t2;
-    double dd0 = pq0x * pq0x + pq0y * pq0y;
-    double dd1 = pq1x * pq1x + pq1y * pq1y;
-    double dd2 = pq2x * pq2x + pq2y * pq2y;
-    double s = (e0x * e2y - e0y * e2x < 0.0LF) ? -1.0LF : 1.0LF;
-    double w0 = s * (v0x * e0y - v0y * e0x);
-    double w1 = s * (v1x * e1y - v1y * e1x);
-    double w2 = s * (v2x * e2y - v2y * e2x);
-    double ddmin = dd0; int actEdge = 0;
+    REAL ax = REAL(Pf[0]), ay = REAL(Pf[1]), bx = REAL(Pf[2]), by = REAL(Pf[3]), cx = REAL(Pf[4]), cy = REAL(Pf[5]);
+    REAL px = REAL(pxf), py = REAL(pyf);
+    REAL e0x = bx - ax, e0y = by - ay, e1x = cx - bx, e1y = cy - by, e2x = ax - cx, e2y = ay - cy;
+    REAL v0x = px - ax, v0y = py - ay, v1x = px - bx, v1y = py - by, v2x = px - cx, v2y = py - cy;
+    REAL d0 = max(e0x * e0x + e0y * e0y, REAL(1e-12));
+    REAL d1 = max(e1x * e1x + e1y * e1y, REAL(1e-12));
+    REAL d2 = max(e2x * e2x + e2y * e2y, REAL(1e-12));
+    REAL t0 = clamp((v0x * e0x + v0y * e0y) / d0, REAL(0.0), REAL(1.0));
+    REAL t1 = clamp((v1x * e1x + v1y * e1y) / d1, REAL(0.0), REAL(1.0));
+    REAL t2 = clamp((v2x * e2x + v2y * e2y) / d2, REAL(0.0), REAL(1.0));
+    REAL pq0x = v0x - e0x * t0, pq0y = v0y - e0y * t0;
+    REAL pq1x = v1x - e1x * t1, pq1y = v1y - e1y * t1;
+    REAL pq2x = v2x - e2x * t2, pq2y = v2y - e2y * t2;
+    REAL dd0 = pq0x * pq0x + pq0y * pq0y;
+    REAL dd1 = pq1x * pq1x + pq1y * pq1y;
+    REAL dd2 = pq2x * pq2x + pq2y * pq2y;
+    REAL s = (e0x * e2y - e0y * e2x < REAL(0.0)) ? -REAL(1.0) : REAL(1.0);
+    REAL w0 = s * (v0x * e0y - v0y * e0x);
+    REAL w1 = s * (v1x * e1y - v1y * e1x);
+    REAL w2 = s * (v2x * e2y - v2y * e2x);
+    REAL ddmin = dd0; int actEdge = 0;
     if (dd1 < ddmin) { ddmin = dd1; actEdge = 1; }
     if (dd2 < ddmin) { ddmin = dd2; actEdge = 2; }
-    double wmin = min(w0, min(w1, w2));
-    double dist = double(sqrt(float(ddmin)));
-    double sgn = wmin < 0.0LF ? -1.0LF : 1.0LF;
-    if (dist < 1e-9LF) return float(-dist * sgn);
-    double t, pqx, pqy; int sIdx, eIdx;
+    REAL wmin = min(w0, min(w1, w2));
+    REAL dist = REAL(sqrt(float(ddmin)));
+    REAL sgn = wmin < REAL(0.0) ? -REAL(1.0) : REAL(1.0);
+    if (dist < REAL(1e-9)) return float(-dist * sgn);
+    REAL t, pqx, pqy; int sIdx, eIdx;
     if (actEdge == 0)      { t = t0; pqx = pq0x; pqy = pq0y; sIdx = 0; eIdx = 2; }
     else if (actEdge == 1) { t = t1; pqx = pq1x; pqy = pq1y; sIdx = 2; eIdx = 4; }
     else                  { t = t2; pqx = pq2x; pqy = pq2y; sIdx = 4; eIdx = 0; }
-    double nx = pqx / dist, ny = pqy / dist;
-    g[sIdx + 0] = float(sgn * (1.0LF - t) * nx); g[sIdx + 1] = float(sgn * (1.0LF - t) * ny);
+    REAL nx = pqx / dist, ny = pqy / dist;
+    g[sIdx + 0] = float(sgn * (REAL(1.0) - t) * nx); g[sIdx + 1] = float(sgn * (REAL(1.0) - t) * ny);
     g[eIdx + 0] = float(sgn * t * nx);           g[eIdx + 1] = float(sgn * t * ny);
     return float(-dist * sgn);
 }
@@ -223,6 +223,91 @@ float sdfGradKind(int kind, float P[6], float px, float py, out float g[6]) {
     if (kind == 1) return rectSDFG(P, px, py, g);
     if (kind == 2) return triangleSDFG(P, px, py, g);
     return ellipseSDFG(P, px, py, g);
+}
+
+// ---- VALUE-ONLY twins, for the forward/hard/dC-walk passes that never read the gradient ----
+// The gradient versions build dynamically indexed local arrays (g[sIdx], dqx[i]) that defeat
+// SROA, so the dead stores are NOT reliably eliminated — the walk paid the whole derivative for
+// nothing. Every expression below is copied VERBATIM from its twin (including the reciprocal-
+// multiply form of the glow falloff, which is NOT bit-equal to gradFalloff's division), so the
+// returned values are bit-identical. Keep them in lockstep with the twins above.
+
+float ellipseSDFOnly(float P[6], float px, float py) {
+    float cx = P[0], cy = P[1], rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+    float th = P[4] * PDEG2RAD, cs = cos(th), sn = sin(th);
+    float dx = px - cx, dy = py - cy;
+    float xr = dx * cs + dy * sn, yr = -dx * sn + dy * cs;
+    float u = xr / rx, v = yr / ry;
+    float k = sqrt(u * u + v * v); if (k < 1e-9) k = 1e-9;
+    float m = min(rx, ry);
+    return (k - 1.0) * m;
+}
+
+float rectSDFOnly(float P[6], float px, float py) {
+    float cx = P[0], cy = P[1], hw = max(0.5, P[2]), hh = max(0.5, P[3]);
+    float th = P[4] * PDEG2RAD, cs = cos(th), sn = sin(th);
+    float dx = px - cx, dy = py - cy;
+    float xr = dx * cs + dy * sn, yr = -dx * sn + dy * cs;
+    float k = P[5];
+    float xs = xr - k * yr;
+    float qx = abs(xs) - hw, qy = abs(yr) - hh;
+    if (qx > 0.0 || qy > 0.0) {
+        float mqx = max(qx, 0.0), mqy = max(qy, 0.0);
+        return sqrt(mqx * mqx + mqy * mqy);
+    }
+    return (qx >= qy) ? qx : qy;
+}
+
+float triangleSDFOnly(float Pf[6], float pxf, float pyf) {
+    REAL ax = REAL(Pf[0]), ay = REAL(Pf[1]), bx = REAL(Pf[2]), by = REAL(Pf[3]), cx = REAL(Pf[4]), cy = REAL(Pf[5]);
+    REAL px = REAL(pxf), py = REAL(pyf);
+    REAL e0x = bx - ax, e0y = by - ay, e1x = cx - bx, e1y = cy - by, e2x = ax - cx, e2y = ay - cy;
+    REAL v0x = px - ax, v0y = py - ay, v1x = px - bx, v1y = py - by, v2x = px - cx, v2y = py - cy;
+    REAL d0 = max(e0x * e0x + e0y * e0y, REAL(1e-12));
+    REAL d1 = max(e1x * e1x + e1y * e1y, REAL(1e-12));
+    REAL d2 = max(e2x * e2x + e2y * e2y, REAL(1e-12));
+    REAL t0 = clamp((v0x * e0x + v0y * e0y) / d0, REAL(0.0), REAL(1.0));
+    REAL t1 = clamp((v1x * e1x + v1y * e1y) / d1, REAL(0.0), REAL(1.0));
+    REAL t2 = clamp((v2x * e2x + v2y * e2y) / d2, REAL(0.0), REAL(1.0));
+    REAL pq0x = v0x - e0x * t0, pq0y = v0y - e0y * t0;
+    REAL pq1x = v1x - e1x * t1, pq1y = v1y - e1y * t1;
+    REAL pq2x = v2x - e2x * t2, pq2y = v2y - e2y * t2;
+    REAL dd0 = pq0x * pq0x + pq0y * pq0y;
+    REAL dd1 = pq1x * pq1x + pq1y * pq1y;
+    REAL dd2 = pq2x * pq2x + pq2y * pq2y;
+    REAL s = (e0x * e2y - e0y * e2x < REAL(0.0)) ? -REAL(1.0) : REAL(1.0);
+    REAL w0 = s * (v0x * e0y - v0y * e0x);
+    REAL w1 = s * (v1x * e1y - v1y * e1x);
+    REAL w2 = s * (v2x * e2y - v2y * e2x);
+    REAL ddmin = dd0;
+    if (dd1 < ddmin) ddmin = dd1;
+    if (dd2 < ddmin) ddmin = dd2;
+    REAL wmin = min(w0, min(w1, w2));
+    REAL dist = REAL(sqrt(float(ddmin)));
+    REAL sgn = wmin < REAL(0.0) ? -REAL(1.0) : REAL(1.0);
+    return float(-dist * sgn);
+}
+
+float sdfOnlyKind(int kind, float P[6], float px, float py) {
+    if (kind == 1) return rectSDFOnly(P, px, py);
+    if (kind == 2) return triangleSDFOnly(P, px, py);
+    return ellipseSDFOnly(P, px, py);
+}
+
+// gaussianCovOnly: gaussianCovGrad's coverage without the derivative work. Same reciprocal-
+// multiply expression, same early-outs — bit-identical values.
+float gaussianCovOnly(int kind, float P[6], int x, int y) {
+    if (kind != 4) return gradCovAny(kind, P, x, y);
+    float rx = max(1.0, P[2]), ry = max(1.0, P[3]);
+    float th = P[4] * PDEG2RAD, c = cos(th), sn = sin(th);
+    float dx = (float(x) + 0.5) - P[0], dy = (float(y) + 0.5) - P[1];
+    float xr = dx * c + dy * sn, yr = -dx * sn + dy * c;
+    float k = P[5];
+    float xs = xr - k * yr;
+    float u = xs * xs / (rx * rx) + yr * yr / (ry * ry);
+    if (u >= 1.0) return 0.0;
+    float norm = 1.0 / (1.0 - float(PGRAD_GLOW_E));
+    return 0.89 * norm * (exp(-2.5 * u) - float(PGRAD_GLOW_E));
 }
 
 float sigmoidCov(float sdf, float tau) {

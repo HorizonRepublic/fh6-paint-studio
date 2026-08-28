@@ -128,6 +128,16 @@ class EditLayer {
   };
 }
 
+/// One undo frame: the shapes AND the layers they belong to, plus which layer
+/// was active. Layers used to sit outside undo entirely.
+class _Snap {
+  _Snap(this.shapes, this.layers, this.active);
+
+  final List<EditShape> shapes;
+  final List<EditLayer> layers;
+  final int active;
+}
+
 /// A shape as the document stores it. Mutable on purpose: an edit is a change to
 /// this list, and the list is what is exported and injected.
 class EditShape {
@@ -154,10 +164,14 @@ class EditShape {
   /// separate membership list in step by hand.
   int layer;
 
+  /// COPIES of data/color, not the live lists. The maps this returns are handed
+  /// to the engine, written to disk and adopted back into the document; returning
+  /// the live lists meant a later edit reached through every one of them, so a
+  /// change made after an export could still turn up in what got injected.
   Map<String, dynamic> toJson() => {
     'type': type,
-    'data': data,
-    'color': color,
+    'data': List<double>.of(data),
+    'color': List<int>.of(color),
     'layer': layer,
     'score': 0,
   };
@@ -453,6 +467,9 @@ class EditShape {
         data[1] = 2 * axis - data[1];
         data[4] = (180 - data[4]) % 360;
       }
+      // The shear is handed too. The rotation above absorbs the reflection of the axes but the
+      // skew field does not, so a mirrored skewed rect came back leaning the same way it went in.
+      if (data.length > 5) data[5] = -data[5];
       return;
     }
     for (var i = 0; i + 1 < data.length; i += 2) {
@@ -474,11 +491,22 @@ class CanvasTick extends ChangeNotifier {
 }
 
 class Editor extends ChangeNotifier {
-  Editor(this._engine);
+  Editor(this._engineFn);
 
   final canvasTick = CanvasTick();
 
-  final EngineClient _engine;
+  /// Resolved fresh on every use, never captured: a reconnect (a driver reset
+  /// while the editor is open) swaps Studio's client, and a captured reference
+  /// would be the dead, closed instance for the rest of the editor's life —
+  /// every render then throwing 'connection is closed' with a frozen canvas.
+  final EngineClient? Function() _engineFn;
+  EngineClient get _engine {
+    final e = _engineFn();
+    if (e == null) throw EngineException('the engine is restarting');
+    return e;
+  }
+
+  bool _disposed = false;
 
   final shapes = <EditShape>[];
   final layers = <EditLayer>[];
@@ -510,10 +538,14 @@ class Editor extends ChangeNotifier {
   Future<void> loadCatalog() async {
     if (catalog.isNotEmpty) return;
     try {
-      catalog.addAll(await _engine.shapeCatalog());
+      final kinds = await _engine.shapeCatalog();
+      if (_disposed) return;
+      catalog.addAll(kinds);
       notifyListeners();
     } catch (e) {
+      if (_disposed) return;
       error = '$e';
+      notifyListeners(); // was silent — the failure hid until an unrelated repaint
     }
   }
 
@@ -522,7 +554,12 @@ class Editor extends ChangeNotifier {
   final _previews = <int, Future<ui.Image>>{};
 
   Future<ui.Image> preview(int kind, {int size = 64}) =>
-      _previews[kind] ??= _renderPreview(kind, size);
+      // A failed render must not be remembered, or one engine hiccup leaves that
+      // palette tile broken for the whole session; evict so the next build retries.
+      _previews[kind] ??= _renderPreview(kind, size).catchError((Object e) {
+        _previews.remove(kind);
+        throw e;
+      });
 
   Future<ui.Image> _renderPreview(int kind, int size) async {
     final pad = size * 0.14;
@@ -585,8 +622,11 @@ class Editor extends ChangeNotifier {
   int selected = -1;
   String? error;
 
-  final _undo = <List<EditShape>>[];
-  final _redo = <List<EditShape>>[];
+  /// An undo frame is the shapes AND the layers. Layers used to sit outside it,
+  /// so undoing a layer delete brought the shapes back with nowhere to live —
+  /// they had already been reassigned to another layer and stayed there.
+  final _undo = <_Snap>[];
+  final _redo = <_Snap>[];
 
   bool get canUndo => _undo.isNotEmpty;
   bool get canRedo => _redo.isNotEmpty;
@@ -656,12 +696,18 @@ class Editor extends ChangeNotifier {
   /// Lays a reference picture under the work. On a still-blank canvas the
   /// dimensions follow the reference so tracing lines up one-to-one; once there
   /// is work to keep, the canvas holds its size and the reference just overlays.
+  int _refSeq = 0;
   Future<void> setReference(String path) async {
+    final seq = ++_refSeq;
     try {
       final bytes = await File(path).readAsBytes();
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       final img = frame.image;
+      if (_disposed || seq != _refSeq) {
+        img.dispose(); // superseded by a newer reference, or the editor closed
+        return;
+      }
       reference?.dispose();
       reference = img;
       referenceName = path.split(RegExp(r'[\\/]')).last;
@@ -677,6 +723,7 @@ class Editor extends ChangeNotifier {
         notifyListeners();
       }
     } catch (e) {
+      if (_disposed) return; // as loadCatalog above; a ChangeNotifier throws after dispose
       error = 'could not load the reference: $e';
       notifyListeners();
     }
@@ -734,23 +781,38 @@ class Editor extends ChangeNotifier {
   /// Snapshots the document before a change. Every mutation goes through this,
   /// which is what makes undo total rather than a list of special cases.
   void mark() {
-    _undo.add(shapes.map((s) => s.copy()).toList());
+    _undo.add(_snapshot());
     if (_undo.length > 100) _undo.removeAt(0);
     _redo.clear();
   }
 
+  _Snap _snapshot() => _Snap(
+    shapes.map((s) => s.copy()).toList(),
+    layers.map((l) => EditLayer(l.id, l.name, locked: l.locked, hidden: l.hidden)).toList(),
+    activeLayer,
+  );
+
   void undo() => _swap(_undo, _redo);
   void redo() => _swap(_redo, _undo);
 
-  void _swap(List<List<EditShape>> from, List<List<EditShape>> to) {
+  void _swap(List<_Snap> from, List<_Snap> to) {
     if (from.isEmpty) return;
     endInteraction();
     extra.clear();
-    to.add(shapes.map((s) => s.copy()).toList());
+    to.add(_snapshot());
     final restored = from.removeLast();
     shapes
       ..clear()
-      ..addAll(restored);
+      ..addAll(restored.shapes);
+    layers
+      ..clear()
+      ..addAll(restored.layers);
+    if (layers.any((l) => l.id == restored.active)) {
+      activeLayer = restored.active;
+    } else if (layers.isNotEmpty) {
+      activeLayer = layers.first.id;
+    }
+    if (!layers.any((l) => l.id == groupLayer)) groupLayer = null;
     if (selected >= shapes.length) selected = shapes.length - 1;
     notifyListeners();
     refresh();
@@ -923,7 +985,7 @@ class Editor extends ChangeNotifier {
         below = await _decodeFrame(await fb);
         sprite = await _decodeFrame(await fs);
       }
-      if (_interFor != i) {
+      if (_interFor != i || _disposed) {
         below.dispose();
         sprite.dispose();
         above?.dispose();
@@ -1028,7 +1090,29 @@ class Editor extends ChangeNotifier {
   void removeLayer(int id) {
     if (layers.length <= 1) return;
     mark();
-    final home = layers.firstWhere((l) => l.id != id).id;
+    // The nearest USABLE neighbour, not layers.first: shapes from a layer deleted anywhere in the
+    // stack all landed in the bottom one, which on a multi-layer document is nowhere near where
+    // the user was working — and if that layer happened to be hidden or locked they vanished into
+    // it while still selected, which is the exact invariant setLayerLocked/setLayerHidden enforce.
+    final at = layers.indexWhere((l) => l.id == id);
+    var home = -1;
+    for (var d = 1; d < layers.length && home < 0; d++) {
+      for (final j in [at - d, at + d]) {
+        if (j < 0 || j >= layers.length || layers[j].id == id) continue;
+        if (!layers[j].locked && !layers[j].hidden) {
+          home = layers[j].id;
+          break;
+        }
+      }
+    }
+    if (home < 0) {
+      // Every survivor is locked or hidden: unlock and reveal the nearest one rather than drop
+      // the shapes somewhere they cannot be reached.
+      final l = layers.firstWhere((l) => l.id != id);
+      l.locked = false;
+      l.hidden = false;
+      home = l.id;
+    }
     for (final s in shapes) {
       if (s.layer == id) s.layer = home;
     }
@@ -1039,6 +1123,11 @@ class Editor extends ChangeNotifier {
   }
 
   void renameLayer(int id, String name) {
+    // mark() before every layer edit. Layers are part of the undo frame now, so an edit left
+    // outside it is silently REVERTED by the next Ctrl+Z — lock a layer to protect finished work,
+    // undo one stray move, and the lock is gone. Skipping mark() also meant these never cleared
+    // the redo stack, so undo -> lock -> redo threw the lock away a second time.
+    mark();
     layerOf(id)?.name = name;
     notifyListeners();
   }
@@ -1046,19 +1135,32 @@ class Editor extends ChangeNotifier {
   void setLayerLocked(int id, bool v) {
     final l = layerOf(id);
     if (l == null) return;
+    mark(); // see renameLayer
     l.locked = v;
     // Nothing in a locked layer may stay selected, or the inspector would go on
-    // editing what the lock was meant to protect.
-    if (v && current != null && current!.layer == id) selected = -1;
-    if (v && groupLayer == id) groupLayer = null;
+    // editing what the lock was meant to protect. That covered `selected` but
+    // not the move-group, so a locked layer's shapes kept travelling with the
+    // next drag — the exact thing extendTo already refuses to put in the group.
+    if (v) {
+      if (current != null && current!.layer == id) selected = -1;
+      extra.removeWhere((i) => i < shapes.length && shapes[i].layer == id);
+      if (groupLayer == id) groupLayer = null;
+    }
     notifyListeners();
   }
 
   void setLayerHidden(int id, bool v) {
     final l = layerOf(id);
     if (l == null) return;
+    mark(); // see renameLayer
     l.hidden = v;
-    if (v && current != null && current!.layer == id) selected = -1;
+    if (v) {
+      if (current != null && current!.layer == id) selected = -1;
+      // Same as the lock: a hidden layer's shapes must leave the move-group, or
+      // the next drag silently moves things the user cannot see.
+      extra.removeWhere((i) => i < shapes.length && shapes[i].layer == id);
+      if (groupLayer == id) groupLayer = null;
+    }
     commit();
   }
 
@@ -1114,16 +1216,21 @@ class Editor extends ChangeNotifier {
   /// or spin every shape in place without moving. [EditShape.rotateBy] leaves a
   /// shape's own centre where it was, which is what makes the second step a
   /// plain correction rather than a special case per primitive.
-  void rotateLayer(int id, double deg) {
-    final box = layerBounds(id);
-    if (box == null) return;
+  ///
+  /// [pivot] is the point to turn about. The caller passes the one it captured at the START of the
+  /// gesture: layerBounds is the AXIS-ALIGNED box of an asymmetric group, which is not invariant
+  /// under rotation, so recomputing it on every pointer event walked the centre — a full turn did
+  /// not come back where it started and small corrections ratcheted the layer away.
+  void rotateLayer(int id, double deg, {ui.Offset? pivot}) {
+    final centre = pivot ?? layerBounds(id)?.center;
+    if (centre == null) return;
     final t = deg * math.pi / 180;
     final cos = math.cos(t), sin = math.sin(t);
     for (final s in shapesIn(id)) {
-      final was = s.center - box.center;
+      final was = s.center - centre;
       s.rotateBy(deg);
       final want =
-          box.center +
+          centre +
           ui.Offset(was.dx * cos - was.dy * sin, was.dx * sin + was.dy * cos);
       final now = s.center;
       s.translate(want.dx - now.dx, want.dy - now.dy);
@@ -1137,7 +1244,22 @@ class Editor extends ChangeNotifier {
       ..insert(0, s.type);
     if (recent.length > 10) recent.removeLast();
     mark();
-    s.layer = activeLayer;
+    // Never drop a new shape into a layer the user cannot see or touch: it
+    // would vanish the moment it was drawn and refuse every edit afterwards.
+    // Fall back to the nearest usable layer, adding one if there is none.
+    var target = layerOf(activeLayer);
+    if (target == null || target.locked || target.hidden) {
+      target = layers.cast<EditLayer?>().firstWhere(
+        (l) => l != null && !l.locked && !l.hidden,
+        orElse: () => null,
+      );
+      if (target == null) {
+        target = EditLayer(_nextLayerId++, 'Layer ${layers.length + 1}');
+        layers.add(target);
+      }
+      activeLayer = target.id;
+    }
+    s.layer = target.id;
     shapes.add(s);
     selected = shapes.length - 1;
     extra.clear();
@@ -1188,9 +1310,15 @@ class Editor extends ChangeNotifier {
 
   void duplicateSelected() {
     final s = current;
-    if (s == null) return;
+    // The background is index 0 and is not a shape the user owns: duplicating it
+    // put a second full-canvas rect over the art. Every other structural op
+    // guards this; this one did not.
+    if (s == null || selected == 0) return;
     mark();
     final copy = s.copy()..translate(8, 8);
+    // The insert shifts every index above it, and `extra` holds INDICES — the
+    // only structural op that left them pointing at their neighbours.
+    extra.clear();
     shapes.insert(selected + 1, copy);
     selected += 1;
     commit();
@@ -1214,7 +1342,10 @@ class Editor extends ChangeNotifier {
 
   void mirrorSelected({required bool horizontal}) {
     final s = current;
-    if (s == null) return;
+    // The background is stored corner to corner, so mirroring it swaps its corners into x1>x2 and
+    // the renderer draws nothing — the canvas colour simply vanished. It is also meaningless: a
+    // full-canvas rectangle is its own mirror. Every other structural op already guards index 0.
+    if (s == null || selected == 0) return;
     mark();
     s.mirror(horizontal ? width / 2 : height / 2, horizontal: horizontal);
     commit();
@@ -1306,11 +1437,16 @@ class Editor extends ChangeNotifier {
       // still paints the old image — disposing it first was a use-after-free
       // for however long the decode took.
       final fresh = await completer.future;
+      if (_disposed) {
+        fresh.dispose(); // editor closed mid-render: don't leak it or notify
+        return;
+      }
       final old = render;
       render = fresh;
       old?.dispose();
       error = null;
     } catch (e) {
+      if (_disposed) return;
       error = '$e';
     }
     if (_settleWaits > 0 && --_settleWaits == 0) settling = null;
@@ -1337,8 +1473,21 @@ class Editor extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     render?.dispose();
     reference?.dispose();
+    // The gesture composite, if the editor is torn down mid-grab — endInteraction
+    // delays its disposal 300 ms for in-flight repaints, but on teardown there is
+    // nothing left to repaint, so free it now.
+    interBelow?.dispose();
+    interSprite?.dispose();
+    interAbove?.dispose();
+    // Cached palette tiles: futures may still be decoding, so dispose on arrival.
+    for (final f in _previews.values) {
+      f.then((img) => img.dispose()).catchError((Object _) {});
+    }
+    _previews.clear();
+    canvasTick.dispose();
     super.dispose();
   }
 }

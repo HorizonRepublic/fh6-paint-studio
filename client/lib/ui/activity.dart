@@ -66,9 +66,22 @@ class ActivityCard extends StatelessWidget {
     };
 
     return Glass(
+      // live:false — MISSED in the earlier sweep, and this is the one panel
+      // whose own content ticks 4x/s for the whole run while the canvas beneath
+      // it changes ~20x/s. A BackdropFilter is never raster-cached, so it was
+      // re-running a sigma-22 blur on every presented frame for minutes.
+      live: false,
       child: SizedBox(
         width: 292,
-        child: Column(
+        // The card grows rather than being replaced when a fit lands and its
+        // three actions appear. After minutes of waiting this is the one moment
+        // in the app that has earned a beat of motion — and the growth says
+        // "the same card gained actions", where the jump read as a new card.
+        child: AnimatedSize(
+          duration: Motion.slow,
+          curve: Motion.curve,
+          alignment: Alignment.topCenter,
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -77,6 +90,7 @@ class ActivityCard extends StatelessWidget {
               colour: colour,
               title: title,
               sub: sub,
+              subMono: studio.phase == Phase.running,
               ssim: studio.ssim,
               deltaE: studio.deltaE,
             ),
@@ -119,6 +133,7 @@ class ActivityCard extends StatelessWidget {
             ],
             _Ticker(studio: studio, open: logOpen, onTap: onToggleLog),
           ],
+          ),
         ),
       ),
     );
@@ -131,6 +146,7 @@ class _Head extends StatelessWidget {
     required this.colour,
     required this.title,
     required this.sub,
+    this.subMono = false,
     required this.ssim,
     required this.deltaE,
   });
@@ -139,6 +155,12 @@ class _Head extends StatelessWidget {
   final Color colour;
   final String title;
   final String sub;
+
+  /// True when [sub] is a live count. A number that changes three thousand
+  /// times over a run re-measures the line on every digit in a proportional
+  /// face, so the subtitle visibly twitches for the whole fit — the one thing
+  /// the user watches longest.
+  final bool subMono;
   final double? ssim;
   final double? deltaE;
 
@@ -168,17 +190,17 @@ class _Head extends StatelessWidget {
               ),
               Text(
                 sub,
-                style: T.text(11, color: T.hint),
+                style: subMono
+                    ? T.monoText(11, color: T.hint)
+                    : T.text(11, color: T.hint),
                 overflow: TextOverflow.ellipsis,
               ),
             ],
           ),
         ),
-        if (ssim != null) ...[
-          _Metric('SSIM', ssim!.toStringAsFixed(2)),
-          const SizedBox(width: 12),
-          _Metric('ΔE', deltaE!.toStringAsFixed(1)),
-        ],
+        if (ssim != null) _Metric('SSIM', ssim!.toStringAsFixed(2)),
+        if (ssim != null && deltaE != null) const SizedBox(width: 12),
+        if (deltaE != null) _Metric('ΔE', deltaE!.toStringAsFixed(1)),
       ],
     ),
   );
@@ -275,16 +297,25 @@ class _PhaseRow extends StatelessWidget {
   final String time;
 
   @override
-  Widget build(BuildContext context) => Container(
+  // Animated because "the build finished, the polish has begun" is the only
+  // substantive news a multi-minute run ever reports, and it used to arrive as
+  // a one-frame swap of four colours — blink and it never happened.
+  // NB the border is transparent rather than null in states 1 and 2: a null
+  // border cannot lerp, so it would snap while the fill eased.
+  Widget build(BuildContext context) => AnimatedContainer(
+    duration: Motion.base,
+    curve: Motion.curve,
     height: 26,
     padding: const EdgeInsets.symmetric(horizontal: 5),
     decoration: BoxDecoration(
-      color: state == 1 ? const Color(0x1A54CBB8) : null,
+      color: state == 1 ? const Color(0x1A54CBB8) : const Color(0x0054CBB8),
       borderRadius: BorderRadius.circular(7),
     ),
     child: Row(
       children: [
-        Container(
+        AnimatedContainer(
+          duration: Motion.base,
+          curve: Motion.curve,
           width: 16,
           height: 16,
           alignment: Alignment.center,
@@ -293,13 +324,20 @@ class _PhaseRow extends StatelessWidget {
             color: switch (state) {
               2 => const Color(0x295FD08D),
               1 => const Color(0x3354CBB8),
-              _ => null,
+              _ => const Color(0x0054CBB8),
             },
-            border: state == 0 ? Border.all(color: T.border, width: 1.5) : null,
+            border: Border.all(
+              color: state == 0 ? T.border : const Color(0x00FFFFFF),
+              width: 1.5,
+            ),
           ),
-          child: Text(
-            state == 2 ? '✓' : (state == 1 ? '●' : ''),
-            style: T.text(9, color: state == 2 ? T.green : T.teal),
+          child: AnimatedSwitcher(
+            duration: Motion.base,
+            child: Text(
+              state == 2 ? '✓' : (state == 1 ? '●' : ''),
+              key: ValueKey(state),
+              style: T.text(9, color: state == 2 ? T.green : T.teal),
+            ),
           ),
         ),
         const SizedBox(width: 9),
@@ -380,6 +418,13 @@ class LogDrawer extends StatefulWidget {
 
 class _LogDrawerState extends State<LogDrawer> {
   String _filter = 'all';
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -389,9 +434,14 @@ class _LogDrawerState extends State<LogDrawer> {
       return l.level == 'done';
     }).toList();
 
+    // live:false — the drawer sits over its own content, not the animating canvas; a static
+    // blur snapshot reads the same and stops re-blurring 20×/s during a fit.
     return Glass(
+      live: false,
       child: SizedBox(
-        width: 720,
+        // 760, not 720: the filter chips and buttons alone need ~722 in the
+        // widest locale, and the row has nothing left to give way.
+        width: 760,
         height: 260,
         child: Column(
           children: [
@@ -400,7 +450,16 @@ class _LogDrawerState extends State<LogDrawer> {
               child: Row(
                 children: [
                   const SizedBox(width: 11),
-                  Text(context.s('activity').toUpperCase(), style: T.label),
+                  // Flexible with an ellipsis: the chips and buttons are the
+                  // controls, so in a wide locale the title is what gives way.
+                  Flexible(
+                    child: Text(
+                      context.s('activity').toUpperCase(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: T.label,
+                    ),
+                  ),
                   const Spacer(),
                   for (final (key, label) in [
                     ('all', context.s('all')),
@@ -439,7 +498,12 @@ class _LogDrawerState extends State<LogDrawer> {
             ),
             const _Rule(),
             Expanded(
-              child: ListView.builder(
+              // The log holds the last 500 lines: a scrollbar is how you see
+              // you are not at the end, and how you get back with the mouse.
+              child: Scrollbar(
+                controller: _scroll,
+                child: ListView.builder(
+                controller: _scroll,
                 reverse: true,
                 padding: const EdgeInsets.fromLTRB(11, 8, 11, 10),
                 itemCount: lines.length,
@@ -452,10 +516,9 @@ class _LogDrawerState extends State<LogDrawer> {
                       children: [
                         Text(
                           l.time,
-                          style: T.monoText(
-                            11.5,
-                            color: const Color(0xFF5C6169),
-                          ),
+                          // Was an inline #5C6169 — a seventh grey below the
+                          // whole ramp, and under the readable minimum.
+                          style: T.monoText(11.5, color: T.hint),
                         ),
                         const SizedBox(width: 10),
                         SizedBox(
@@ -483,6 +546,7 @@ class _LogDrawerState extends State<LogDrawer> {
                     ),
                   );
                 },
+              ),
               ),
             ),
           ],

@@ -11,6 +11,41 @@ import (
 	"fh6-paint-studio/internal/model"
 )
 
+// cellRows runs fn over row bands of h that each own WHOLE cell-rows, one band per CPU. Every cell
+// is therefore accumulated entirely within one band, in row-major order — the exact order the
+// serial loop used — so per-cell float sums stay bit-identical (addition is not associative) and
+// bands touch disjoint cells. For the cell-accumulating loops; heRows is for per-pixel outputs.
+func cellRows(h, cell int, fn func(y0, y1 int)) {
+	ch := (h + cell - 1) / cell
+	nb := runtime.GOMAXPROCS(0)
+	if nb > ch {
+		nb = ch
+	}
+	if nb <= 1 {
+		fn(0, h)
+		return
+	}
+	per := (ch + nb - 1) / nb
+	var wg sync.WaitGroup
+	for b := 0; b < nb; b++ {
+		cy0 := b * per
+		if cy0 >= ch {
+			break
+		}
+		cy1 := cy0 + per
+		if cy1 > ch {
+			cy1 = ch
+		}
+		y0, y1 := cy0*cell, cy1*cell
+		if y1 > h {
+			y1 = h
+		}
+		wg.Add(1)
+		go func(a, b int) { defer wg.Done(); fn(a, b) }(y0, y1)
+	}
+	wg.Wait()
+}
+
 // heRows runs fn over row bands [y0,y1) of h, one per CPU, concurrently. For loops whose rows write
 // disjoint outputs and carry no cross-row reduction.
 func heRows(h int, fn func(y0, y1 int)) {
@@ -67,6 +102,17 @@ var hardEdgeTau, hardDensSat, hardCohFloor = func() (float64, float64, float64) 
 	return tau, dens, coh
 }()
 
+// encSRGB encodes a working-space channel to sRGB for the perceptual maps. Under -linear=false
+// the working pixels ARE sRGB already — encoding unconditionally double-encoded them, silently
+// invalidating the sRGB A/B arm (the shipped default is linear, where this is a plain encode;
+// weight.go's PerceptualLuma gate is the same contract).
+func encSRGB(v float32) float32 {
+	if model.LinearLight {
+		return model.LinearToSRGB(v)
+	}
+	return v
+}
+
 // HardEdgeMap returns, per pixel, how much the local target neighbourhood is HARD-EDGED STRUCTURE
 // (line-work, spikes/wedges, geometric borders) in [0,1] — the regions where hard-cornered shape
 // kinds (rectangle/triangle) earn their keep. Smooth shading scores ~0: a rect/tri placed there
@@ -78,6 +124,48 @@ var hardEdgeTau, hardDensSat, hardCohFloor = func() (float64, float64, float64) 
 // orientations and keeps a floor, since corners are triangle territory). The cell grid is box-3x3
 // smoothed and bilinearly upsampled, so the gate has no cell-boundary steps. len = w*h.
 func HardEdgeMap(target []float32, w, h int) []float32 {
+	// One-entry memo. An anime run builds this THREE times on the byte-identical target (ramp
+	// map, term weight, kind gate) at ~3 pow + a 27-tap Sobel per pixel — ~50M pow at the 4096
+	// cap. Keyed on the slice identity + dims; a fresh COPY is returned so callers stay free to
+	// scribble on their map. Bit-identical by construction (memoisation of a pure function).
+	if len(target) == 0 || w <= 0 || h <= 0 {
+		return nil // the memo keys on &target[0]; an empty target indexed out of range
+	}
+	heMemo.mu.Lock()
+	if heMemo.w == w && heMemo.h == h && heMemo.key == &target[0] {
+		out := make([]float32, len(heMemo.val))
+		copy(out, heMemo.val)
+		heMemo.mu.Unlock()
+		return out
+	}
+	heMemo.mu.Unlock()
+	out := hardEdgeMapUncached(target, w, h)
+	heMemo.mu.Lock()
+	heMemo.key, heMemo.w, heMemo.h = &target[0], w, h
+	heMemo.val = make([]float32, len(out))
+	copy(heMemo.val, out)
+	heMemo.mu.Unlock()
+	return out
+}
+
+var heMemo struct {
+	mu   sync.Mutex
+	key  *float32
+	w, h int
+	val  []float32
+}
+
+// ReleaseMaps drops the HardEdgeMap memo. It holds one w*h float32 plane AND a pointer into the
+// target for the process lifetime — 64MB at the 4096 fit cap, per image, kept alive long after the
+// run that built it (the studio and engined are long-lived processes that fit many images).
+// Call it when a run's target goes out of scope.
+func ReleaseMaps() {
+	heMemo.mu.Lock()
+	heMemo.key, heMemo.w, heMemo.h, heMemo.val = nil, 0, 0, nil
+	heMemo.mu.Unlock()
+}
+
+func hardEdgeMapUncached(target []float32, w, h int) []float32 {
 	const cell = 12
 	edgeTau, densSat, cohFloor := hardEdgeTau, hardDensSat, hardCohFloor
 	// Perceptual per-channel planes: sRGB-encode each channel so shadow edges keep their visual
@@ -87,7 +175,7 @@ func HardEdgeMap(target []float32, w, h int) []float32 {
 	heRows(h, func(y0, y1 int) {
 		for i := y0 * w; i < y1*w; i++ {
 			for c := 0; c < 3; c++ {
-				chans[c][i] = model.LinearToSRGB(target[i*4+c])
+				chans[c][i] = encSRGB(target[i*4+c])
 			}
 		}
 	})

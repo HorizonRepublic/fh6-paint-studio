@@ -31,6 +31,8 @@ class HelpSheet extends StatelessWidget {
   Widget build(BuildContext context) => Center(
     child: Glass(
       radius: 16,
+      // See AboutSheet: opaque scrim above it, so the live blur only costs.
+      live: false,
       child: SizedBox(
         width: 560,
         child: Column(
@@ -65,6 +67,31 @@ class HelpSheet extends StatelessWidget {
               ),
             ),
             Container(height: 1, color: T.hairline),
+            // The bindings were invisible: only Ctrl+Enter is advertised, on the
+            // Generate button. The key names stay literal — a keyboard is
+            // labelled the same in every language this app speaks.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(context.s('shortcuts').toUpperCase(), style: T.label),
+                  const SizedBox(height: 8),
+                  for (final (keys, labelKey) in [
+                    ('Ctrl ⏎', 'generate'),
+                    ('Ctrl O', 'chooseFile'),
+                    ('F1', 'help'),
+                    ('Esc', 'close'),
+                    ('Ctrl Z / Ctrl Y', 'undo'),
+                    ('Ctrl D', 'duplicate'),
+                    ('← ↑ → ↓ / Shift', 'moveHere'),
+                    ('Del', 'delete'),
+                  ])
+                    _Key(keys: keys, label: context.s(labelKey)),
+                ],
+              ),
+            ),
+            Container(height: 1, color: T.hairline),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 11, 16, 14),
               child: Text(
@@ -75,6 +102,27 @@ class HelpSheet extends StatelessWidget {
           ],
         ),
       ),
+    ),
+  );
+}
+
+class _Key extends StatelessWidget {
+  const _Key({required this.keys, required this.label});
+
+  final String keys;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 6),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 132,
+          child: Text(keys, style: T.monoText(11, color: T.tealBright)),
+        ),
+        Expanded(child: Text(label, style: T.text(11.5, color: T.hint))),
+      ],
     ),
   );
 }

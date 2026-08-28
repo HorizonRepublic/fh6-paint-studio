@@ -26,6 +26,7 @@ type greedyEnv struct {
 	orient      []float32
 	kg          *kindGate
 	devSearch   randomSearcher
+	devMutate   mutateSearcher
 	allowAlpha  bool
 	alphaMin    float32
 	coh         []float32 // structure-tensor coherence (nil = no anisotropy prior)
@@ -69,8 +70,22 @@ func (g *greedyEnv) searchOne(sampler *ErrorSampler, grid []float32, gw, gh, sha
 			g.devSearch = nil // older DLL without the export — fall back for the rest of the run
 		}
 	}
+	if g.devSearch == nil {
+		t0 = time.Now()
+		cands := RandomShapes(g.rng, g.w, g.h, g.randomN, g.kinds, g.kindWeights, sampler, progress, g.orient, g.coh, g.aspectCap, g.allowAlpha, g.alphaMin, g.aspectMax, nil, g.kg)
+		clampCandidatesToCanvas(cands, float32(g.w), float32(g.h), g.canvasPad)
+		if g.tm != nil {
+			g.tm.Generate += time.Since(t0)
+		}
+		t0 = time.Now()
+		best, bestScore = pickBest(g.be, cands, penalty)
+		if g.tm != nil {
+			g.tm.Evaluate += time.Since(t0)
+		}
+	}
 	// Component seeds are ADDITIVE: scored by the same evaluator against the same residual, and kept
-	// only if they beat whatever the search found. The pass can cost wall time; it cannot cost quality.
+	// only if they beat whatever the search found. AFTER the host fallback, not before it — the
+	// unconditional pickBest above used to overwrite a winning seed (run.searchOne has this order).
 	if g.compSeeds > 0 {
 		t0 = time.Now()
 		pool := compSeeds(grid, gw, gh, g.w, g.h, annealMaxR(g.w, g.h, progress), g.compSeeds,
@@ -86,33 +101,38 @@ func (g *greedyEnv) searchOne(sampler *ErrorSampler, grid []float32, gw, gh, sha
 			g.tm.Evaluate += time.Since(t0)
 		}
 	}
-	if g.devSearch == nil {
-		t0 = time.Now()
-		cands := RandomShapes(g.rng, g.w, g.h, g.randomN, g.kinds, g.kindWeights, sampler, progress, g.orient, g.coh, g.aspectCap, g.allowAlpha, g.alphaMin, g.aspectMax, nil, g.kg)
-		clampCandidatesToCanvas(cands, float32(g.w), float32(g.h), g.canvasPad)
-		if g.tm != nil {
-			g.tm.Generate += time.Since(t0)
+	if g.rounds > 0 && bestScore < 0 {
+		// Same device hill climb as the main loop; masks stay on the host rounds.
+		if g.devMutate != nil && !model.IsMask(best.Kind) {
+			t0 = time.Now()
+			mb, ms, ok := g.devMutate.SearchMutate(g.rng.Int63(), best, bestScore, g.rounds, g.perRound,
+				g.moveStep, g.radiusStep, g.allowAlpha, g.alphaMin, g.compact, shapeCount, g.canvasPad)
+			if g.tm != nil {
+				g.tm.Evaluate += time.Since(t0)
+			}
+			if ok {
+				if ms < bestScore {
+					best, bestScore = mb, ms
+				}
+				return best, bestScore
+			}
+			g.devMutate = nil
 		}
-		t0 = time.Now()
-		best, bestScore = pickBest(g.be, cands, penalty)
-		if g.tm != nil {
-			g.tm.Evaluate += time.Since(t0)
-		}
-	}
-	for r := 0; r < g.rounds && bestScore < 0; r++ {
-		t0 = time.Now()
-		mut := MutateShape(g.rng, best, g.perRound, float32(g.w), float32(g.h), g.moveStep, g.radiusStep, g.allowAlpha, g.alphaMin)
-		clampCandidatesToCanvas(mut, float32(g.w), float32(g.h), g.canvasPad)
-		if g.tm != nil {
-			g.tm.Mutate += time.Since(t0)
-		}
-		t0 = time.Now()
-		mb, ms := pickBest(g.be, mut, penalty)
-		if g.tm != nil {
-			g.tm.Evaluate += time.Since(t0)
-		}
-		if ms < bestScore {
-			best, bestScore = mb, ms
+		for r := 0; r < g.rounds && bestScore < 0; r++ {
+			t0 = time.Now()
+			mut := MutateShape(g.rng, best, g.perRound, float32(g.w), float32(g.h), g.moveStep, g.radiusStep, g.allowAlpha, g.alphaMin)
+			clampCandidatesToCanvas(mut, float32(g.w), float32(g.h), g.canvasPad)
+			if g.tm != nil {
+				g.tm.Mutate += time.Since(t0)
+			}
+			t0 = time.Now()
+			mb, ms := pickBest(g.be, mut, penalty)
+			if g.tm != nil {
+				g.tm.Evaluate += time.Since(t0)
+			}
+			if ms < bestScore {
+				best, bestScore = mb, ms
+			}
 		}
 	}
 	return best, bestScore
@@ -140,9 +160,18 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 		owner1[i] = -1
 		owner2[i] = -1
 	}
+	// Per-shape geometry, kept for the second pass: a gradient's effective alpha is its declared
+	// alpha times the per-pixel falloff, so the pixel loop below needs the kind and params again.
+	kinds := make([]model.ShapeKind, n)
+	params := make([][6]float32, n)
+	grad := make([]bool, n)
+	for j := 0; j < n; j++ {
+		kinds[j] = model.KindFromType(shapes[j].Type)
+		params[j] = model.ParamsFromShape(shapes[j])
+		grad[j] = raster.IsGradient(kinds[j])
+	}
 	for j := n - 1; j >= 1; j-- {
-		kind := model.KindFromType(shapes[j].Type)
-		p := model.ParamsFromShape(shapes[j])
+		kind, p := kinds[j], params[j]
 		xMin, yMin, xMax, yMax := raster.BBox(kind, p, w, h)
 		for y := yMin; y <= yMax; y++ {
 			for x := xMin; x <= xMax; x++ {
@@ -150,7 +179,15 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 				if owner1[idx] != -1 && owner2[idx] != -1 {
 					continue
 				}
-				if !raster.Inside(kind, p, x, y) {
+				// A glow's footprint is an ellipse but its coverage falls to zero at the rim, so
+				// membership by Inside made the whole ellipse an owner and priced the shape as a
+				// uniform fill — the same defect the pruneOccluded rankfix cured. Own a pixel only
+				// where the shape still writes something a byte can hold.
+				if blendContribFix && grad[j] {
+					if raster.Coverage(kind, p, x, y) < 1.0/255 {
+						continue
+					}
+				} else if !raster.Inside(kind, p, x, y) {
 					continue
 				}
 				if owner1[idx] == -1 {
@@ -168,9 +205,17 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 	ca := make([]float64, n)
 	for j := 0; j < n; j++ {
 		if len(shapes[j].Color) >= 3 {
-			cr[j] = float64(shapes[j].Color[0]) / 255
-			cg[j] = float64(shapes[j].Color[1]) / 255
-			cb[j] = float64(shapes[j].Color[2]) / 255
+			if rankFixOn {
+				// DecChan, not byte/255 — see shapeContributions: bytes are sRGB, the target is
+				// the working (linear) space, and mixing them deflated dark shapes' rank.
+				cr[j] = float64(model.DecChan(shapes[j].Color[0]))
+				cg[j] = float64(model.DecChan(shapes[j].Color[1]))
+				cb[j] = float64(model.DecChan(shapes[j].Color[2]))
+			} else {
+				cr[j] = float64(shapes[j].Color[0]) / 255
+				cg[j] = float64(shapes[j].Color[1]) / 255
+				cb[j] = float64(shapes[j].Color[2]) / 255
+			}
 		}
 		ca[j] = 1
 		if len(shapes[j].Color) >= 4 {
@@ -191,14 +236,34 @@ func shapeContributionsBlend(shapes []model.Shape, target, weight []float32, w, 
 
 		// Color beneath j: owner2, or the fallback (empty for cutouts, bg otherwise).
 		var rr, rg, rb float64
-		if o2 := owner2[idx]; o2 >= 1 {
-			rr, rg, rb = cr[o2], cg[o2], cb[o2]
-		} else if transparent {
+		if transparent {
 			rr, rg, rb = 0, 0, 0
 		} else {
 			rr, rg, rb = bgr, bgg, bgb
 		}
+		if o2 := owner2[idx]; o2 >= 1 {
+			if blendContribFix {
+				// owner2 does not replace what is under IT either: composite it over the
+				// fallback with its own effective alpha, so a faint layer under j is not
+				// credited as if it were opaque.
+				a2 := ca[o2]
+				if grad[o2] {
+					a2 *= raster.Coverage(kinds[o2], params[o2], idx%w, idx/w)
+				}
+				rr = a2*cr[o2] + (1-a2)*rr
+				rg = a2*cg[o2] + (1-a2)*rg
+				rb = a2*cb[o2] + (1-a2)*rb
+			} else {
+				rr, rg, rb = cr[o2], cg[o2], cb[o2]
+			}
+		}
 		a := ca[j]
+		if blendContribFix && grad[j] {
+			// A glow at alpha 255 still writes only its falloff. Pricing it at a flat alpha
+			// over the whole ellipse overstated what removing it would cost, so the ranking
+			// protected soft shapes that were barely contributing.
+			a *= raster.Coverage(kinds[j], params[j], idx%w, idx/w)
+		}
 		// Error with j present (alpha blend over the color beneath).
 		wr, wg, wb := a*cr[j]+(1-a)*rr, a*cg[j]+(1-a)*rg, a*cb[j]+(1-a)*rb
 		dr, dg, db := tr-wr, tg-wg, tb-wb
@@ -261,9 +326,7 @@ func backFit(be backend.Backend, env *greedyEnv, shapes []model.Shape, initCanva
 
 	// 2. Re-render the surviving residual into the backend; build the importance sampler.
 	_ = be.Reset(initCanvas)
-	for _, s := range kept[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, kept[1:])
 	grid, gw, gh, _ := be.ErrorGrid()
 	sampler := NewErrorSampler(grid, gw, gh, w, h)
 
@@ -286,9 +349,7 @@ func backFit(be backend.Backend, env *greedyEnv, shapes []model.Shape, initCanva
 	if !env.allowAlpha {
 		recolorVisible(kept, target, weight, w, h, recolorVarSkip)
 		_ = be.Reset(initCanvas)
-		for _, s := range kept[1:] {
-			_ = be.Apply(shapeToCandidate(s))
-		}
+		applyShapes(be, kept[1:])
 	}
 	g2, _, _, _ := be.ErrorGrid()
 	return kept, sumGrid(g2)
@@ -298,11 +359,27 @@ func backFit(be backend.Backend, env *greedyEnv, shapes []model.Shape, initCanva
 // error. Used as the no-op return path so backFit always leaves the backend in a defined state.
 func rerender(be backend.Backend, initCanvas []float32, shapes []model.Shape) float64 {
 	_ = be.Reset(initCanvas)
-	for _, s := range shapes[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, shapes[1:])
 	g, _, _, _ := be.ErrorGrid()
 	return sumGrid(g)
+}
+
+// applyShapes composites shapes onto the current canvas in order — batched into one submit per
+// chunk when the backend supports it. A full-stack rerender used to pay one fence per shape;
+// the profiler counted 12.9k apply fences in one default run, most of them these loops.
+func applyShapes(be backend.Backend, shapes []model.Shape) {
+	if ab, ok := be.(interface{ ApplyBatch([]model.Candidate) bool }); ok {
+		cands := make([]model.Candidate, len(shapes))
+		for i, s := range shapes {
+			cands[i] = shapeToCandidate(s)
+		}
+		if ab.ApplyBatch(cands) {
+			return
+		}
+	}
+	for _, s := range shapes {
+		_ = be.Apply(shapeToCandidate(s)) // per-shape fallback (old DLL without the export)
+	}
 }
 
 // runBackfitPasses runs up to opt.BackFitPasses gated back-fitting passes on `shapes` (each

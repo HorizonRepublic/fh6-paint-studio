@@ -58,6 +58,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   flutter::DartProject project(assets);
 
+  // Skia, explicitly. Flutter 3.47 turned Impeller-on-Vulkan on by default on
+  // Windows, and this app is its worst case: the engine service saturates the
+  // same GPU with Vulkan compute while the UI renders, and users on older
+  // cards reported extreme lag the moment 3.0.0 shipped on it (v2.2.0, built
+  // on 3.44/Skia, was fine). Revisit only with a deliberate A/B on weak
+  // hardware, not as a side effect of an SDK bump.
+  project.set_impeller_switch(flutter::ImpellerSwitch::Disabled);
+
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
 

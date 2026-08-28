@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"time"
@@ -139,6 +140,12 @@ type PolishOptions struct {
 	// once). nil for the normal greedy+polish (whose bar tracks placed shapes instead).
 	OnProgress func(iter, total int)
 
+	// Cancel mirrors Options.Cancel into the polish loops. Without it, Stop only worked during the
+	// greedy — the polish (and every LOO re-polish) ran its full budget while the UI already said
+	// "stopped", which is most of a run's wall time and reads as "the app kept my GPU busy".
+	// A cancelled polish keeps the best-hard params found so far, like an early-stop.
+	Cancel func() bool
+
 	// PreviewInterval throttles OnPreview's device->host render read. 0 -> 50ms (the short greedy-polish
 	// phase wants a smooth animation). The Gaussian mode trains for MINUTES, so each 50ms frame is a
 	// full-canvas D2H copy stealing training time — it sets this longer (a slower preview, faster run).
@@ -218,7 +225,9 @@ type PolishResult struct {
 // backend implements it; the wire layout mirrors the shim's fp_polish_* API exactly.
 type PolishAccel interface {
 	PolishSupported() bool // false if the loaded DLL predates the polish API (polish is then skipped)
-	PolishSetup(base []float32, n int)
+	// PolishSetup allocates the device state; a non-nil error means the device could not hold it
+	// (usually VRAM) and every later fp_polish_* call is a no-op — the caller must skip the pass.
+	PolishSetup(base []float32, n int) error
 	PolishSetSTE(on bool) // toggle straight-through (hard forward) on the device; no-op on DLLs predating the export (silently runs soft)
 	PolishUpload(P, col []float64, kinds, bbx []int32, boff []int64, belowTotal int64)
 	PolishForward(tau float64, bbxHost []int32)
@@ -245,7 +254,7 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	}
 	clampPolishTau(&opt)
 	if len(shapes) <= 1 {
-		return PolishResult{Shapes: shapes}
+		return PolishResult{Shapes: cloneShapes(shapes)} // CLONE: callers recolor the result in place, and aliasing the input let a gate-rejected recolor corrupt it
 	}
 	tCall := time.Now()
 	var tSetup, tPre, tMain, tFine time.Duration
@@ -272,7 +281,56 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		ps = append(ps, pshape{kind: k, P: P, col: c, optGeo: optimizableGeo(k)})
 	}
 	n := len(ps)
-	accel.PolishSetup(base, n)
+	// VRAM ladder. The polish commits ~1.5GB of device memory at 4Mpx (more with the perceptual
+	// term planes); on a card that cannot hold it the driver either fails the allocations (the
+	// pass used to die SILENTLY — zero losses, zero grads, unpolished output) or demotes them to
+	// system memory and crawls over PCIe. Ask the driver for the live budget first and degrade
+	// honestly: drop the FE/SSIM/EAGLE planes, then skip the pass with a clear message. On a card
+	// with room the numbers never trip and the path is byte-identical.
+	if ma, ok := accel.(interface {
+		MemInfo() (budget, usage, heap int64, ok bool)
+		PolishMemNeed(n int, belowTotal int64, terms int) int64
+	}); ok {
+		if budget, usage, heap, ok2 := ma.MemInfo(); ok2 && heap > 0 {
+			avail := budget - usage
+			if budget == 0 {
+				avail = heap * 17 / 20 // driver lacks VK_EXT_memory_budget: assume 85% of the heap
+			}
+			var belowEst int64
+			for i := range ps {
+				bb := expandedBBox(ps[i], w, h, opt.Tau0) // Tau0 = the widest bboxes of the anneal
+				if bw, bh := int64(bb[2]-bb[0]+1), int64(bb[3]-bb[1]+1); bw > 0 && bh > 0 {
+					belowEst += bw * bh
+				}
+			}
+			terms := 0
+			if opt.FalseEdgeLambda > 0 || opt.LostDetailLambda > 0 {
+				terms |= 1
+			}
+			if opt.SSIMLambda > 0 {
+				terms |= 2
+			}
+			if opt.EagleLambda > 0 {
+				terms |= 4
+			}
+			need := ma.PolishMemNeed(n, belowEst, terms)
+			if need > 0 && need > avail && terms != 0 {
+				if slim := ma.PolishMemNeed(n, belowEst, 0); slim <= avail {
+					applog.Printf("polish: low VRAM (needs ~%dMB with perceptual terms, ~%dMB free) — dropping FE/SSIM/EAGLE terms, polish continues", need>>20, avail>>20)
+					opt.FalseEdgeLambda, opt.LostDetailLambda, opt.SSIMLambda, opt.EagleLambda = 0, 0, 0, 0
+					need = slim
+				}
+			}
+			if need > 0 && need > avail {
+				applog.Printf("polish: SKIPPED — not enough free VRAM (needs ~%dMB, ~%dMB free). Close other GPU apps or lower the resolution; shapes ship unpolished.", need>>20, avail>>20)
+				return PolishResult{Shapes: cloneShapes(shapes)} // CLONE: callers recolor the result in place, and aliasing the input let a gate-rejected recolor corrupt it
+			}
+		}
+	}
+	if err := accel.PolishSetup(base, n); err != nil {
+		applog.Printf("polish: %v — skipping the pass, shapes ship unpolished", err)
+		return PolishResult{Shapes: cloneShapes(shapes)} // CLONE: callers recolor the result in place, and aliasing the input let a gate-rejected recolor corrupt it
+	}
 	accel.PolishSetSTE(opt.STE)
 	// OKLab steers ONLY the fine-exploit phase's gradient (toggled around its backward calls);
 	// the loss, hard loss and best-tracking stay on plain SSE — the gate's metric — so the
@@ -372,13 +430,18 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	// Best-hard render runs on the GPU (fp_polish_hard_loss) — the only per-pixel polish
 	// work that used to stay on the CPU. hardScratch is the CPU fallback for old DLLs.
 	// Baseline: d_pbbx already holds the opt.Tau0 params (uploaded above), so no re-upload.
-	hardScratch := make([]float32, w*h*4)
+	// Allocated LAZILY: on the shipped path (a DLL with fp_polish_hard_loss) this fallback never
+	// runs, and the eager make() was a canvas-sized zero-fill per polish call for nothing.
+	var hardScratch []float32
 	hardLoss := func(tau float64, reupload bool) float64 {
 		if reupload {
 			upload(tau, true) // ship the CURRENT (post-Adam) params at EXPORT precision
 		}
 		if hl, ok := accel.PolishHardLoss(hBBX); ok {
 			return hl
+		}
+		if hardScratch == nil {
+			hardScratch = make([]float32, w*h*4)
 		}
 		return polishHardLoss(ps, base, target, weight, hardScratch, w, h, false, true)
 	}
@@ -418,7 +481,24 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 			prevBuf = make([]float32, w*h*4)
 		}
 	}
+	// Device-loss watch: after a TDR/driver reset every device call is a no-op returning zeros,
+	// so without this the loop would burn the full iteration budget optimising against nothing.
+	// The same poll point carries the user's Stop (opt.Cancel) into the loops.
+	devLost, _ := accel.(interface{ DeviceLost() bool })
+	lostNow := func(every, it int) bool {
+		return devLost != nil && it%every == 0 && devLost.DeviceLost()
+	}
+	cancelled := func() bool { return opt.Cancel != nil && opt.Cancel() }
 	for it := 0; it < opt.Iters; it++ {
+		if cancelled() {
+			doneIters = it
+			break // Stop pressed: ship the best-hard point found so far, like an early-stop
+		}
+		if lostNow(16, it) {
+			applog.Printf("polish: GPU device lost mid-pass (driver reset/TDR) — stopping at iter %d, best params so far are kept", it)
+			doneIters = it
+			break
+		}
 		t := float64(it) / float64(maxInt(1, opt.Iters-1))
 		tau := opt.Tau0 * math.Pow(opt.Tau1/opt.Tau0, t)
 		last := it == opt.Iters-1
@@ -506,6 +586,15 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 	chunkBest := bestHard // best at the previous chunk boundary (adaptive-continuation gate)
 	fineDone := fineCap
 	for it := 0; it < fineCap; it++ {
+		if cancelled() {
+			fineDone = it
+			break
+		}
+		if lostNow(16, it) {
+			applog.Printf("polish: GPU device lost in the fine phase — stopping at iter %d", it)
+			fineDone = it
+			break
+		}
 		last := it == fineCap-1
 		tick(&tUpload, func() { upload(fineTau, false) })
 		tick(&tFwd, func() { accel.PolishForward(fineTau, hBBX); phaseSync(accel) })
@@ -569,6 +658,12 @@ func PolishWithBackend(shapes []model.Shape, target, weight []float32, w, h int,
 		}
 	}
 	tFine = time.Since(tFineStart)
+	// The pass is done: complete the progress counter explicitly. Both loops stop EARLY on
+	// plateaus, so the last in-loop report can be well short of the denominator — the ETA phase
+	// then sat at ~85-95% waiting for iterations that were never coming.
+	if opt.OnProgress != nil {
+		opt.OnProgress(doneIters+fineCap, doneIters+fineCap)
+	}
 	doneIters += fineDone
 	restoreParams(ps, bestP)
 	if polishPhaseTiming {
@@ -758,18 +853,44 @@ func adamStep(ps []pshape, opt PolishOptions, step int, w, h int, lrScale float6
 				}
 			}
 		}
+		// Reparameterisation (FH6_REPARAM=1). The descent is badly conditioned in the raw
+		// parameters: LRRad is a fixed 0.5 PIXELS per step, which is 12% of a 4px shape and
+		// 0.1% of a 400px one, so one budget cannot suit both — and alpha walks at a constant
+		// rate straight into its clamps. Optimising ln(r) makes the size step MULTIPLICATIVE and
+		// logit(alpha) makes it slow as it nears either end. The device gradient is untouched;
+		// the chain rule is applied here, so nothing about the backward pass changes.
+		radLog := reparamOn && s.optGeo && s.kind != model.KindTriangle
 		for k := 0; k < 10; k++ {
 			if k < 6 && !s.optGeo {
 				continue // fixed geometry for non-optimizable kinds
 			}
-			s.m[k] = b1*s.m[k] + (1-b1)*g[k]
-			s.v[k] = b2*s.v[k] + (1-b2)*g[k]*g[k]
+			gk, lrk := g[k], lr[k]
+			mode := 0 // 0 = raw, 1 = log-radius, 2 = logit-alpha
+			var logitA float64
+			if radLog && (k == 2 || k == 3) && s.P[k] > 0 {
+				gk *= s.P[k] // dL/d(ln r) = r * dL/dr
+				lrk = reparamLRRad
+				mode = 1
+			} else if reparamOn && k == 9 {
+				a := clampF64(s.col[3], 1e-4, 1-1e-4)
+				gk *= a * (1 - a) // dL/dz, with a = sigmoid(z)
+				lrk = reparamLRAlpha
+				logitA = math.Log(a / (1 - a))
+				mode = 2
+			}
+			s.m[k] = b1*s.m[k] + (1-b1)*gk
+			s.v[k] = b2*s.v[k] + (1-b2)*gk*gk
 			mh := s.m[k] / bc1
 			vh := s.v[k] / bc2
-			upd := warmup * lrScale * lr[k] * mh / (math.Sqrt(vh) + eps)
-			if k < 6 {
+			upd := warmup * lrScale * lrk * mh / (math.Sqrt(vh) + eps)
+			switch {
+			case mode == 1:
+				s.P[k] *= math.Exp(-upd)
+			case mode == 2:
+				s.col[3] = 1 / (1 + math.Exp(-(logitA - upd)))
+			case k < 6:
 				s.P[k] -= upd
-			} else {
+			default:
 				s.col[k-6] -= upd
 			}
 		}
@@ -825,6 +946,27 @@ func clampGeoParams(s *pshape, w, h int) {
 // analytic skew gradient on for A/B. Skew is redundant for the ellipse and the radial gradients (a
 // sheared ellipse is just another rotated ellipse), so ONLY the rectangle gets the new shape.
 var polishRectSkew = os.Getenv("FH6_SKEWDOF") == "1"
+
+// Polish reparameterisation, off by default (FH6_REPARAM=1). The two learning rates are in the
+// NEW units and cannot be the shipped ones: reparamLRRad is a FRACTION of the radius per step
+// (0.02 = 2%, which is what 0.5px means for the ~25px shapes a 1000-shape fit is made of), and
+// reparamLRAlpha is in logit units, where the 0.25 slope at alpha=0.5 turns 0.04 back into the
+// shipped 0.01. FH6_REPARAM_R / FH6_REPARAM_A override them for the sweep.
+var (
+	reparamOn      = os.Getenv("FH6_REPARAM") == "1"
+	reparamLRRad   = envFloat("FH6_REPARAM_R", 0.02)
+	reparamLRAlpha = envFloat("FH6_REPARAM_A", 0.04)
+)
+
+func envFloat(key string, def float64) float64 {
+	if s := os.Getenv(key); s != "" {
+		var v float64
+		if n, err := fmt.Sscanf(s, "%f", &v); n == 1 && err == nil && v > 0 {
+			return v
+		}
+	}
+	return def
+}
 
 const rectSkewMax = 2.0
 

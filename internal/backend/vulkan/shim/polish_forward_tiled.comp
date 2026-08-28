@@ -1,5 +1,12 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 #extension GL_GOOGLE_include_directive : require
 // polish_forward_tiled.comp — TILED soft (or STE-hard) forward. One thread per PIXEL;
 // each pixel walks ALL shapes in order keeping a local running composite, snapshotting the
@@ -9,7 +16,7 @@
 
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly  buffer Pb { float Pbuf[]; };
-layout(std430, binding = 1) readonly  buffer Cb { double Cbuf[]; };
+layout(std430, binding = 1) readonly  buffer Cb { float Cbuf[]; };
 layout(std430, binding = 2) readonly  buffer Kb { int    Kbuf[]; };
 layout(std430, binding = 3) writeonly buffer Rb { float  render[]; };
 layout(std430, binding = 4) writeonly buffer Bb { float  belowb[]; };
@@ -20,12 +27,15 @@ layout(std430, binding = 8) readonly  buffer Tb { int    tileOff[]; };  // binni
 layout(std430, binding = 9) readonly  buffer Lb { int    tileList[]; }; // binning: shape indices, ascending
 layout(std430, binding = 10) readonly buffer MA { float maskAtlas[]; };
 layout(std430, binding = 11) readonly buffer MM { int   maskMeta[]; };
-layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; } pc;
+// first = pixel index of thread 0. The host splits this dispatch across submits so no single one
+// approaches the ~2s Windows TDR watchdog (and so a 4096x4096 fit stays under the 65535 workgroup
+// limit, which it crosses on its own). Threads are independent, so the split changes nothing.
+layout(push_constant) uniform PC { int n, w, h, ste; float tau; int tilesX, tile, binned; int slices, first; } pc;
 #include "mask_common.glsl"
 #include "polish_common.glsl"
 
 void main() {
-    int idx = int(gl_GlobalInvocationID.x);
+    int idx = int(gl_GlobalInvocationID.x) + pc.first;
     if (idx >= pc.w * pc.h) return;
     int x = idx % pc.w, y = idx / pc.w, p = idx * 4;
     float ar = base[p], ag = base[p + 1], ab = base[p + 2], aa = base[p + 3];
@@ -44,15 +54,16 @@ void main() {
         if (isGradKind(kind)) {
             cov = gradCovAny(kind, P, x, y);
         } else if (optGeoKind(kind)) {
-            float g[6];
-            float sdf = sdfGradKind(kind, P, float(x) + 0.5, float(y) + 0.5, g);
+            // Value-only SDF: the gradient twin builds dynamically indexed arrays this pass never
+            // reads and the compiler cannot reliably eliminate. Bit-identical value.
+            float sdf = sdfOnlyKind(kind, P, float(x) + 0.5, float(y) + 0.5);
             cov = (pc.ste != 0) ? (sdf <= 0.0 ? 1.0 : 0.0) : sigmoidCov(sdf, pc.tau);
         } else {
             cov = insideShape(kind, P, x, y) ? 1.0 : 0.0;
         }
         if (cov > 0.0) {
-            float A = float(Cbuf[si * 4 + 3]), a = A * cov, ia = 1.0 - a;
-            float R = float(Cbuf[si * 4 + 0]), G = float(Cbuf[si * 4 + 1]), B = float(Cbuf[si * 4 + 2]);
+            float A = Cbuf[si * 4 + 3], a = A * cov, ia = 1.0 - a;
+            float R = Cbuf[si * 4 + 0], G = Cbuf[si * 4 + 1], B = Cbuf[si * 4 + 2];
             ar = ar * ia + R * a; ag = ag * ia + G * a; ab = ab * ia + B * a; aa = aa * ia + a;
         }
     }

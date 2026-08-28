@@ -131,9 +131,7 @@ func (r *run) lockColors() {
 		}
 	}
 	_ = r.be.Reset(r.initCanvas)
-	for _, s := range r.shapes[1:] {
-		_ = r.be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(r.be, r.shapes[1:])
 	r.grid, _, _, _ = r.be.ErrorGrid()
 	r.finalErr = sumGrid(r.grid)
 }

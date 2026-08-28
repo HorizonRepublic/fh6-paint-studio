@@ -73,8 +73,12 @@ type Geometry struct {
 
 // F2B converts a 0..1 channel value to a clamped 0..255 byte.
 func F2B(v float32) int {
-	if v < 0 {
-		v = 0
+	// !(v > 0) rather than v < 0: NaN fails EVERY comparison, so both clamps used to pass it
+	// through and int(math.Round(NaN)) is -9223372036854775808. That went into Shape.Color, into
+	// the .forza.json, and on to the injector — a silent wrong value where the preview path only
+	// panicked. A NaN channel is already lost; encode it as 0.
+	if !(v > 0) {
+		return 0
 	}
 	if v > 1 {
 		v = 1
@@ -110,15 +114,23 @@ func (c Candidate) ToShape(score float64) Shape {
 		return Shape{Type: TypeLine, Color: col, Score: score,
 			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), float64(c.P[4])}}
 	case KindGlow:
-		return Shape{Type: TypeGradGlow, Color: col, Score: score,
-			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
+		return Shape{Type: TypeGradGlow, Color: col, Score: score, Data: radialData(c.P)}
 	case KindDisk:
-		return Shape{Type: TypeGradDisk, Color: col, Score: score,
-			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
+		return Shape{Type: TypeGradDisk, Color: col, Score: score, Data: radialData(c.P)}
 	default:
-		return Shape{Type: TypeRotatedEllipse, Color: col, Score: score,
-			Data: []float64{float64(c.P[0]), float64(c.P[1]), float64(c.P[2]), float64(c.P[3]), normAngle(c.P[4])}}
+		return Shape{Type: TypeRotatedEllipse, Color: col, Score: score, Data: radialData(c.P)}
 	}
+}
+
+// radialData is the ellipse-footprint wire form. The optional 6th field is the skew the editor's
+// grip can set — the raster and the injector both honour it, so dropping it here silently
+// unsheared any edited radial/ellipse shape on the next round trip. skew==0 stays 5 fields.
+func radialData(P [6]float32) []float64 {
+	data := []float64{float64(P[0]), float64(P[1]), float64(P[2]), float64(P[3]), normAngle(P[4])}
+	if P[5] != 0 {
+		data = append(data, float64(P[5]))
+	}
+	return data
 }
 
 // normAngle rounds degrees to 0.01° into [0,360) (collapsing IEEE-754 -0 to +0). Sub-degree

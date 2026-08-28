@@ -2,8 +2,6 @@ package metric
 
 import (
 	"math"
-
-	"fh6-paint-studio/internal/model"
 )
 
 // GradientStats summarizes how much of an image is SMOOTH SHADING (gradients/ramps) versus flat
@@ -31,10 +29,14 @@ func RampMap(target []float32, w, h int) []float32 {
 		slopeLo = 0.004 // luma slope below this = flat fill (no ramp)
 		slopeHi = 0.030 // slope at/above this = full ramp strength (steeper = a hard edge, capped)
 	)
+	// Three math.Pow per pixel, once per run, on one core. Per-pixel independent, so a row-band
+	// split reproduces the serial values exactly.
 	luma := make([]float32, w*h)
-	for i := 0; i < w*h; i++ {
-		luma[i] = 0.2126*model.LinearToSRGB(target[i*4+0]) + 0.7152*model.LinearToSRGB(target[i*4+1]) + 0.0722*model.LinearToSRGB(target[i*4+2])
-	}
+	heRows(h, func(y0, y1 int) {
+		for i := y0 * w; i < y1*w; i++ {
+			luma[i] = 0.2126*encSRGB(target[i*4+0]) + 0.7152*encSRGB(target[i*4+1]) + 0.0722*encSRGB(target[i*4+2])
+		}
+	})
 	at := func(x, y int) float64 {
 		if x < 0 {
 			x = 0
@@ -52,16 +54,18 @@ func RampMap(target []float32, w, h int) []float32 {
 	cHard := make([]float64, cw*ch)
 	cSlope := make([]float64, cw*ch)
 	cN := make([]float64, cw*ch)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			ci := (y/cell)*cw + x/cell
-			cN[ci]++
-			cHard[ci] += float64(hard[y*w+x])
-			gx := (at(x+1, y) - at(x-1, y)) * 0.5
-			gy := (at(x, y+1) - at(x, y-1)) * 0.5
-			cSlope[ci] += math.Hypot(gx, gy)
+	cellRows(h, cell, func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := 0; x < w; x++ {
+				ci := (y/cell)*cw + x/cell
+				cN[ci]++
+				cHard[ci] += float64(hard[y*w+x])
+				gx := (at(x+1, y) - at(x-1, y)) * 0.5
+				gy := (at(x, y+1) - at(x, y-1)) * 0.5
+				cSlope[ci] += math.Hypot(gx, gy)
+			}
 		}
-	}
+	})
 	cell01 := make([]float64, cw*ch)
 	for ci := range cN {
 		if cN[ci] <= 0 {
@@ -151,12 +155,14 @@ func GradientFraction(target []float32, w, h int) GradientStats {
 	)
 	// Per-pixel luma slope (central difference on sRGB luma) and opacity.
 	luma := make([]float32, w*h)
-	for i := 0; i < w*h; i++ {
-		r := model.LinearToSRGB(target[i*4+0])
-		g := model.LinearToSRGB(target[i*4+1])
-		b := model.LinearToSRGB(target[i*4+2])
-		luma[i] = 0.2126*r + 0.7152*g + 0.0722*b
-	}
+	heRows(h, func(y0, y1 int) {
+		for i := y0 * w; i < y1*w; i++ {
+			r := encSRGB(target[i*4+0])
+			g := encSRGB(target[i*4+1])
+			b := encSRGB(target[i*4+2])
+			luma[i] = 0.2126*r + 0.7152*g + 0.0722*b
+		}
+	})
 	at := func(x, y int) float64 {
 		if x < 0 {
 			x = 0
@@ -175,19 +181,21 @@ func GradientFraction(target []float32, w, h int) GradientStats {
 	cSlope := make([]float64, cw*ch)
 	cOpaque := make([]float64, cw*ch)
 	cN := make([]float64, cw*ch)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			ci := (y/cell)*cw + x/cell
-			cN[ci]++
-			cHard[ci] += float64(hard[y*w+x])
-			if target[(y*w+x)*4+3] >= 0.5 {
-				cOpaque[ci]++
+	cellRows(h, cell, func(y0, y1 int) {
+		for y := y0; y < y1; y++ {
+			for x := 0; x < w; x++ {
+				ci := (y/cell)*cw + x/cell
+				cN[ci]++
+				cHard[ci] += float64(hard[y*w+x])
+				if target[(y*w+x)*4+3] >= 0.5 {
+					cOpaque[ci]++
+				}
+				gx := (at(x+1, y) - at(x-1, y)) * 0.5
+				gy := (at(x, y+1) - at(x, y-1)) * 0.5
+				cSlope[ci] += math.Hypot(gx, gy)
 			}
-			gx := (at(x+1, y) - at(x-1, y)) * 0.5
-			gy := (at(x, y+1) - at(x, y-1)) * 0.5
-			cSlope[ci] += math.Hypot(gx, gy)
 		}
-	}
+	})
 	var smooth, ramp, flat, hardC, opaqueCells float64
 	for ci := range cN {
 		if cN[ci] <= 0 || cOpaque[ci] < 0.5*cN[ci] {

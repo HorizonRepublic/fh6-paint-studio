@@ -1,0 +1,85 @@
+#version 450
+// mutate.comp — one hill-climb round's mutation batch, generated ON DEVICE from the incumbent
+// in best[12]. Mirrors engine.MutateShape (same jitter shape per kind, same clamps) and the
+// clampCandidatesToCanvas extents shrink, so the device rounds explore the same neighbourhood
+// the host rounds did; the RNG stream differs (wanghash vs math/rand), which is why this path
+// is validated by paired end-to-end quality, not golden-diff. Masks are handled on the host —
+// the engine falls back before calling this for a mask incumbent.
+
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer Sc { float scand[]; };
+layout(std430, binding = 1) readonly  buffer Bt { float best[]; };
+layout(push_constant) uniform PC {
+    uint seedLo, seedHi;
+    int n, W, H, allowAlpha;
+    float moveStep, radiusStep, alphaMin, canvasPad;
+} pc;
+
+uint wanghash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float uf(uint i, inout uint ctr) {
+    uint a = pc.seedLo ^ 0x9e3779b9u, b = pc.seedHi;
+    ctr += 1u;
+    uint h = wanghash(a + wanghash(i + 0x85ebca6bu) + wanghash((b ^ ctr) * 0xc2b2ae35u));
+    return float(h >> 8) * (1.0 / 16777216.0);
+}
+float clampf2(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+float rr(uint i, inout uint ctr, float lo, float hi) { return lo + uf(i, ctr) * (hi - lo); }
+
+// Same extents shrink as gen.comp: keep the rotated bbox within [-pad, W+pad] x [-pad, H+pad].
+void clampExtents(float cx, float cy, inout float a, inout float b, float thetaDeg, float W, float H, float pad) {
+    float th = thetaDeg * 0.017453292519943295;
+    float cs = cos(th), sn = sin(th);
+    float hx = length(vec2(a * cs, b * sn));
+    float hy = length(vec2(a * sn, b * cs));
+    float allowX = max(1.0, min(cx, W - cx) + pad);
+    float allowY = max(1.0, min(cy, H - cy) + pad);
+    float scale = 1.0;
+    if (hx > allowX) scale = min(scale, allowX / hx);
+    if (hy > allowY) scale = min(scale, allowY / hy);
+    if (scale < 1.0) { a *= scale; b *= scale; }
+}
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    if (i >= pc.n) return;
+    uint ctr = 0u;
+    uint id = uint(i);
+
+    int kind = int(best[1] + 0.5);
+    float P[6];
+    for (int j = 0; j < 6; j++) P[j] = best[2 + j];
+    float W = float(pc.W), H = float(pc.H);
+    float ms = pc.moveStep, rs = pc.radiusStep;
+
+    if (kind == 2) { // triangle: jitter each vertex
+        for (int j = 0; j < 6; j += 2) {
+            P[j]     = clampf2(P[j]     + rr(id, ctr, -ms, ms), 0.0, W - 1.0);
+            P[j + 1] = clampf2(P[j + 1] + rr(id, ctr, -ms, ms), 0.0, H - 1.0);
+        }
+    } else if (kind == 3) { // line: endpoints + half-width
+        P[0] = clampf2(P[0] + rr(id, ctr, -ms, ms), 0.0, W - 1.0);
+        P[1] = clampf2(P[1] + rr(id, ctr, -ms, ms), 0.0, H - 1.0);
+        P[2] = clampf2(P[2] + rr(id, ctr, -ms, ms), 0.0, W - 1.0);
+        P[3] = clampf2(P[3] + rr(id, ctr, -ms, ms), 0.0, H - 1.0);
+        P[4] = max(1.0, P[4] + rr(id, ctr, -rs, rs));
+    } else { // ellipse / rectangle / glow / disk: centre + extents + rotation (skew kept)
+        P[0] = clampf2(P[0] + rr(id, ctr, -ms, ms), 0.0, W - 1.0);
+        P[1] = clampf2(P[1] + rr(id, ctr, -ms, ms), 0.0, H - 1.0);
+        P[2] = max(1.0, P[2] + rr(id, ctr, -rs, rs));
+        P[3] = max(1.0, P[3] + rr(id, ctr, -rs, rs));
+        P[4] += rr(id, ctr, -30.0, 30.0);
+        if (pc.canvasPad > 0.0) {
+            float pad = pc.canvasPad * min(W, H);
+            clampExtents(P[0], P[1], P[2], P[3], P[4], W, H, pad);
+        }
+    }
+
+    float alpha = best[11];
+    if (pc.allowAlpha != 0) alpha = clampf2(alpha + rr(id, ctr, -0.1, 0.1), pc.alphaMin, 1.0);
+
+    int b = i * 11;
+    scand[b + 0] = float(kind);
+    for (int j = 0; j < 6; j++) scand[b + 1 + j] = P[j];
+    scand[b + 7] = best[8]; scand[b + 8] = best[9]; scand[b + 9] = best[10];
+    scand[b + 10] = alpha;
+}

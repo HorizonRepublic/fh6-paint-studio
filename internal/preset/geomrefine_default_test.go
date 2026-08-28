@@ -11,6 +11,10 @@ import "testing"
 // local refine finds almost nothing and the whole pass rolls back. It never made flat worse; it just
 // costs 5% of the wall for a win on a minority of images.
 func TestGeomRefineDefaults(t *testing.T) {
+	// The pin is the only way to A/B the pass from the studio, so it gets exported for whole
+	// sessions — and this test asserts the DEFAULT. Clear it, or the documented way to run the
+	// control arm fails the suite.
+	t.Setenv("FH6_GEOMREFINE", "")
 	for _, tc := range []struct {
 		mode string
 		want bool

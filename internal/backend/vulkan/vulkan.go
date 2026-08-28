@@ -16,10 +16,12 @@ package vulkan
 import (
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
 
+	"fh6-paint-studio/internal/applog"
 	"fh6-paint-studio/internal/backend"
 	"fh6-paint-studio/internal/maskbank"
 	"fh6-paint-studio/internal/model"
@@ -57,6 +59,8 @@ type Vulkan struct {
 	searchKF  []float32
 	searchOut []float32
 
+	survScratch []float32 // batch placement: the survivor pool read back per search
+
 	masksOn       bool // word atlas uploaded — bank words score/composite/polish on device
 	dll           *syscall.DLL
 	procEval      *syscall.Proc
@@ -70,6 +74,11 @@ type Vulkan struct {
 	// on-device search
 	procSearchRand *syscall.Proc
 	procSearchMom  *syscall.Proc
+	procSearchMut  *syscall.Proc
+	procSetCoarse  *syscall.Proc
+	procSetBatch   *syscall.Proc
+	procRefine     *syscall.Proc
+	procSurvivors  *syscall.Proc
 	procSetOrient  *syscall.Proc
 	procSetCoh     *syscall.Proc
 	procSetBound   *syscall.Proc
@@ -78,6 +87,8 @@ type Vulkan struct {
 	procSetProp, procPropOn, procPropGate, procRunProp, procPropMap, procPropDims,
 	procPolSetup, procPolSTE, procPolOKLab, procPolFE, procPolLD, procPolSSIM, procPolEagle, procTermW, procKindGate, procGlowSwap, procRampGlow, procBigGlow, procAlphaGrid, procPolUpload, procPolFwd, procPolLoss, procPolBwd,
 	procPolRdGrad, procPolRdRender, procPolHard, procPolSync, procPolFree *syscall.Proc
+	// device health + VRAM budget (optional exports; nil on older DLLs)
+	procDevLost, procMemInfo, procPolMemNeed, procProfDump, procApplyBatch *syscall.Proc
 }
 
 var _ backend.Backend = (*Vulkan)(nil)
@@ -88,6 +99,13 @@ var _ backend.Backend = (*Vulkan)(nil)
 func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	if gridSize < 1 {
 		gridSize = 1
+	}
+	if gridSize > 255 {
+		// grid.comp runs one workgroup per CELL, and 256 a side is 65536 — one past the
+		// guaranteed 1-D dispatch ceiling Intel enforces exactly. The shipped resolutions are
+		// 48-160; -grid is an expert knob, and the DLL clamps to the same value, so the two must
+		// agree or ErrorGrid reads a tail the device never wrote.
+		gridSize = 255
 	}
 	if weight == nil {
 		weight = make([]float32, w*h)
@@ -135,6 +153,11 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		procPolSync:     proc("fp_polish_sync"),
 		procPolFree:     proc("fp_polish_free"),
 	}
+	g.procSearchMut, _ = dll.FindProc("fp_search_mutate")     // optional: on-device hill climb (host rounds when absent)
+	g.procSetCoarse, _ = dll.FindProc("fp_set_coarse")        // optional: coarse-to-fine search filter
+	g.procSetBatch, _ = dll.FindProc("fp_set_batch")          // optional: batch placement survivor export
+	g.procRefine, _ = dll.FindProc("fp_refine")               // optional: on-device local geometry refine
+	g.procSurvivors, _ = dll.FindProc("fp_search_survivors")  // optional: ditto
 	g.procPolOKLab, _ = dll.FindProc("fp_set_polish_oklab")   // optional: older DLLs lack it (engine falls back to SSE)
 	g.procPolFE, _ = dll.FindProc("fp_set_polish_false_edge") // optional: false-edge additive polish term
 	g.procPolLD, _ = dll.FindProc("fp_set_polish_lostdetail") // optional: lost-detail additive polish term
@@ -154,6 +177,11 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 	g.procRunProp, _ = dll.FindProc("fp_run_proposer")        // optional: refresh the proposal map
 	g.procPropMap, _ = dll.FindProc("fp_proposer_map")        // test-only: read the map back
 	g.procPropDims, _ = dll.FindProc("fp_proposer_dims")      // test-only: map dimensions
+	g.procDevLost, _ = dll.FindProc("fp_device_lost")         // optional: sticky TDR/device-loss flag
+	g.procMemInfo, _ = dll.FindProc("fp_mem_info")            // optional: device-local heap budget/usage
+	g.procPolMemNeed, _ = dll.FindProc("fp_polish_mem_need")  // optional: polish VRAM estimate
+	g.procProfDump, _ = dll.FindProc("fp_prof_dump")          // optional: FH6VK_PROF GPU profile table
+	g.procApplyBatch, _ = dll.FindProc("fp_apply_batch")      // optional: one-fence stack rerender
 	if err != nil {
 		g.Close()
 		return nil, fmt.Errorf("resolve fh6vk.dll exports: %w", err)
@@ -163,11 +191,14 @@ func New(target, weight []float32, w, h, gridSize int) (*Vulkan, error) {
 		g.Close()
 		return nil, fmt.Errorf("resolve fp_init: %w", perr)
 	}
-	ret, _, _ := procInit.Call(fptr(g.target), fptr(g.weight), uintptr(w), uintptr(h), uintptr(maxCands), uintptr(gridSize))
+	ret, _, _ := procInit.Call(uintptr(unsafe.Pointer(&g.target[0])), uintptr(unsafe.Pointer(&g.weight[0])), uintptr(w), uintptr(h), uintptr(maxCands), uintptr(gridSize))
 	runtime.KeepAlive(g.target)
 	runtime.KeepAlive(g.weight)
 	if ret != 0 {
 		g.Close()
+		if ret == 1061 {
+			return nil, fmt.Errorf("this GPU cannot dispatch a %dx%d canvas (device workgroup ceiling) — lower the generation resolution", w, h)
+		}
 		return nil, fmt.Errorf("fp_init failed (code %d) — check GPU/Vulkan driver", ret)
 	}
 	g.uploadMasks()
@@ -251,13 +282,6 @@ func (g *Vulkan) ProposerMap() ([]float32, [4]int32, bool) {
 	return out, dims, int(r) == n
 }
 
-func fptr(s []float32) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
-
 func (g *Vulkan) Evaluate(cands []model.Candidate) ([]backend.EvalResult, error) {
 	n := len(cands)
 	out := make([]backend.EvalResult, n)
@@ -292,7 +316,7 @@ func (g *Vulkan) evalChunk(cands []model.Candidate, out []backend.EvalResult) {
 		g.outBuf = make([]float32, n*resStride)
 	}
 	g.outBuf = g.outBuf[:n*resStride]
-	g.procEval.Call(fptr(g.candBuf), uintptr(n), fptr(g.outBuf))
+	g.procEval.Call(uintptr(unsafe.Pointer(&g.candBuf[0])), uintptr(n), uintptr(unsafe.Pointer(&g.outBuf[0])))
 	runtime.KeepAlive(g.candBuf)
 	runtime.KeepAlive(g.outBuf)
 	for i := 0; i < n; i++ {
@@ -316,16 +340,40 @@ func (g *Vulkan) Apply(c model.Candidate) error {
 	}
 	buf := g.candBuf[:candStride]
 	packCand(c, buf)
-	g.procApply.Call(fptr(buf))
+	g.procApply.Call(uintptr(unsafe.Pointer(&buf[0])))
 	runtime.KeepAlive(buf)
 	return nil
+}
+
+// ApplyBatch composites the candidates in order with one device fence per chunk instead of one
+// per shape (a full-stack rerender used to be ~1000 fenced submits). Identical dispatches and
+// ordering — the engine treats it as a drop-in for an Apply loop. false = DLL predates the export.
+func (g *Vulkan) ApplyBatch(cands []model.Candidate) bool {
+	if g.procApplyBatch == nil {
+		return false
+	}
+	if len(cands) == 0 {
+		return true
+	}
+	// Same reused staging as Apply/Evaluate — this runs per batch, not per run.
+	need := len(cands) * candStride
+	if cap(g.candBuf) < need {
+		g.candBuf = make([]float32, need)
+	}
+	buf := g.candBuf[:need]
+	for i, c := range cands {
+		packCand(c, buf[i*candStride:(i+1)*candStride])
+	}
+	g.procApplyBatch.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(cands)))
+	runtime.KeepAlive(buf)
+	return true
 }
 
 // ErrorGrid computes the gridSize×gridSize weighted-SSE error grid on the device
 // (grid.comp), reading back only the gw*gh cell values. Mirrors cpu.ErrorGrid.
 func (g *Vulkan) ErrorGrid() ([]float32, int, int, error) {
 	grid := make([]float32, g.gridSize*g.gridSize)
-	g.procGrid.Call(fptr(grid))
+	g.procGrid.Call(uintptr(unsafe.Pointer(&grid[0])))
 	runtime.KeepAlive(grid)
 	return grid, g.gridSize, g.gridSize, nil
 }
@@ -334,7 +382,7 @@ func (g *Vulkan) ReadCanvas(dst []float32) error {
 	if need := g.w * g.h * 4; len(dst) < need {
 		return fmt.Errorf("vulkan ReadCanvas: dst len %d < %d", len(dst), need)
 	}
-	g.procReadCanv.Call(fptr(dst))
+	g.procReadCanv.Call(uintptr(unsafe.Pointer(&dst[0])))
 	runtime.KeepAlive(dst)
 	return nil
 }
@@ -343,7 +391,7 @@ func (g *Vulkan) Reset(canvas []float32) error {
 	if need := g.w * g.h * 4; len(canvas) < need {
 		return fmt.Errorf("vulkan Reset: canvas len %d < %d", len(canvas), need)
 	}
-	g.procReset.Call(fptr(canvas))
+	g.procReset.Call(uintptr(unsafe.Pointer(&canvas[0])))
 	runtime.KeepAlive(canvas)
 	return nil
 }
@@ -360,6 +408,11 @@ func (g *Vulkan) SetSampleBudget(n int) {
 }
 
 func (g *Vulkan) Close() error {
+	// FH6VK_PROF=1: dump the per-scope GPU profile before the state is freed. One applog line per
+	// run — real per-phase GPU seconds + submit counts, the transparency wall-clock can't give.
+	if s := g.ProfDump(); s != "" {
+		applog.Printf("%s", s)
+	}
 	if g.procFree != nil {
 		g.procFree.Call()
 	}
@@ -368,6 +421,24 @@ func (g *Vulkan) Close() error {
 		g.dll = nil
 	}
 	return nil
+}
+
+// ProfDump returns the shim's built-in GPU profiler table, or "" when FH6VK_PROF is off or the
+// DLL predates the export. Counters cover everything since this backend's fp_init.
+func (g *Vulkan) ProfDump() string {
+	if g.procProfDump == nil {
+		return ""
+	}
+	buf := make([]byte, 4096)
+	n, _, _ := g.procProfDump.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	runtime.KeepAlive(buf)
+	if n == 0 {
+		return ""
+	}
+	if int(n) > len(buf) {
+		n = uintptr(len(buf) - 1)
+	}
+	return string(buf[:n])
 }
 
 // --- joint-polish device primitives (mirror internal/engine/polish.go's heavy steps) ---
@@ -380,9 +451,61 @@ func (g *Vulkan) PolishSupported() bool {
 		g.procPolLoss != nil && g.procPolBwd != nil && g.procPolRdGrad != nil && g.procPolFree != nil
 }
 
-func (g *Vulkan) PolishSetup(base []float32, n int) {
-	g.procPolSetup.Call(fptr(base), uintptr(n))
+func (g *Vulkan) PolishSetup(base []float32, n int) error {
+	// Drain any STALE one-shot error first (the term setters record allocation failures nobody
+	// reads) — otherwise a leftover code from an earlier call falsely fails THIS setup, and a
+	// succeeded-on-device setup gets abandoned by the engine (state leaks until the next setup).
+	if g.procLastError != nil {
+		if e, _, _ := g.procLastError.Call(); e != 0 {
+			applog.Printf("vulkan: draining stale device error %d before polish setup", e)
+		}
+	}
+	g.procPolSetup.Call(uintptr(unsafe.Pointer(&base[0])), uintptr(n))
 	runtime.KeepAlive(base)
+	// The shim tears its polish state down on ANY allocation failure and every later fp_polish_*
+	// call becomes a no-op — without this check the engine would run the whole Adam loop against
+	// zeros and silently ship unpolished shapes (the "polish did nothing" failure on 4GB cards).
+	if g.procLastError != nil {
+		if e, _, _ := g.procLastError.Call(); e != 0 {
+			return fmt.Errorf("polish setup failed on the device (code %d — usually out of VRAM)", e)
+		}
+	}
+	return nil
+}
+
+// DeviceLost reports the shim's STICKY device-loss flag: true after any submit/fence failure
+// (TDR, driver reset, OOM-killed context). Unlike fp_last_error it is never consumed, so the
+// engine can poll it from its long loops and abort with an honest message. Old DLLs: false.
+func (g *Vulkan) DeviceLost() bool {
+	if g.procDevLost == nil {
+		return false
+	}
+	r, _, _ := g.procDevLost.Call()
+	return r != 0
+}
+
+// MemInfo returns the device-local heap's live budget/usage (VK_EXT_memory_budget) and total
+// size in bytes. budget/usage are 0 when the driver lacks the extension — callers then fall
+// back to a fraction of heap. ok=false means the DLL predates the export entirely.
+func (g *Vulkan) MemInfo() (budget, usage, heap int64, ok bool) {
+	if g.procMemInfo == nil {
+		return 0, 0, 0, false
+	}
+	var out [3]int64
+	g.procMemInfo.Call(uintptr(unsafe.Pointer(&out[0])))
+	return out[0], out[1], out[2], true
+}
+
+// PolishMemNeed estimates the device-local bytes the polish would allocate for n shapes with
+// belowTotal snapshot pixels and the given term bitmask (1=FE/LD, 2=SSIM, 4=EAGLE). The
+// formula lives in the shim next to the actual allocations (single source of truth). 0 = old DLL.
+func (g *Vulkan) PolishMemNeed(n int, belowTotal int64, terms int) int64 {
+	if g.procPolMemNeed == nil {
+		return 0
+	}
+	var out int64
+	g.procPolMemNeed.Call(uintptr(n), uintptr(belowTotal), uintptr(terms), uintptr(unsafe.Pointer(&out)))
+	return out
 }
 
 func (g *Vulkan) PolishSetSTE(on bool) {
@@ -473,7 +596,7 @@ func (g *Vulkan) SetKindGate(hard []float32) bool {
 	if len(hard) != g.w*g.h {
 		return false
 	}
-	g.procKindGate.Call(fptr(hard))
+	g.procKindGate.Call(uintptr(unsafe.Pointer(&hard[0])))
 	runtime.KeepAlive(hard)
 	return true
 }
@@ -500,7 +623,7 @@ func (g *Vulkan) uploadMasks() {
 		atlas = append(atlas, e.Cov...)
 	}
 	ret, _, _ := g.procSetMasks.Call(
-		fptr(atlas), uintptr(len(atlas)),
+		uintptr(unsafe.Pointer(&atlas[0])), uintptr(len(atlas)),
 		uintptr(unsafe.Pointer(&meta[0])), uintptr(len(bank)),
 	)
 	runtime.KeepAlive(atlas)
@@ -532,7 +655,7 @@ func (g *Vulkan) SetGlowSwap(tau, prob float32) bool {
 		return false
 	}
 	tp := [2]float32{tau, prob}
-	g.procGlowSwap.Call(fptr(tp[:]))
+	g.procGlowSwap.Call(uintptr(unsafe.Pointer(&tp[0])))
 	runtime.KeepAlive(tp[:])
 	return true
 }
@@ -553,7 +676,7 @@ func (g *Vulkan) SetRampGlow(ramp []float32, thresh, tau, prob float32) bool {
 		return false
 	}
 	p := [3]float32{thresh, tau, prob}
-	g.procRampGlow.Call(fptr(ramp), fptr(p[:]))
+	g.procRampGlow.Call(uintptr(unsafe.Pointer(&ramp[0])), uintptr(unsafe.Pointer(&p[0])))
 	runtime.KeepAlive(ramp)
 	runtime.KeepAlive(p[:])
 	return true
@@ -570,7 +693,7 @@ func (g *Vulkan) SetBigGlow(tau, prob float32, allKinds bool, kind int32) bool {
 	if allKinds {
 		p[2] = 1
 	}
-	g.procBigGlow.Call(fptr(p[:]))
+	g.procBigGlow.Call(uintptr(unsafe.Pointer(&p[0])))
 	runtime.KeepAlive(p[:])
 	return true
 }
@@ -586,7 +709,7 @@ func (g *Vulkan) SetAlphaGrid(vals []float32) error {
 		g.procAlphaGrid.Call(0, 0)
 		return nil
 	}
-	g.procAlphaGrid.Call(fptr(vals), uintptr(len(vals)))
+	g.procAlphaGrid.Call(uintptr(unsafe.Pointer(&vals[0])), uintptr(len(vals)))
 	runtime.KeepAlive(vals)
 	return nil
 }
@@ -598,7 +721,12 @@ func (g *Vulkan) PolishSync() {
 }
 
 func (g *Vulkan) PolishUpload(P, col []float64, kinds, bbx []int32, boff []int64, belowTotal int64) {
-	g.procPolUpload.Call(f64ptr(P), f64ptr(col), i32ptr(kinds), i32ptr(bbx), i64ptr(boff), uintptr(belowTotal))
+	if len(P) == 0 || len(col) == 0 || len(kinds) == 0 || len(bbx) == 0 || len(boff) == 0 {
+		return // a zero-shape upload has nothing to point at; the shim would read a null anyway
+	}
+	g.procPolUpload.Call(uintptr(unsafe.Pointer(&P[0])), uintptr(unsafe.Pointer(&col[0])),
+		uintptr(unsafe.Pointer(&kinds[0])), uintptr(unsafe.Pointer(&bbx[0])),
+		uintptr(unsafe.Pointer(&boff[0])), uintptr(belowTotal))
 	runtime.KeepAlive(P)
 	runtime.KeepAlive(col)
 	runtime.KeepAlive(kinds)
@@ -606,16 +734,27 @@ func (g *Vulkan) PolishUpload(P, col []float64, kinds, bbx []int32, boff []int64
 	runtime.KeepAlive(boff)
 }
 
+// The DLL is handed the ADDRESS of these buffers and writes into several of them, so every
+// conversion below is written inline. Proc.Call is //go:uintptrescapes, and the compiler only
+// honours that for a uintptr(unsafe.Pointer(x)) written SYNTACTICALLY in the argument list: a
+// helper returning uintptr hides it, and the buffer then stays on the stack, where the runtime is
+// free to move it out from under the call. Verified with -gcflags=-m — the inline form reports
+// "moved to heap: t", the helper form reports nothing. bbxHost is ignored by the shim (the bbx
+// lives on-device) but still travels as a pointer, so it gets the same treatment.
 func (g *Vulkan) PolishForward(tau float64, bbxHost []int32) {
 	t := [1]float64{tau}
-	g.procPolFwd.Call(i32ptr(bbxHost), f64ptr(t[:]))
+	if len(bbxHost) == 0 {
+		g.procPolFwd.Call(0, uintptr(unsafe.Pointer(&t[0])))
+	} else {
+		g.procPolFwd.Call(uintptr(unsafe.Pointer(&bbxHost[0])), uintptr(unsafe.Pointer(&t[0])))
+	}
 	runtime.KeepAlive(bbxHost)
 	runtime.KeepAlive(t[:])
 }
 
 func (g *Vulkan) PolishLoss() float64 {
 	out := [1]float64{}
-	g.procPolLoss.Call(f64ptr(out[:]))
+	g.procPolLoss.Call(uintptr(unsafe.Pointer(&out[0])))
 	runtime.KeepAlive(out[:])
 	return out[0]
 }
@@ -625,7 +764,11 @@ func (g *Vulkan) PolishHardLoss(bbxHost []int32) (float64, bool) {
 		return 0, false
 	}
 	out := [1]float64{}
-	g.procPolHard.Call(i32ptr(bbxHost), f64ptr(out[:]))
+	if len(bbxHost) == 0 {
+		g.procPolHard.Call(0, uintptr(unsafe.Pointer(&out[0])))
+	} else {
+		g.procPolHard.Call(uintptr(unsafe.Pointer(&bbxHost[0])), uintptr(unsafe.Pointer(&out[0])))
+	}
 	runtime.KeepAlive(bbxHost)
 	runtime.KeepAlive(out[:])
 	return out[0], true
@@ -633,19 +776,29 @@ func (g *Vulkan) PolishHardLoss(bbxHost []int32) (float64, bool) {
 
 func (g *Vulkan) PolishBackward(tau float64, bbxHost []int32) {
 	t := [1]float64{tau}
-	g.procPolBwd.Call(i32ptr(bbxHost), f64ptr(t[:]))
+	if len(bbxHost) == 0 {
+		g.procPolBwd.Call(0, uintptr(unsafe.Pointer(&t[0])))
+	} else {
+		g.procPolBwd.Call(uintptr(unsafe.Pointer(&bbxHost[0])), uintptr(unsafe.Pointer(&t[0])))
+	}
 	runtime.KeepAlive(bbxHost)
 	runtime.KeepAlive(t[:])
 }
 
 func (g *Vulkan) PolishReadGrad(dst []float64) {
-	g.procPolRdGrad.Call(f64ptr(dst))
+	if len(dst) == 0 {
+		return
+	}
+	g.procPolRdGrad.Call(uintptr(unsafe.Pointer(&dst[0])))
 	runtime.KeepAlive(dst)
 }
 
 func (g *Vulkan) PolishReadRender(dst []float32) {
+	if len(dst) == 0 {
+		return
+	}
 	if g.procPolRdRender != nil {
-		g.procPolRdRender.Call(fptr(dst))
+		g.procPolRdRender.Call(uintptr(unsafe.Pointer(&dst[0])))
 		runtime.KeepAlive(dst)
 	}
 }
@@ -656,24 +809,10 @@ func (g *Vulkan) PolishFree() {
 	}
 }
 
-func f64ptr(s []float64) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
-func i32ptr(s []int32) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
-func i64ptr(s []int64) uintptr {
-	if len(s) == 0 {
-		return 0
-	}
-	return uintptr(unsafe.Pointer(&s[0]))
-}
+// The fptr/f64ptr/i32ptr/i64ptr helpers that used to live here are GONE on purpose. Every
+// uintptr(unsafe.Pointer(x)) handed to Proc.Call must be written in the argument list itself:
+// that is the only form the //go:uintptrescapes pragma recognises, and the helper silently
+// dropped every buffer back onto the stack. Do not reintroduce them.
 func b2i32(b bool) int32 {
 	if b {
 		return 1
@@ -695,7 +834,7 @@ func (g *Vulkan) SetCoherence(coh []float32, aspectCap float32) bool {
 		g.procSetCoh.Call(0, 0)
 		return true
 	}
-	g.procSetCoh.Call(fptr(coh), fptr(p[:]))
+	g.procSetCoh.Call(uintptr(unsafe.Pointer(&coh[0])), uintptr(unsafe.Pointer(&p[0])))
 	runtime.KeepAlive(coh)
 	runtime.KeepAlive(p[:])
 	return true
@@ -705,7 +844,7 @@ func (g *Vulkan) SetCoherence(coh []float32, aspectCap float32) bool {
 // search's orientation-seeded angles. No-op if the length mismatches.
 func (g *Vulkan) SetOrient(orient []float32) {
 	if g.procSetOrient != nil && len(orient) == g.w*g.h {
-		g.procSetOrient.Call(fptr(orient))
+		g.procSetOrient.Call(uintptr(unsafe.Pointer(&orient[0])))
 		runtime.KeepAlive(orient)
 	}
 }
@@ -721,7 +860,7 @@ func (g *Vulkan) SetBoundaryDist(dist []float32) {
 		return
 	}
 	if len(dist) == g.w*g.h {
-		g.procSetBound.Call(fptr(dist))
+		g.procSetBound.Call(uintptr(unsafe.Pointer(&dist[0])))
 		runtime.KeepAlive(dist)
 	}
 }
@@ -762,14 +901,20 @@ func (g *Vulkan) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCD
 		g.searchOut = make([]float32, 12)
 	}
 	out := g.searchOut[:12]
+	if len(kindCDF) == 0 || len(cdf) == 0 {
+		return model.Candidate{}, 0, false // nothing to sample from; the shim would read a null
+	}
+	// Every one of these is written inline: see the comment above PolishForward. ip/fp/kf are
+	// composite literals, so the helper form left them on the stack while the DLL held their
+	// addresses, and `out` is a buffer the DLL WRITES.
 	g.procSearchRand.Call(
 		uintptr(uint64(seed)),
 		uintptr(unsafe.Pointer(&ip[0])),
-		fptr(fp),
-		fptr(kf),
-		fptr(kindCDF),
-		fptr(cdf),
-		fptr(out),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&kf[0])),
+		uintptr(unsafe.Pointer(&kindCDF[0])),
+		uintptr(unsafe.Pointer(&cdf[0])),
+		uintptr(unsafe.Pointer(&out[0])),
 	)
 	runtime.KeepAlive(ip)
 	runtime.KeepAlive(fp)
@@ -789,13 +934,25 @@ func (g *Vulkan) SearchRandom(seed int64, n int, kinds []model.ShapeKind, kindCD
 // covariance-ellipse seeds from the residual grid + a localised refine pool of `n` total
 // candidates, score + argmin, return the single best. ok=false when the export is missing.
 // Mirrors SearchRandom's wire format with K appended to ip; aspectMax is unused (per-seed).
+// gridAnisoOn is the shim half of engine's FH6_GRIDASPECT pin: the error grid is square
+// whatever the image aspect, so momentseed.comp can map its cells through the covariance.
+// Off by default — see the measurement above engine.gridAnisoOn.
+var gridAnisoOn = os.Getenv("FH6_GRIDASPECT") == "1"
+
 func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKind, kindCDF []float32,
 	maxR float32, allowAlpha bool, alphaMin float32, compact bool, shapeCount int,
 	grid []float32, gw, gh int, boundPad, boundMix, canvasPad float32) (model.Candidate, float32, bool) {
 	if g.procSearchMom == nil || len(kinds) == 0 || n < 1 || centers < 1 {
 		return model.Candidate{}, 0, false
 	}
-	cdf := make([]float32, len(grid))
+	// Reuse the same scratch SearchRandom does. The moment search is the PRODUCT default (the
+	// nextgen hybrid runs it below MomentDetailStart), so it was allocating a fresh w*h CDF, a
+	// kinds slice and the out buffer on every placed shape — thousands of large allocations a run
+	// on the hot path, while its sibling had reused buffers for exactly this reason.
+	if cap(g.searchCDF) < len(grid) {
+		g.searchCDF = make([]float32, len(grid))
+	}
+	cdf := g.searchCDF[:len(grid)]
 	var tot float32
 	for i, v := range grid {
 		if v < 0 {
@@ -804,21 +961,30 @@ func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKin
 		tot += v
 		cdf[i] = tot
 	}
-	kf := make([]float32, len(kinds))
+	if cap(g.searchKF) < len(kinds) {
+		g.searchKF = make([]float32, len(kinds))
+	}
+	kf := g.searchKF[:len(kinds)]
 	for i, k := range kinds {
 		kf[i] = float32(k)
 	}
-	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers)}
+	ip := []int32{int32(n), int32(len(kinds)), int32(gw), int32(gh), b2i32(compact), int32(shapeCount), b2i32(allowAlpha), int32(centers), b2i32(gridAnisoOn)}
 	fp := []float32{maxR, alphaMin, 0, boundPad, boundMix, canvasPad}
-	out := make([]float32, 12)
+	if cap(g.searchOut) < 12 {
+		g.searchOut = make([]float32, 12)
+	}
+	out := g.searchOut[:12]
+	if len(kindCDF) == 0 || len(cdf) == 0 {
+		return model.Candidate{}, 0, false
+	}
 	g.procSearchMom.Call(
 		uintptr(uint64(seed)),
 		uintptr(unsafe.Pointer(&ip[0])),
-		fptr(fp),
-		fptr(kf),
-		fptr(kindCDF),
-		fptr(cdf),
-		fptr(out),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&kf[0])),
+		uintptr(unsafe.Pointer(&kindCDF[0])),
+		uintptr(unsafe.Pointer(&cdf[0])),
+		uintptr(unsafe.Pointer(&out[0])),
 	)
 	runtime.KeepAlive(ip)
 	runtime.KeepAlive(fp)
@@ -832,6 +998,211 @@ func (g *Vulkan) SearchMoment(seed int64, n, centers int, kinds []model.ShapeKin
 		Color: model.RGBA{R: out[8], G: out[9], B: out[10], A: out[11]},
 	}
 	return c, out[0], true
+}
+
+// SearchMutate runs the WHOLE hill-climb mutation phase for one shape on-device (see the engine's
+// mutateSearcher contract): io_best carries the incumbent in the best[12] wire format and comes
+// back holding the final winner. ok=false on a missing export or a device fault — the caller then
+// runs the host rounds instead of trusting garbage.
+func (g *Vulkan) SearchMutate(seed int64, incumbent model.Candidate, score float32, rounds, perRound int,
+	moveStep, radiusStep float32, allowAlpha bool, alphaMin float32,
+	compact bool, shapeCount int, canvasPad float32) (model.Candidate, float32, bool) {
+	if g.procSearchMut == nil || rounds < 1 || perRound < 1 {
+		return model.Candidate{}, 0, false
+	}
+	// Drain a stale one-shot error first: an unread code left by an unrelated earlier call (term
+	// setters don't get their errors read) would fail THIS check, and the engine reads ok=false as
+	// "old DLL" and disables the device hill climb for the REST of the run — a silent RNG change.
+	if g.procLastError != nil {
+		if e, _, _ := g.procLastError.Call(); e != 0 {
+			applog.Printf("vulkan: draining stale device error %d before mutate search", e)
+		}
+	}
+	ip := []int32{int32(perRound), int32(rounds), b2i32(compact), int32(shapeCount), b2i32(allowAlpha)}
+	fp := []float32{moveStep, radiusStep, alphaMin, canvasPad}
+	if cap(g.searchOut) < 12 {
+		g.searchOut = make([]float32, 12)
+	}
+	io := g.searchOut[:12]
+	io[0] = score
+	io[1] = float32(incumbent.Kind)
+	io[2], io[3], io[4], io[5], io[6], io[7] = incumbent.P[0], incumbent.P[1], incumbent.P[2], incumbent.P[3], incumbent.P[4], incumbent.P[5]
+	io[8], io[9], io[10], io[11] = incumbent.Color.R, incumbent.Color.G, incumbent.Color.B, incumbent.Color.A
+	g.procSearchMut.Call(
+		uintptr(uint64(seed)),
+		uintptr(unsafe.Pointer(&ip[0])),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&io[0])),
+	)
+	runtime.KeepAlive(ip)
+	runtime.KeepAlive(fp)
+	runtime.KeepAlive(io)
+	if g.procLastError != nil {
+		if e, _, _ := g.procLastError.Call(); e != 0 {
+			return model.Candidate{}, 0, false
+		}
+	}
+	// The device applies the same strict-improvement rule as the host loop, so the returned score
+	// can only be <= the incumbent's. Anything else is a fault surfacing as data.
+	if !(io[0] <= score) {
+		return model.Candidate{}, 0, false
+	}
+	c := model.Candidate{
+		Kind:  model.ShapeKind(int(io[1] + 0.5)),
+		P:     [6]float32{io[2], io[3], io[4], io[5], io[6], io[7]},
+		Color: model.RGBA{R: io[8], G: io[9], B: io[10], A: io[11]},
+	}
+	return c, io[0], true
+}
+
+// SetCoarse configures the coarse-to-fine filter for both on-device searches (see fp_set_coarse).
+// A DLL without the export leaves the single-pass behaviour — the engine calls this
+// unconditionally per run, so the silent degradation is exactly the pre-port state.
+func (g *Vulkan) SetCoarse(enable bool, budget, kpart int) {
+	if g.procSetCoarse == nil {
+		return
+	}
+	g.procSetCoarse.Call(uintptr(b2i32(enable)), uintptr(int32(budget)), uintptr(int32(kpart)))
+}
+
+// SetCoarseFP16 is accepted for interface parity and does nothing: the FP32 coarse filter is the
+// win (the CUDA fp16 half needed a separate eval shader and bought a fraction of it).
+func (g *Vulkan) SetCoarseFP16(bool) {}
+
+// RefineJobs describes one round of the local geometry refine for the device (refine.comp): the
+// frozen stack, the tile index over it, and the shapes to search this round with their windows and
+// axes. Everything is already in the flat layout the shader reads, because the caller builds these
+// once per round and the alternative is a second copy of the same arrays.
+type RefineJobs struct {
+	N                             int // shapes in the stack
+	ShapeP                        []float32
+	ShapeCol                      []float32
+	ShapeKind                     []int32
+	ShapeBox                      []int32
+	TileOff, TileIdx              []int32
+	TW, TH, Tile                  int
+	JobShape, JobWin, JobNAx      []int32
+	JobAxes                       []float32
+	CtxCap, Sweeps                int
+	Unweighted                    bool
+	MinGain, IntrudeMax, CleanDev float32
+	Shrink, MinStepFrac           float32
+}
+
+// RefineJobsFromEngine is the flat form the engine calls: it holds the concrete job struct here so
+// the engine does not have to import this package for a type.
+func (g *Vulkan) RefineJobsFromEngine(n int, shapeP, shapeCol []float32, shapeKind, shapeBox, tileOff, tileIdx []int32,
+	tw, th, tile int, jobShape, jobWin, jobNAx []int32, jobAxes []float32,
+	ctxCap, sweeps int, unweighted bool, minGain, intrudeMax, cleanDev, shrink, minStepFrac float32,
+	outP, outGain []float32) int {
+	return g.Refine(&RefineJobs{
+		N: n, ShapeP: shapeP, ShapeCol: shapeCol, ShapeKind: shapeKind, ShapeBox: shapeBox,
+		TileOff: tileOff, TileIdx: tileIdx, TW: tw, TH: th, Tile: tile,
+		JobShape: jobShape, JobWin: jobWin, JobNAx: jobNAx, JobAxes: jobAxes,
+		CtxCap: ctxCap, Sweeps: sweeps, Unweighted: unweighted,
+		MinGain: minGain, IntrudeMax: intrudeMax, CleanDev: cleanDev,
+		Shrink: shrink, MinStepFrac: minStepFrac,
+	}, outP, outGain)
+}
+
+// Refine runs one round on device and fills outP (njobs*6) and outGain (njobs). It returns how many
+// shapes moved, or -1 when the device cannot run the pass — the caller then keeps its host path
+// rather than silently refining nothing.
+func (g *Vulkan) Refine(j *RefineJobs, outP, outGain []float32) int {
+	if g.procRefine == nil {
+		return -1
+	}
+	njobs := len(j.JobShape)
+	if njobs < 1 || j.N < 1 || len(outGain) < njobs || len(outP) < njobs*6 {
+		return -1
+	}
+	ti := j.TileIdx
+	if len(ti) == 0 {
+		ti = []int32{0} // never take the address of an empty slice; the shader reads none of it
+	}
+	ip := []int32{int32(j.N), int32(njobs), int32(g.w), int32(g.h), int32(j.TW), int32(j.TH),
+		int32(j.Tile), int32(j.CtxCap), int32(j.Sweeps), b2i32(j.Unweighted), int32(len(j.TileIdx))}
+	fp := []float32{j.MinGain, j.IntrudeMax, j.CleanDev, j.Shrink, j.MinStepFrac}
+	r, _, _ := g.procRefine.Call(
+		uintptr(unsafe.Pointer(&ip[0])),
+		uintptr(unsafe.Pointer(&fp[0])),
+		uintptr(unsafe.Pointer(&j.ShapeP[0])),
+		uintptr(unsafe.Pointer(&j.ShapeCol[0])),
+		uintptr(unsafe.Pointer(&j.ShapeKind[0])),
+		uintptr(unsafe.Pointer(&j.ShapeBox[0])),
+		uintptr(unsafe.Pointer(&j.TileOff[0])),
+		uintptr(unsafe.Pointer(&ti[0])),
+		uintptr(unsafe.Pointer(&j.JobShape[0])),
+		uintptr(unsafe.Pointer(&j.JobWin[0])),
+		uintptr(unsafe.Pointer(&j.JobAxes[0])),
+		uintptr(unsafe.Pointer(&j.JobNAx[0])),
+		uintptr(unsafe.Pointer(&outP[0])),
+		uintptr(unsafe.Pointer(&outGain[0])),
+	)
+	runtime.KeepAlive(ip)
+	runtime.KeepAlive(fp)
+	runtime.KeepAlive(j)
+	runtime.KeepAlive(ti)
+	runtime.KeepAlive(outP)
+	runtime.KeepAlive(outGain)
+	return int(int32(r))
+}
+
+// SetBatch arms the survivor export so SearchSurvivors has something to return. Off by default:
+// it appends three buffer copies to every search submit. A DLL without the export leaves the
+// engine's batch placement disabled (SearchSurvivors then returns 0).
+func (g *Vulkan) SetBatch(on bool) {
+	if g.procSetBatch == nil {
+		return
+	}
+	g.procSetBatch.Call(uintptr(b2i32(on)))
+}
+
+// SearchSurvivors returns the pool the last on-device search re-scored at the FULL sample budget:
+// the coarse filter's kpart survivors, with the device's selection-adjusted score in adj and the
+// raw ΔSSE in raw. Batch placement ranks by adj (matching the argmin's own choice) and gates on
+// raw. Returns 0 when the pool does not exist — an old DLL, the coarse filter off, or a candidate
+// batch too small to trigger it — and the caller then places one shape as before.
+func (g *Vulkan) SearchSurvivors(cands []model.Candidate, raw, adj []float32) int {
+	if g.procSurvivors == nil {
+		return 0
+	}
+	k := len(cands)
+	if k > len(raw) {
+		k = len(raw)
+	}
+	if k > len(adj) {
+		k = len(adj)
+	}
+	if k < 1 {
+		return 0
+	}
+	need := k * 17
+	if cap(g.survScratch) < need {
+		g.survScratch = make([]float32, need)
+	}
+	buf := g.survScratch[:need]
+	n, _, _ := g.procSurvivors.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(int32(need)))
+	runtime.KeepAlive(buf)
+	got := int(int32(n))
+	if got < 1 || got > k {
+		return 0
+	}
+	// Device block layout: [got adj][got*11 candidate][got*5 eval].
+	cb := buf[got:]
+	eb := buf[got*12:]
+	for i := 0; i < got; i++ {
+		adj[i] = buf[i]
+		c := cb[i*11:]
+		e := eb[i*5:]
+		raw[i] = e[0]
+		cands[i] = model.Candidate{
+			Kind:  model.ShapeKind(int(c[0] + 0.5)),
+			P:     [6]float32{c[1], c[2], c[3], c[4], c[5], c[6]},
+			Color: model.RGBA{R: e[1], G: e[2], B: e[3], A: e[4]},
+		}
+	}
+	return got
 }
 
 // packCand writes a candidate into the 11-float wire format at dst[0:11].

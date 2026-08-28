@@ -2,6 +2,7 @@
 
 #include <commctrl.h>
 
+#include <shobjidl_core.h>
 #include <windowsx.h>
 
 #include <atomic>
@@ -11,14 +12,38 @@
 
 namespace {
 
+// The taskbar button, created on first use and held for the process. COM is
+// already initialised by the Flutter runner, so this only has to ask for the
+// object. A null return means the shell is not available (a rare session type,
+// or the shell restarted) — every caller treats progress as optional.
+ITaskbarList3* ShellTaskbar() {
+  static ITaskbarList3* bar = [] {
+    ITaskbarList3* p = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_ALL,
+                                IID_PPV_ARGS(&p)))) {
+      return static_cast<ITaskbarList3*>(nullptr);
+    }
+    if (p && FAILED(p->HrInit())) {
+      p->Release();
+      return static_cast<ITaskbarList3*>(nullptr);
+    }
+    return p;
+  }();
+  return bar;
+}
+
 // Kept in step with win32_window.cpp and lib/ui/window.dart.
 constexpr int kCaptionHeightDip = 52;
 
 // How much of the caption's right end belongs to Flutter's own controls. Dart
 // measures the real cluster and pushes it here after every layout, because the
 // language button is as wide as that language's name for itself. The starting
-// value only has to survive the first frame.
-std::atomic<int> g_controls_dip{46 * 3 + 330};
+// value errs WIDE — covering the widest locale's cluster — because the two
+// failure directions are not symmetric: a band too wide only costs drag area
+// until the first report lands, a band too narrow sends clicks on the leftmost
+// caption buttons to the window drag instead. Mirrored by kStartupControlsDip
+// in test/caption_test.dart, which checks it against every locale.
+std::atomic<int> g_controls_dip{1050};
 
 int ScaledFor(int dip, HWND window) {
   UINT dpi = GetDpiForWindow(window);
@@ -49,7 +74,11 @@ LRESULT CALLBACK ChildProc(HWND hwnd, UINT message, WPARAM wparam,
     GetClientRect(hwnd, &client);
 
     const int caption = ScaledFor(kCaptionHeightDip, parent ? parent : hwnd);
-    const int controls = ScaledFor(g_controls_dip.load(), parent ? parent : hwnd);
+    // +4dip cushion: Dart reports the exact distance to the cluster's left
+    // edge, and with zero margin the button's first border pixel rounds into
+    // the drag band. Four dip of lost drag area buys the whole edge.
+    const int controls =
+        ScaledFor(g_controls_dip.load() + 4, parent ? parent : hwnd);
     if (cursor.y < caption && cursor.x < client.right - controls) {
       return HTTRANSPARENT;
     }
@@ -118,6 +147,27 @@ bool FlutterWindow::OnCreate() {
             fw.dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG;
             fw.uCount = 3;
             FlashWindowEx(&fw);
+          }
+        } else if (name == "progress") {
+          // The taskbar button IS the progress bar for a job the user walks
+          // away from — a fit runs for minutes and they are usually alt-tabbed
+          // into the game. Explorer copies and browser downloads set the same
+          // state, so it needs no explaining.
+          //
+          // Argument: 0..1 while running, -1 to clear, -2 for the error state.
+          if (const auto* v = std::get_if<double>(call.arguments())) {
+            if (auto* bar = ShellTaskbar()) {
+              if (*v < -1.5) {
+                bar->SetProgressState(hwnd, TBPF_ERROR);
+                bar->SetProgressValue(hwnd, 1, 1);
+              } else if (*v < 0) {
+                bar->SetProgressState(hwnd, TBPF_NOPROGRESS);
+              } else {
+                bar->SetProgressState(hwnd, TBPF_NORMAL);
+                bar->SetProgressValue(
+                    hwnd, static_cast<ULONGLONG>(*v * 1000.0), 1000);
+              }
+            }
           }
         } else if (name == "setControlsWidth") {
           if (const auto* w = std::get_if<int32_t>(call.arguments())) {

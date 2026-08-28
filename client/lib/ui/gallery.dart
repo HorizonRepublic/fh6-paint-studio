@@ -6,8 +6,6 @@
 /// finished — which is the point of keeping them at all.
 library;
 
-import 'dart:ui' show ImageFilter;
-
 import 'package:flutter/material.dart';
 
 import '../state/studio.dart';
@@ -41,6 +39,7 @@ enum _Sort { date, name }
 
 class _GalleryState extends State<Gallery> {
   final _search = TextEditingController();
+  final _wallScroll = ScrollController();
   String _preset = '';
   _Sort _sort = _Sort.date;
 
@@ -67,6 +66,7 @@ class _GalleryState extends State<Gallery> {
   @override
   void dispose() {
     _search.dispose();
+    _wallScroll.dispose();
     super.dispose();
   }
 
@@ -114,6 +114,9 @@ class _GalleryState extends State<Gallery> {
         thumb: studio.thumbProvider(id),
         onConfirm: () async {
           await studio.deleteRun(id);
+          // Drop it from the selection too, or the header keeps offering
+          // "Delete 1" for a run that no longer exists.
+          _picked.remove(id);
           if (mounted) setState(() {});
         },
       ),
@@ -173,7 +176,11 @@ class _GalleryState extends State<Gallery> {
   });
 
   void _deletePicked(List<Map<String, dynamic>> visible) {
-    final ids = List<String>.of(_picked);
+    // Only what the user can actually SEE. `visible` was passed in and then
+    // ignored, so a pick made before a search was narrowed still got deleted —
+    // and the count in the confirmation counted runs that were not on screen.
+    final shown = {for (final e in visible) e['id'] as String?}..remove(null);
+    final ids = _picked.where(shown.contains).toList();
     if (ids.isEmpty) return;
     widget.onConfirm(
       Confirm(
@@ -192,8 +199,10 @@ class _GalleryState extends State<Gallery> {
           await studio.refreshLibrary();
           if (mounted) {
             setState(() {
-              _picked.clear();
-              _selecting = false;
+              // Only the ones actually deleted; a pick hidden by the filter
+              // stays picked so it is still there when the filter is cleared.
+              _picked.removeAll(ids);
+              _selecting = _picked.isNotEmpty;
             });
           }
         },
@@ -227,17 +236,20 @@ class _GalleryState extends State<Gallery> {
       return p;
     }
 
-    // A near-opaque surface over a blur, not a tint. At 72% the shell read
-    // straight through it: the command bar's labels landed on top of the
-    // gallery's own, and its controls were invisible against the canvas.
-    return BackdropFilter(
-      filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-      child: Container(
+    // A solid surface, no blur. It must fully hide the shell reading through it
+    // (at 72% the command bar's labels landed on the gallery's own), so it was
+    // already ~99% opaque — the blur behind it contributed nothing visible while
+    // a full-screen BackdropFilter, which can never be raster-cached, re-ran on
+    // every presented frame the gallery was open, its own scroll included. A
+    // flat 0xFF fill looks the same and costs nothing.
+    return Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xFC0C0E10), Color(0xFC08090A)],
+            // The desk's own two stops (_DeskPainter), so opening the gallery
+            // does not shift the brightness of the room behind everything.
+            colors: [Color(0xFF101317), Color(0xFF070809)],
           ),
         ),
         child: Column(
@@ -377,7 +389,13 @@ class _GalleryState extends State<Gallery> {
                         style: T.text(12.5, color: T.soft),
                       ),
                     )
-                  : ListView.builder(
+                  // A scrollbar because this is a desktop app and the wall can
+                  // run to a hundred runs: it is the only cue for how far down
+                  // the library you are, and the only way to jump with the mouse.
+                  : Scrollbar(
+                      controller: _wallScroll,
+                      child: ListView.builder(
+                      controller: _wallScroll,
                       padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
                       itemCount: groups.length,
                       itemBuilder: (context, gi) {
@@ -407,6 +425,13 @@ class _GalleryState extends State<Gallery> {
                               itemBuilder: (context, i) {
                                 final id = items[i]['id'] as String;
                                 return _Card(
+                                  // Keyed by id so deleting/re-sorting moves the
+                                  // element with its run instead of reusing it by
+                                  // index — without this the stateful cards below
+                                  // a deletion each reset their FutureBuilder to
+                                  // waiting (a blank-flash ripple) and their hover
+                                  // stuck to the slot, not the run.
+                                  key: ValueKey(id),
                                   studio: studio,
                                   entry: items[i],
                                   picked: _picked.contains(id),
@@ -421,10 +446,10 @@ class _GalleryState extends State<Gallery> {
                         );
                       },
                     ),
+                    ),
             ),
           ],
         ),
-      ),
     );
   }
 }
@@ -460,6 +485,7 @@ class _Filter extends StatelessWidget {
 
 class _Card extends StatefulWidget {
   const _Card({
+    super.key,
     required this.studio,
     required this.entry,
     required this.picked,

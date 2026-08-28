@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"fh6-paint-studio/internal/model"
 )
@@ -27,7 +28,10 @@ type FH6 struct {
 // NewFH6 returns an FH6 injector with the default profile and clear-unused enabled. Live path
 // rewriting is on by default (set FH6_NOPATHS=1 to fall back to word-only injection).
 func NewFH6() *FH6 {
-	return &FH6{Profile: FH6Profile(), ClearUnused: true, WritePaths: os.Getenv("FH6_NOPATHS") == ""}
+	// FH6_NOPATHS truthy (1/true/yes) disables path writing; anything else (incl. "0" and unset)
+	// keeps it on — the old `== ""` test also disabled on FH6_NOPATHS=0, the opposite of the doc.
+	np := strings.ToLower(os.Getenv("FH6_NOPATHS"))
+	return &FH6{Profile: FH6Profile(), ClearUnused: true, WritePaths: !(np == "1" || np == "true" || np == "yes")}
 }
 
 // Apply is the whole injection as one call: build the injector, map the canvas, write, and narrate.

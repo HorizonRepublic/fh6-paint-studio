@@ -1,16 +1,23 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // eagle_boxx.comp — zero-padded /3 3-tap horizontal box into t2 (engine box3 x-pass).
 // pc.mode selects the source: 0=vx 1=vy 2=t1 3=sx 4=sy.
 layout(local_size_x = 256) in;
-layout(std430, binding = 5) readonly buffer VX { double vx[]; };
-layout(std430, binding = 6) readonly buffer VY { double vy[]; };
-layout(std430, binding = 12) readonly buffer T1 { double t1[]; };
-layout(std430, binding = 13)          buffer T2 { double t2[]; };
-layout(std430, binding = 14) readonly buffer SX { double sx[]; };
-layout(std430, binding = 15) readonly buffer SY { double sy[]; };
+layout(std430, binding = 5) readonly buffer VX { REAL vx[]; };
+layout(std430, binding = 6) readonly buffer VY { REAL vy[]; };
+layout(std430, binding = 12) readonly buffer T1 { REAL t1[]; };
+layout(std430, binding = 13)          buffer T2 { REAL t2[]; };
+layout(std430, binding = 14) readonly buffer SX { REAL sx[]; };
+layout(std430, binding = 15) readonly buffer SY { REAL sy[]; };
 layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
-double src(int j) {
+REAL src(int j) {
     if (pc.mode == 0) return vx[j];
     if (pc.mode == 1) return vy[j];
     if (pc.mode == 2) return t1[j];
@@ -21,8 +28,8 @@ void main() {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.w * pc.h) return;
     int x = i % pc.w;
-    double s = src(i);
+    REAL s = src(i);
     if (x > 0) s += src(i - 1);
     if (x < pc.w - 1) s += src(i + 1);
-    t2[i] = s / 3.0LF;
+    t2[i] = s / REAL(3.0);
 }

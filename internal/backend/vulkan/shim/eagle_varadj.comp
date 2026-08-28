@@ -1,21 +1,28 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // eagle_varadj.comp — dL/dg = (2/9)*(g*Box9(u) - Box9(u*m)), Box9 = zero-padded 3x3 SUM
 // (engine variance adjoint; u in t2, u*m in the consumed v plane). pc.mode: 0 -> sx, 1 -> sy.
 layout(local_size_x = 256) in;
-layout(std430, binding = 3) readonly buffer GX { double gx[]; };
-layout(std430, binding = 4) readonly buffer GY { double gy[]; };
-layout(std430, binding = 5) readonly buffer VX { double vx[]; };
-layout(std430, binding = 6) readonly buffer VY { double vy[]; };
-layout(std430, binding = 13) readonly buffer T2 { double t2[]; };
-layout(std430, binding = 14)          buffer SX { double sx[]; };
-layout(std430, binding = 15)          buffer SY { double sy[]; };
+layout(std430, binding = 3) readonly buffer GX { REAL gx[]; };
+layout(std430, binding = 4) readonly buffer GY { REAL gy[]; };
+layout(std430, binding = 5) readonly buffer VX { REAL vx[]; };
+layout(std430, binding = 6) readonly buffer VY { REAL vy[]; };
+layout(std430, binding = 13) readonly buffer T2 { REAL t2[]; };
+layout(std430, binding = 14)          buffer SX { REAL sx[]; };
+layout(std430, binding = 15)          buffer SY { REAL sy[]; };
 layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
 void main() {
     int i = int(gl_GlobalInvocationID.x);
     if (i >= pc.w * pc.h) return;
     int x = i % pc.w, y = i / pc.w;
-    double su = 0.0LF, sum = 0.0LF;
+    REAL su = REAL(0.0), sum = REAL(0.0);
     for (int dy = -1; dy <= 1; dy++) {
         int yy = y + dy;
         if (yy < 0 || yy >= pc.h) continue;
@@ -27,7 +34,7 @@ void main() {
             sum += (pc.mode == 0) ? vx[j] : vy[j];
         }
     }
-    double g = (pc.mode == 0) ? gx[i] : gy[i];
-    double v = (2.0LF / 9.0LF) * (g * su - sum);
+    REAL g = (pc.mode == 0) ? gx[i] : gy[i];
+    REAL v = (REAL(2.0) / REAL(9.0)) * (g * su - sum);
     if (pc.mode == 0) sx[i] = v; else sy[i] = v;
 }

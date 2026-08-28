@@ -31,12 +31,24 @@ type Server struct {
 	r io.Reader
 	w io.Writer
 
-	mu   sync.Mutex // serialises writes: events arrive from run goroutines
+	// wmu serialises WRITES only. It used to share s.mu with the run registry, which meant a
+	// 16MB frame write blocking on a slow client also blocked `cancel` — the read goroutine
+	// stalled on the registry lock and Stop appeared dead exactly when the UI was busiest.
+	wmu  sync.Mutex
+	werr error // first write error; once set, further writes are skipped (the stream is dead)
+
+	mu   sync.Mutex // the run registry
 	runs map[int32]func()
+
+	injectWG sync.WaitGroup // in-flight injections; Serve waits for them on the way out
 
 	renderMu sync.Mutex
 	renderQ  []Request
 	renderOn bool
+
+	auxMu sync.Mutex
+	auxQ  []Request
+	auxOn bool
 
 	storeOnce sync.Once
 	store     *library.Store
@@ -45,6 +57,12 @@ type Server struct {
 	presetOnce sync.Once
 	presets    *userpreset.Store
 	presetErr  error
+
+	descMu     sync.Mutex
+	descPath   string
+	descMod    time.Time
+	descColors int
+	descCutout bool
 }
 
 // NewServer wires a server to a duplex connection.
@@ -56,7 +74,12 @@ func NewServer(r io.Reader, w io.Writer) *Server {
 // unrecoverable. Cancels every run still in flight on the way out, so closing the client window
 // cannot leave the GPU busy with work nobody will collect.
 func (s *Server) Serve() error {
-	defer s.cancelAll()
+	defer func() {
+		s.cancelAll()
+		// An injection walks the live game's layer table; exiting under it leaves the user's
+		// vinyl HALF-OVERWRITTEN. Whatever ended the read loop, the write must finish first.
+		s.injectWG.Wait()
+	}()
 	for {
 		kind, payload, err := Read(s.r)
 		if err != nil {
@@ -73,12 +96,31 @@ func (s *Server) Serve() error {
 			s.fail(0, fmt.Errorf("malformed request: %w", err))
 			continue
 		}
-		s.dispatch(req)
+		s.safeDispatch(req)
 	}
+}
+
+// safeDispatch is the panic barrier for the read goroutine: a handler decoding a hostile file
+// (Prepare, library save, contentDescriptor) must fail ONE request, not kill the daemon and
+// every in-flight run with it.
+func (s *Server) safeDispatch(req Request) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			applog.Printf("ERROR: panic in %q handler: %v", req.Method, rec)
+			s.fail(req.ID, fmt.Errorf("internal error handling %q: %v", req.Method, rec))
+		}
+	}()
+	s.dispatch(req)
 }
 
 func (s *Server) dispatch(req Request) {
 	switch req.Method {
+	case "hello":
+		// Version handshake. The release ships two binaries a user can mix across versions;
+		// before this, skew was silent (an older client read missing fields as zeros — e.g. a
+		// wrong-size inject). The client logs a mismatch loudly; an old server answers "unknown
+		// method", which the client treats as version 0.
+		s.reply(req.ID, map[string]any{"protocol": ProtocolVersion})
 	case "backends":
 		s.reply(req.ID, map[string]any{"backends": runner.AvailableBackends()})
 	case "defaults":
@@ -94,6 +136,48 @@ func (s *Server) dispatch(req Request) {
 	case "render":
 		s.queueRender(req)
 	default:
+		s.queueAux(req)
+	}
+}
+
+// queueAux moves the library and preset handlers off the read goroutine, for the same reason
+// generate and render were moved off it: while one of them runs, nothing else is even READ, so a
+// cancel sits in the socket buffer. Neither is cheap — presets.knobDefaults decodes the source and
+// CatmullRom-downscales it while holding descMu, and library.save does a base64 decode, a
+// full-size copy, a png.Encode and a thumbnail. Sequence that hangs Stop: long run -> open the
+// expert panel -> change mode -> press Stop.
+//
+// One worker, so these stay serialised with each other exactly as they were.
+func (s *Server) queueAux(req Request) {
+	s.auxMu.Lock()
+	var dropped []Request
+	if len(s.auxQ) >= 64 { // a bound, not a policy: the client sends these one at a time
+		dropped = append(dropped, s.auxQ[0])
+		s.auxQ = s.auxQ[1:]
+	}
+	s.auxQ = append(s.auxQ, req)
+	start := !s.auxOn
+	s.auxOn = true
+	s.auxMu.Unlock()
+	for _, d := range dropped {
+		s.fail(d.ID, fmt.Errorf("%s dropped (queue overflow)", d.Method))
+	}
+	if start {
+		go s.auxWorker()
+	}
+}
+
+func (s *Server) auxWorker() {
+	for {
+		s.auxMu.Lock()
+		if len(s.auxQ) == 0 {
+			s.auxOn = false
+			s.auxMu.Unlock()
+			return
+		}
+		req := s.auxQ[0]
+		s.auxQ = s.auxQ[1:]
+		s.auxMu.Unlock()
 		if !s.libraryMethod(req) && !s.presetMethod(req) {
 			s.fail(req.ID, fmt.Errorf("unknown method %q", req.Method))
 		}
@@ -126,7 +210,11 @@ type GenerateParams struct {
 }
 
 func (s *Server) generate(req Request) {
-	var p GenerateParams
+	// Seed Choices with the engine defaults BEFORE unmarshalling: preset.Choices has no json
+	// tags, so an omitted key would otherwise become the Go zero — and four sentinels (Aspect,
+	// WeightStrength, RampWeight, AlphaMin) can't tell zero from an explicit override, while
+	// Quality="" drops the whole run from the 50k quality tier to the 1k balanced one.
+	p := GenerateParams{Choices: preset.DefaultChoices()}
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			s.fail(req.ID, fmt.Errorf("bad generate params: %w", err))
@@ -146,12 +234,6 @@ func (s *Server) generate(req Request) {
 		rect := image.Rect(r[0], r[1], r[0]+r[2], r[1]+r[3])
 		sr.Region = &rect
 	}
-	run, err := session.Prepare(sr)
-	if err != nil {
-		s.fail(req.ID, err)
-		return
-	}
-
 	start := time.Now()
 
 	// Register the run BEFORE starting it. run.Start's callback fires on its own
@@ -176,16 +258,41 @@ func (s *Server) generate(req Request) {
 	}
 	s.mu.Unlock()
 
-	rc := run.Start(func(ev runner.Event) {
-		s.emit(req.ID, ev, start, p.Output)
-	})
-
-	cancelMu.Lock()
-	realCancel = rc
-	if cancelled {
-		rc()
-	}
-	cancelMu.Unlock()
+	// Prepare decodes + rescales the source (seconds on a big file) — OFF the read goroutine, or
+	// every message including `cancel` stalls behind it. The registry slot above keeps the
+	// generate/cancel ordering the read loop guaranteed when this ran inline.
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				applog.Printf("ERROR: panic preparing run %d: %v", req.ID, rec)
+				s.finish(req.ID)
+				s.fail(req.ID, fmt.Errorf("internal error preparing the run: %v", rec))
+			}
+		}()
+		run, err := session.Prepare(sr)
+		if err != nil {
+			s.finish(req.ID)
+			s.fail(req.ID, err)
+			return
+		}
+		cancelMu.Lock()
+		early := cancelled
+		cancelMu.Unlock()
+		if early {
+			s.finish(req.ID)
+			s.fail(req.ID, fmt.Errorf("run %d cancelled before it started", req.ID))
+			return
+		}
+		rc := run.Start(func(ev runner.Event) {
+			s.emit(req.ID, ev, start, p.Output)
+		})
+		cancelMu.Lock()
+		realCancel = rc
+		if cancelled {
+			rc()
+		}
+		cancelMu.Unlock()
+	}()
 }
 
 // emit translates one engine event onto the wire. Frames go out as binary; everything else is JSON.
@@ -231,6 +338,10 @@ func (s *Server) emit(id int32, ev runner.Event, start time.Time, output string)
 			Width:        e.Width,
 			Height:       e.Height,
 		}
+		if e.SrcRect[2] > 0 && e.SrcRect[3] > 0 {
+			r := e.SrcRect
+			done.SourceRect = &r
+		}
 		if e.Quality != nil {
 			done.DeltaE, done.SSIM = e.Quality.DeltaE, e.Quality.SSIM
 		}
@@ -265,7 +376,15 @@ func (s *Server) inject(req Request) {
 		s.fail(req.ID, fmt.Errorf("inject needs the template layer count"))
 		return
 	}
+	s.injectWG.Add(1)
 	go func() {
+		defer s.injectWG.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				applog.Printf("ERROR: panic during inject: %v", rec)
+				s.fail(req.ID, fmt.Errorf("inject crashed: %v", rec))
+			}
+		}()
 		err := inject.Apply(p.Shapes, p.Width, p.Height, p.Layers, p.Scale, func(line string) {
 			s.event(req.ID, "log", LogEvent{Line: line})
 		})
@@ -298,10 +417,21 @@ type RenderParams struct {
 // coalesces its canvas refreshes to one in flight plus one queued.
 func (s *Server) queueRender(req Request) {
 	s.renderMu.Lock()
+	// The client coalesces to one-in-flight-plus-one-queued, but the server enforces a bound of
+	// its own: a buggy or older client must not grow an unbounded queue of shape lists. The
+	// superseded request is still ANSWERED (the client awaits it) — with a stale-drop error.
+	var dropped []Request
+	if len(s.renderQ) >= 8 {
+		dropped = append(dropped, s.renderQ[0])
+		s.renderQ = s.renderQ[1:]
+	}
 	s.renderQ = append(s.renderQ, req)
 	start := !s.renderOn
 	s.renderOn = true
 	s.renderMu.Unlock()
+	for _, d := range dropped {
+		s.fail(d.ID, fmt.Errorf("render superseded (queue overflow)"))
+	}
 	if start {
 		go s.renderWorker()
 	}
@@ -333,6 +463,12 @@ func (s *Server) render(req Request) {
 	}
 	if p.Width <= 0 || p.Height <= 0 {
 		s.fail(req.ID, fmt.Errorf("render needs a size, got %dx%d", p.Width, p.Height))
+		return
+	}
+	// Bounded like generate's FitCap: render sizes come from documents on disk (the .forza.json
+	// import), and a corrupt 100000² header must fail the request, not OOM-kill the daemon.
+	if p.Width > 8192 || p.Height > 8192 || p.Width*p.Height > 4096*4096 {
+		s.fail(req.ID, fmt.Errorf("render size %dx%d exceeds the supported canvas", p.Width, p.Height))
 		return
 	}
 	// ss=1: the game rasterises the geometry itself with hard edges, so a single
@@ -403,9 +539,15 @@ func (s *Server) fail(id int32, err error) {
 }
 
 func (s *Server) send(resp Response) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_ = WriteJSON(s.w, resp)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if s.werr != nil {
+		return // the stream is already dead/desynced; writing more garbage helps nobody
+	}
+	if err := WriteJSON(s.w, resp); err != nil {
+		s.werr = err
+		applog.Printf("ERROR: ipc write failed, muting further writes: %v", err)
+	}
 }
 
 // frame writes a preview. NRGBA from the runner is already straight-alpha RGBA in memory, but its
@@ -428,7 +570,15 @@ func (s *Server) frame(id int32, img *image.NRGBA) {
 			copy(pix[y*w*4:(y+1)*w*4], img.Pix[y*img.Stride:y*img.Stride+w*4])
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_ = WriteFrame(s.w, FrameHeader{ID: id, W: int32(w), H: int32(h)}, pix)
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if s.werr != nil {
+		return
+	}
+	// A frame is TWO writes (header, pixels); failing between them desyncs the stream — which is
+	// exactly why the first failure mutes everything after it.
+	if err := WriteFrame(s.w, FrameHeader{ID: id, W: int32(w), H: int32(h)}, pix); err != nil {
+		s.werr = err
+		applog.Printf("ERROR: ipc frame write failed, muting further writes: %v", err)
+	}
 }

@@ -56,7 +56,7 @@ func TestSkewRefineRecoversAKnownShear(t *testing.T) {
 	}
 	start := []model.Shape{bg, shape(model.TypeRotatedRectangle, []int{230, 40, 40, 255}, 110, 80, 45, 34, 15)}
 
-	out, changed := localRefine(start, target, weight, w, h, false)
+	out, changed := localRefine(nil, start, target, weight, w, h, false)
 	if changed != 1 {
 		t.Fatalf("changed %d shapes, want exactly the one rectangle", changed)
 	}
@@ -85,7 +85,7 @@ func TestSkewRefineLeavesAnUnshearedFitAlone(t *testing.T) {
 	for i := range weight {
 		weight[i] = 1
 	}
-	if _, changed := localRefine(stack, target, weight, w, h, false); changed != 0 {
+	if _, changed := localRefine(nil, stack, target, weight, w, h, false); changed != 0 {
 		t.Errorf("%d shapes sheared against an exact fit — the accept floor is not holding", changed)
 	}
 }
@@ -132,7 +132,7 @@ func TestGeomRefineRecoversADisplacedShape(t *testing.T) {
 	start := []model.Shape{bg, shape(model.TypeRotatedRectangle, []int{220, 60, 50, 255}, 112, 84, 39, 25, 14)}
 
 	e0 := stackErr(start, target, weight, w, h)
-	out, changed := localRefine(start, target, weight, w, h, true)
+	out, changed := localRefine(nil, start, target, weight, w, h, true)
 	if changed != 1 {
 		t.Fatalf("changed %d shapes, want 1", changed)
 	}
@@ -162,7 +162,7 @@ func TestGeomRefineLeavesAnExactFitAlone(t *testing.T) {
 	for i := range weight {
 		weight[i] = 1
 	}
-	if _, changed := localRefine(stack, target, weight, w, h, true); changed != 0 {
+	if _, changed := localRefine(nil, stack, target, weight, w, h, true); changed != 0 {
 		t.Errorf("%d shapes moved against an exact fit", changed)
 	}
 }

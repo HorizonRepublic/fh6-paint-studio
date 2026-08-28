@@ -45,9 +45,7 @@ func (artifactFixPass) apply(r *run) {
 
 	render := func(shapes []model.Shape) []float32 {
 		_ = r.be.Reset(r.initCanvas)
-		for _, s := range shapes[1:] {
-			_ = r.be.Apply(shapeToCandidate(s))
-		}
+		applyShapes(r.be, shapes[1:])
 		buf := make([]float32, w*h*4)
 		_ = r.be.ReadCanvas(buf)
 		return buf

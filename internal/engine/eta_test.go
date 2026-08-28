@@ -10,7 +10,7 @@ import (
 // short of 100% at the end, waiting for something that never starts.
 func TestETAPlanCountsOnlyEnabledPasses(t *testing.T) {
 	base := Options{StopAt: 100}
-	lean := newETA(base, time.Now(), func(PhaseProgress) {})
+	lean := newETA(base, true, time.Now(), func(PhaseProgress) {})
 	defer lean.stop()
 	if got := len(lean.phases); got != 1 {
 		t.Fatalf("plain run planned %d phases, want just the greedy loop", got)
@@ -18,7 +18,7 @@ func TestETAPlanCountsOnlyEnabledPasses(t *testing.T) {
 
 	rich := Options{StopAt: 100, SmoothBase: true, Polish: true, GlobalColorIters: 100, LooRefit: 2,
 		PolishOpts: PolishOptions{Iters: 250}}
-	tr := newETA(rich, time.Now(), func(PhaseProgress) {})
+	tr := newETA(rich, true, time.Now(), func(PhaseProgress) {})
 	defer tr.stop()
 	if len(tr.phases) != 5 { // smooth base, greedy, polish, LOO refit, colour re-solve
 		t.Fatalf("configured run planned %d phases, want 5: %+v", len(tr.phases), tr.phases)
@@ -34,7 +34,7 @@ func TestETAReachesTheEnd(t *testing.T) {
 	opt := Options{StopAt: 100, Polish: true, GlobalColorIters: 100, PolishOpts: PolishOptions{Iters: 250}}
 	var last PhaseProgress
 	seen := 0
-	tr := newETA(opt, time.Now().Add(-10*time.Second), func(p PhaseProgress) { last = p; seen++ })
+	tr := newETA(opt, true, time.Now().Add(-10*time.Second), func(p PhaseProgress) { last = p; seen++ })
 	defer tr.stop()
 
 	prev := -1.0
@@ -70,10 +70,38 @@ func TestETAReachesTheEnd(t *testing.T) {
 	}
 }
 
+// TestETACountsDownWhileStalled pins the deadline behaviour the countdown was rebuilt for: when a
+// phase stops reporting progress, the displayed remaining time must keep FALLING between readings
+// (the old duration-EMA froze — raw = elapsed·(1−done)/done grows exactly as fast as the clock at
+// constant done, so the number never moved).
+func TestETACountsDownWhileStalled(t *testing.T) {
+	opt := Options{StopAt: 100, Polish: true, PolishOpts: PolishOptions{Iters: 250}}
+	var last PhaseProgress
+	tr := newETA(opt, true, time.Now().Add(-20*time.Second), func(p PhaseProgress) { last = p })
+	defer tr.stop()
+	tr.enter("Placing shapes…")
+	tr.frac = 0.9
+	tr.publish(true)
+	first := last.ETA
+	if first <= 0 {
+		t.Fatalf("no estimate after 20s elapsed at 90%% of the greedy")
+	}
+	// The phase stalls: no frac movement, only the clock. Each reading must come back lower.
+	prev := first
+	for i := 0; i < 3; i++ {
+		time.Sleep(300 * time.Millisecond)
+		tr.publish(true)
+		if last.ETA >= prev {
+			t.Fatalf("reading %d: ETA froze or rose while stalled: %v -> %v", i, prev, last.ETA)
+		}
+		prev = last.ETA
+	}
+}
+
 // TestETAWithoutCallbackIsInert guards the default path: no callback means no tracker, no heartbeat
 // goroutine, and every method still safe to call on the nil it returns.
 func TestETAWithoutCallbackIsInert(t *testing.T) {
-	tr := newETA(Options{StopAt: 10}, time.Now(), nil)
+	tr := newETA(Options{StopAt: 10}, true, time.Now(), nil)
 	if tr != nil {
 		t.Fatal("a run with no OnPhase built a tracker")
 	}

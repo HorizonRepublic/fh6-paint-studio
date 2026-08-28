@@ -101,8 +101,11 @@ class CanvasView extends StatelessWidget {
   /// it, so applying a crop changes the picture immediately instead of only
   /// changing what the next run will fit.
   Rect _view(ui.Image src) {
-    final r = studio.region;
-    if (r == null) {
+    // The result's OWN rectangle first. With no crop of the user's, the daemon still auto-crops to
+    // the content box (whenever it covers under 97% of the file), so "before" drawn from the whole
+    // source wiped across a reconstruction of only part of it.
+    final r = studio.region ?? studio.resultRect;
+    if (r == null || r.length < 4 || r[2] <= 0 || r[3] <= 0) {
       return Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble());
     }
     return Rect.fromLTWH(
@@ -158,13 +161,25 @@ class CanvasView extends StatelessWidget {
           // box — so the reveal and the line it is supposed to follow could sit
           // a few percent apart, and the new picture bled past the handle.
           // One paint, one boundary, no way for them to disagree.
-          CustomPaint(
-            painter: _ComparePainter(
-              result: result,
-              source: source,
-              srcView: srcView,
-              fraction: result == null ? 1 : 1 - studio.compare,
-              dpr: MediaQuery.devicePixelRatioOf(context),
+          // Isolated: only THIS painter changes on a new preview frame or a
+          // compare drag. Without the boundary each of those (~20×/s during a
+          // fit) re-rasters the shared layer — the 46px plate shadow and the
+          // full-canvas checker below — both of which are entirely static.
+          // The wipe listens to its OWN notifier: dragging it used to go through
+          // the studio's notifyListeners and rebuild the whole shell at pointer
+          // rate for a number only this painter and the seam read.
+          RepaintBoundary(
+            child: ValueListenableBuilder<double>(
+              valueListenable: studio.compareN,
+              builder: (context, cmp, _) => CustomPaint(
+                painter: _ComparePainter(
+                  result: result,
+                  source: source,
+                  srcView: srcView,
+                  fraction: result == null ? 1 : 1 - cmp,
+                  dpr: MediaQuery.devicePixelRatioOf(context),
+                ),
+              ),
             ),
           ),
           if (result != null && source != null)
@@ -200,20 +215,46 @@ class _CheckerPainter extends CustomPainter {
   static const _dark = Color(0xFF111213);
   static const _light = Color(0xFF17191A);
 
+  static ui.Image? _tile;
+
+  /// One 2×2-cell tile, tiled by a repeating shader — the same treatment the
+  /// editor's checker already had, while this one still emitted a drawRect per
+  /// cell (~10k on a large canvas). It matters most during a crossfade, when the
+  /// whole subtree is being rasterised into a layer.
+  static ui.Image _buildTile() {
+    final rec = ui.PictureRecorder();
+    final c = Canvas(rec);
+    c.drawRect(
+      const Rect.fromLTWH(0, 0, _cell * 2, _cell * 2),
+      Paint()..color = _dark,
+    );
+    final light = Paint()..color = _light;
+    c.drawRect(const Rect.fromLTWH(0, 0, _cell, _cell), light);
+    c.drawRect(const Rect.fromLTWH(_cell, _cell, _cell, _cell), light);
+    return rec.endRecording().toImageSync(
+      (_cell * 2).toInt(),
+      (_cell * 2).toInt(),
+    );
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
-    canvas.drawRect(Offset.zero & size, Paint()..color = _dark);
-    final paint = Paint()..color = _light;
-    final cols = (size.width / _cell).ceil();
-    final rows = (size.height / _cell).ceil();
-    for (var r = 0; r < rows; r++) {
-      for (var c = r.isEven ? 0 : 1; c < cols; c += 2) {
-        canvas.drawRect(
-          Rect.fromLTWH(c * _cell, r * _cell, _cell, _cell),
-          paint,
-        );
-      }
-    }
+    final tile = _tile ??= _buildTile();
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()
+        // filterQuality none: the tile is an exact pixel grid, and at 125%/150%
+        // scaling the default bilinear resample turned a crisp checker into a
+        // soft moire. Nearest keeps the cells as hard as the old per-cell rects.
+        ..filterQuality = FilterQuality.none
+        ..shader = ui.ImageShader(
+          tile,
+          TileMode.repeated,
+          TileMode.repeated,
+          Matrix4.identity().storage,
+          filterQuality: FilterQuality.none,
+        ),
+    );
   }
 
   @override
@@ -293,25 +334,46 @@ class _Seam extends StatelessWidget {
   void _set(double x) => studio.setCompare((1 - x / width).clamp(0.0, 1.0));
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Stack(
+    children: [
+      Positioned.fill(
+        child: MouseRegion(
+          cursor: SystemMouseCursors.resizeLeftRight,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onHorizontalDragStart: (d) => _set(d.localPosition.dx),
+            onHorizontalDragUpdate: (d) => _set(d.localPosition.dx),
+          ),
+        ),
+      ),
+      // Only the label moves with the drag; the gesture layer above is fixed.
+      // Positioned.fill so the label's box is pinned to this Stack rather than
+      // resolved from loose constraints. (An earlier comment here claimed a
+      // Stack with no non-positioned child collapses to zero — it does not,
+      // RenderStack gives it constraints.biggest. The fill is still the right
+      // shape: it says what the box IS instead of leaving it to whatever the
+      // parent happens to pass.) IgnorePointer keeps every pointer going to the
+      // drag layer beneath, which is where the gesture has always lived.
+      Positioned.fill(
+        child: IgnorePointer(
+          child: ValueListenableBuilder<double>(
+            valueListenable: studio.compareN,
+            builder: (context, cmp, _) => _label(context, cmp),
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Widget _label(BuildContext context, double cmp) {
     final x = _ComparePainter.seamAt(
       width,
-      1 - studio.compare,
+      1 - cmp,
       MediaQuery.devicePixelRatioOf(context),
     );
     return Stack(
       children: [
-        Positioned.fill(
-          child: MouseRegion(
-            cursor: SystemMouseCursors.resizeLeftRight,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragStart: (d) => _set(d.localPosition.dx),
-              onHorizontalDragUpdate: (d) => _set(d.localPosition.dx),
-            ),
-          ),
-        ),
-        if (studio.compare < 1)
+        if (cmp < 1)
           Positioned(
             left: x - 1,
             top: 0,
@@ -440,9 +502,20 @@ class _CropOverlayState extends State<CropOverlay> {
             // of fighting it on both.
             final k = _ratioOf(_ratio);
             if (k != null) {
-              final w = now.dx - start.dx;
-              final h = w.abs() / k * (now.dy < start.dy ? -1 : 1);
-              now = Offset(now.dx, start.dy + h);
+              final up = now.dy < start.dy;
+              var w = now.dx - start.dx;
+              var h = w.abs() / k;
+              // The DERIVED side has to stay on the picture too. Only the pointer axis was
+              // clamped, so a locked ratio drew freely past the top and bottom edges — and the
+              // engine intersects the region with the image, so the run then fitted a different
+              // rectangle from the one the user had just drawn on screen. Give back the width the
+              // clipped height cost, and the ratio holds instead of breaking at the edge.
+              final room = up ? start.dy : widget.studio.sourceH - start.dy;
+              if (h > room) {
+                h = room;
+                w = w.sign * h * k;
+              }
+              now = Offset(start.dx + w, start.dy + (up ? -h : h));
             }
             setState(() => _rect = Rect.fromPoints(start, now));
           },

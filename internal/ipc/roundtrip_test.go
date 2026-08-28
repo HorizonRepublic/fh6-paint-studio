@@ -200,11 +200,16 @@ func TestRegionAndSurroundSurviveTheWire(t *testing.T) {
 		if d.Geometry == nil || len(d.Geometry.Shapes) == 0 {
 			t.Fatal("done carried no geometry")
 		}
-		// Shape 0 is the base rectangle covering the whole fitted canvas, surround included. Once the
-		// surround is subtracted it starts OUTSIDE the region, at minus the border width; left at zero
-		// it would mean every shape in the document is offset by that border.
-		if x := d.Geometry.Shapes[0].Data[0]; x >= 0 {
-			t.Errorf("base rect starts at x=%.1f, want a negative origin — the surround was not taken back off", x)
+		// Shape 0 is the base rectangle, and it is the document's ONLY record of the canvas the
+		// geometry is expressed in — model.Geometry carries shapes and nothing else, so an importer
+		// takes the size from here. It must therefore describe the REGION, not the padded canvas the
+		// engine happened to fit. (This used to assert the opposite: that the rect kept the padded
+		// size at a negative origin, as a proxy for "the surround was subtracted". The proxy was
+		// wrong about the destination — re-opening an exported keep-inside run then laid the art
+		// into the corner of a canvas 20% too large. The subtraction itself is pinned directly, and
+		// without a GPU, by session's TestFinishUnpadsBackgroundRect.)
+		if b := d.Geometry.Shapes[0].Data; len(b) < 4 || b[0] != 0 || b[1] != 0 || b[2] != 32 || b[3] != 32 {
+			t.Errorf("base rect = %v, want [0 0 32 32] — the document must declare the region it is in", b)
 		}
 	case err := <-failed:
 		if err != nil && strings.Contains(err.Error(), "vulkan init failed") {
@@ -248,6 +253,48 @@ func TestConnectionLossFailsPendingRuns(t *testing.T) {
 		t.Fatal("a dropped connection left the run pending forever")
 	}
 	<-listenDone
+}
+
+// TestKnobDefaultsOverTheWire checks the expert panel's contract: without an image the values are
+// the mode's generic concrete defaults, and with one the image-dependent branches (flat's palette
+// split) are taken from the actual file. Pure CPU — no device needed.
+func TestKnobDefaultsOverTheWire(t *testing.T) {
+	cli, srv := net.Pipe()
+	server := NewServer(srv, srv)
+	go func() { _ = server.Serve() }()
+	c := NewClient(cli, cli)
+	go func() { _ = c.Listen() }()
+	defer cli.Close()
+
+	anime, err := c.KnobDefaults("anime", "")
+	if err != nil {
+		t.Fatalf("knobDefaults(anime): %v", err)
+	}
+	// AlphaMin crosses a float32 on its way here, so compare with slack.
+	if anime.PolishIters != 200 || anime.AlphaMin < 0.29 || anime.AlphaMin > 0.31 || anime.Random <= 0 {
+		t.Fatalf("anime defaults look wrong: iters=%d alphaMin=%v random=%d",
+			anime.PolishIters, anime.AlphaMin, anime.Random)
+	}
+	if anime.Alpha == nil || !*anime.Alpha {
+		t.Fatal("anime without a cutout should allow alpha")
+	}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.png")
+	writeTestImage(t, src, 64, 48) // three flat colours: the vector-flat palette branch
+	flat, err := c.KnobDefaults("flat", src)
+	if err != nil {
+		t.Fatalf("knobDefaults(flat): %v", err)
+	}
+	if flat.PolishIters != 600 {
+		t.Fatalf("flat on a 3-colour image should take the vector branch (600 iters), got %d", flat.PolishIters)
+	}
+
+	// A missing file must degrade to the generic answer, not an error: the panel may hold a path
+	// the user has since deleted.
+	if _, err := c.KnobDefaults("photo", filepath.Join(dir, "gone.png")); err != nil {
+		t.Fatalf("knobDefaults with a dead path: %v", err)
+	}
 }
 
 func writeTestImage(t *testing.T, path string, w, h int) {

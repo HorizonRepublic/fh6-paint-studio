@@ -36,7 +36,7 @@ func Load(path string, maxRes int) (*Prepared, error) {
 		return nil, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := decodeOriented(f) // EXIF-aware: phone JPEGs land upright, matching every viewer
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func LoadRegion(path string, maxRes int, fx, fy, fw, fh float64) (*Prepared, ima
 		return nil, image.Rectangle{}, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := decodeOriented(f) // EXIF-aware: phone JPEGs land upright, matching every viewer
 	if err != nil {
 		return nil, image.Rectangle{}, err
 	}
@@ -90,7 +90,7 @@ func LoadRegion(path string, maxRes int, fx, fy, fw, fh float64) (*Prepared, ima
 	if ch < 1 {
 		ch = 1
 	}
-	crop := image.NewRGBA(image.Rect(0, 0, cw, ch))
+	crop := image.NewNRGBA(image.Rect(0, 0, cw, ch)) // NRGBA: an RGBA crop premultiplies, quantising AA alpha edges and zeroing RGB under a=0
 	draw.Draw(crop, crop.Bounds(), img, image.Pt(cx, cy), draw.Src)
 	return PrepareFromImage(crop, maxRes), image.Rect(cx, cy, cx+cw, cy+ch), nil
 }
@@ -121,6 +121,49 @@ func PadTransparent(prep *Prepared, padFrac float64) (*Prepared, int) {
 	return &Prepared{W: nw, H: nh, Pixels: px, Background: prep.Background, HasTransparency: true, PaddedOpaque: !prep.HasTransparency}, pad
 }
 
+// UnpadPrepared is the inverse of PadTransparent on the PIXELS: it returns the w×h content rectangle
+// sitting pad px inside prep, as a fresh Prepared carrying the pre-pad transparency flags. A no-op
+// when pad<=0 or the rectangle does not fit.
+//
+// It exists because a padded source is the right thing to FIT and the wrong thing to ANALYSE. The
+// surround is transparent black, and every analysis in this project reads colour without alpha — so
+// to a luma extractor the margin is a maximum-contrast step exactly on the content rectangle, and it
+// answers with a frame around the whole picture.
+func UnpadPrepared(prep *Prepared, pad, w, h int) *Prepared {
+	if prep == nil || pad <= 0 || w <= 0 || h <= 0 || w+2*pad > prep.W || h+2*pad > prep.H {
+		return prep
+	}
+	px := make([]float32, w*h*4)
+	for y := 0; y < h; y++ {
+		src := ((y+pad)*prep.W + pad) * 4
+		copy(px[y*w*4:(y+1)*w*4], prep.Pixels[src:src+w*4])
+	}
+	return &Prepared{W: w, H: h, Pixels: px, Background: prep.Background,
+		HasTransparency: !prep.PaddedOpaque, PaddedOpaque: false}
+}
+
+// UnpadGeometry maps a padded run's shapes back into the original canvas: it shifts everything by
+// -pad and then RESTATES the background rectangle as the view.
+//
+// The restate is the part that is easy to forget, and forgetting it produces a document in a
+// different dialect. model.Geometry carries shapes and nothing else, so shapes[0] is the only
+// record of the canvas an export was fitted at, and every reader takes the size from it —
+// TranslateShapes deliberately moves an origin and never a size, so on its own it leaves the rect
+// declaring the PADDED dimensions at (-pad,-pad) and the art lands in the corner of a canvas 20%
+// too large. Both the daemon and the CLI unpad, so both call this.
+func UnpadGeometry(shapes []model.Shape, pad, w, h int) []model.Shape {
+	if pad <= 0 {
+		return shapes
+	}
+	shapes = TranslateShapes(shapes, -float64(pad), -float64(pad))
+	if len(shapes) > 0 && shapes[0].Type == model.TypeRectangle && len(shapes[0].Data) >= 4 {
+		d := shapes[0].Data
+		d[0], d[1] = 0, 0
+		d[2], d[3] = float64(w), float64(h)
+	}
+	return shapes
+}
+
 // TranslateShapes shifts every shape's position by (dx,dy) canvas pixels, in place, returning the
 // slice. Used to map a padded reconstruction's geometry back into the original (un-padded) canvas after
 // a transparent-surround run, so preview/export/inject coordinates land in the original image space.
@@ -144,7 +187,7 @@ func TranslateShapes(shapes []model.Shape, dx, dy float64) []model.Shape {
 				d[2] += dx
 				d[3] += dy
 			}
-		default: // ellipse/rect/background: [cx,cy,...]
+		default: // background rect [x,y,w,h] and centre-based kinds [cx,cy,...]: shift the origin only
 			if len(d) >= 2 {
 				d[0] += dx
 				d[1] += dy
@@ -194,8 +237,11 @@ func PrepareFromImage(img image.Image, maxRes int) *Prepared {
 		a := float32(nrgba.Pix[i*4+3]) / 255
 		// Linear-light mode: the engine composites in the space FH6 renders in, so decode the
 		// sRGB target to linear here (alpha stays straight). All downstream maths is unchanged.
+		// Byte-table decode: same values, ~200x cheaper than the per-pixel pow at native res.
 		if model.LinearLight {
-			r, g, blu = model.SRGBToLinear(r), model.SRGBToLinear(g), model.SRGBToLinear(blu)
+			r = model.SRGBToLinearByte(nrgba.Pix[i*4+0])
+			g = model.SRGBToLinearByte(nrgba.Pix[i*4+1])
+			blu = model.SRGBToLinearByte(nrgba.Pix[i*4+2])
 		}
 		px[i*4+0], px[i*4+1], px[i*4+2], px[i*4+3] = r, g, blu, a
 		if a < 0.5 {

@@ -52,6 +52,9 @@ func anneal(be backend.Backend, env *greedyEnv, shapes []model.Shape, curErr flo
 	T := math.Max(bestErr*annealTemp0, 1e-9)
 
 	for i := 0; i < iters; i++ {
+		if opt.Cancel != nil && opt.Cancel() {
+			break // Stop mid-anneal: the best-ever set below is a complete result
+		}
 		trial := annealKick(be, env, cloneShapes(cur), initCanvas, target, weight, opt, w, h, kick, rng)
 		trialP, trialErr := applyPolish(be, trial, rerender(be, initCanvas, trial), initCanvas, innerOpt, w, h, tm)
 		dE := trialErr - curE
@@ -107,9 +110,7 @@ func annealKick(be backend.Backend, env *greedyEnv, shapes []model.Shape, initCa
 	// Re-render the survivors, then regrow the freed slots against the residual (the sampler steers the
 	// regrowth onto the now-worst-fit regions — the discrete relocation polish's gradients cannot make).
 	_ = be.Reset(initCanvas)
-	for _, s := range kept[1:] {
-		_ = be.Apply(shapeToCandidate(s))
-	}
+	applyShapes(be, kept[1:])
 	grid, gw, gh, _ := be.ErrorGrid()
 	sampler := NewErrorSampler(grid, gw, gh, w, h)
 	for len(kept) < n {

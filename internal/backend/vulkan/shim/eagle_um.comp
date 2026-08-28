@@ -1,13 +1,20 @@
 #version 450
+#ifdef FH6_FP32
+#define REAL float
+#define RVEC3 vec3
+#else
 #extension GL_ARB_gpu_shader_fp64 : require
+#define REAL double
+#define RVEC3 dvec3
+#endif
 // eagle_um.comp — u*m into the consumed variance plane (u sits in t2 after the backward hpfin).
 // pc.mode: 0 -> vx = t2*mx, 1 -> vy = t2*my.
 layout(local_size_x = 256) in;
-layout(std430, binding = 5)           buffer VX { double vx[]; };
-layout(std430, binding = 6)           buffer VY { double vy[]; };
-layout(std430, binding = 7)  readonly buffer MX { double mx[]; };
-layout(std430, binding = 8)  readonly buffer MY { double my[]; };
-layout(std430, binding = 13) readonly buffer T2 { double t2[]; };
+layout(std430, binding = 5)           buffer VX { REAL vx[]; };
+layout(std430, binding = 6)           buffer VY { REAL vy[]; };
+layout(std430, binding = 7)  readonly buffer MX { REAL mx[]; };
+layout(std430, binding = 8)  readonly buffer MY { REAL my[]; };
+layout(std430, binding = 13) readonly buffer T2 { REAL t2[]; };
 layout(push_constant) uniform PC { int w, h, dir, mode; float lambda; } pc;
 void main() {
     int i = int(gl_GlobalInvocationID.x);
