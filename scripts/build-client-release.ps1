@@ -238,14 +238,31 @@ try {
     # nothing else. Everything still needed to run, and to reuse the shim on the next -SkipDLL build,
     # lives inside bin\bin\. Staging has already consumed bin\engined.exe and bin\fh6vk.dll by now.
     # Wrapped so a locked bin\ (the app left running) warns instead of failing the finished release.
+    # Probe the locks BEFORE deleting anything: the old order removed what it could,
+    # died on the still-running exe, and left bin\ half-emptied and unrunnable.
     $binRoot = Join-Path $root 'bin'
-    try {
-        Get-ChildItem $binRoot -Force | Remove-Item -Recurse -Force
-        Copy-Item (Join-Path $stage 'FH6 Paint Studio.exe') $binRoot
-        Copy-Item (Join-Path $stage 'bin') $binRoot -Recurse
-        Write-Host "bin\ is now the runnable prod layout" -ForegroundColor Green
-    } catch {
-        Write-Host "Could not refresh bin\ (is the app running?): $_" -ForegroundColor Yellow
+    $lockedFile = $null
+    foreach ($f in @((Join-Path $binRoot 'FH6 Paint Studio.exe'),
+                     (Join-Path $binRoot 'bin\engine\engined.exe'))) {
+        if (Test-Path $f) {
+            try {
+                $h = [IO.File]::Open($f, 'Open', 'ReadWrite', 'None'); $h.Close()
+            } catch {
+                $lockedFile = $f; break
+            }
+        }
+    }
+    if ($lockedFile) {
+        Write-Host "bin\ is in use ($(Split-Path $lockedFile -Leaf) locked - app still running?); left untouched. The release itself is complete." -ForegroundColor Yellow
+    } else {
+        try {
+            Get-ChildItem $binRoot -Force | Remove-Item -Recurse -Force
+            Copy-Item (Join-Path $stage 'FH6 Paint Studio.exe') $binRoot
+            Copy-Item (Join-Path $stage 'bin') $binRoot -Recurse
+            Write-Host "bin\ is now the runnable prod layout" -ForegroundColor Green
+        } catch {
+            Write-Host "Could not refresh bin\: $_" -ForegroundColor Yellow
+        }
     }
 
     $size = [math]::Round((Get-Item $archive).Length / 1MB, 1)
