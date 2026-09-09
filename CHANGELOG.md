@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.0.2](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v3.0.1...v3.0.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/image to v0.46.0 ([#73](https://github.com/HorizonRepublic/fh6-paint-studio/issues/73)) ([9f37fd7](https://github.com/HorizonRepublic/fh6-paint-studio/commit/9f37fd75b37dc330058612d0210900b9b63f5e1e))
+
 ## [3.0.1](https://github.com/HorizonRepublic/fh6-paint-studio/compare/v3.0.0...v3.0.1) (2026-08-28)
 
 
