@@ -6,7 +6,7 @@ require (
 	gioui.org v0.10.2
 	golang.org/x/image v0.46.0
 	golang.org/x/sys v0.48.0
-	golang.org/x/text v0.42.0
+	golang.org/x/text v0.43.0
 )
 
 require (
