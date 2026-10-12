@@ -65,7 +65,7 @@ jobs:
           "NEXUS_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Publish to Nexus Mods
-        uses: Nexus-Mods/upload-action@v1.0.0-beta.10
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.11
         with:
           api_key: ${{ secrets.NEXUS_API_KEY }}
           file_id: "7536650"
